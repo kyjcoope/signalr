@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/signalr/signalr_consumer_session.dart';
 
+import 'dart:developer' as dev;
+
 class WebRtcDisplay extends StatefulWidget {
   const WebRtcDisplay({super.key});
   @override
@@ -13,7 +15,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     signalRUrl: 'https://jci-osp-api-gateway-dev.osp-jci.com/SignalingHub',
   );
   final renderer = RTCVideoRenderer();
-  final camId = 'nvr-victoriaproxmox-1';
+  final camId = 'prateek-1VMS-1';
 
   @override
   void initState() {
@@ -37,8 +39,13 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   }
 
   void _onTrack(RTCTrackEvent e) {
-    if (e.track.kind == 'video') renderer.srcObject = e.streams.first;
-    setState(() => {});
+    dev.log('Track event: ${e.track.kind} from ${e.streams.first.id}');
+    if (e.track.kind == 'video') {
+      dev.log('Setting video track to renderer');
+      setState(() {
+        renderer.srcObject = e.streams.first;
+      });
+    }
   }
 
   @override

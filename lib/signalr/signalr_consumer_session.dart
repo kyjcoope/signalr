@@ -42,8 +42,6 @@ class SignalRConsumerSession implements IWebrtcSession {
   final StreamController<String> _messageController =
       StreamController<String>.broadcast();
 
-  MediaStream? _localStream;
-
   Set<String> get producers => _producers;
   String? get selectedProducer => _selectedProducer;
   @override
@@ -68,26 +66,6 @@ class SignalRConsumerSession implements IWebrtcSession {
     _selectedProducer = null;
   }
 
-  Future<void> setupLocalTrack() async {
-    if (_localStream != null) return;
-
-    _localStream = await navigator.mediaDevices.getUserMedia({
-      'audio': true,
-      'video': {
-        'facingMode': 'user',
-        'width': {'min': 640, 'ideal': 1280, 'max': 1920},
-        'height': {'min': 480, 'ideal': 720, 'max': 1080},
-      },
-    });
-
-    dev.log('Local stream initialized: ${_localStream!.id}');
-    if (_peerConnection != null) {
-      for (var track in _localStream!.getTracks()) {
-        _peerConnection!.addTrack(track, _localStream!);
-      }
-    }
-  }
-
   void addDesiredPeer(String peer) {
     if (_desiredPeers.contains(peer)) return;
     _desiredPeers.add(peer);
@@ -102,13 +80,31 @@ class SignalRConsumerSession implements IWebrtcSession {
   Future<void> initLocalConnection() async {
     if (_peerConnection != null) return;
 
+    final publicIceServers = [
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {
+        'urls': ['turn:relay1.expressturn.com:3478'],
+        'credential': 'JZEOEt2V3Qb0y27GRntt2u2PAYA=',
+        'username': 'ef4637CA62D2F3A41C1198C',
+      },
+      // Backup public TURN server
+      {
+        'urls': ['turn:openrelay.metered.ca:80'],
+        'credential': 'openrelayproject',
+        'username': 'openrelay',
+      },
+    ];
+
     final config = <String, dynamic>{
-      'iceServers': iceServers.map((ice) => ice.toJson()).toList(),
+      'iceServers': publicIceServers,
+      'iceTransportPolicy': 'relay', // Force TURN only
+      'sdpSemantics': 'unified-plan',
+      'rtcpMuxPolicy': 'require',
+      'iceCandidatePoolSize': 10,
     };
 
     dev.log('Initializing WebRTC peer connection: $config');
     var pc = await createPeerConnection(config);
-    //var capabilities = await getRtpReceiverCapabilities('video');
 
     // attach callbacks
     pc.onTrack = _onTrack;
@@ -125,6 +121,19 @@ class SignalRConsumerSession implements IWebrtcSession {
       dev.log(
         'remote pc: onIceConnectionState($state), state2($state2) ${DateTime.now()}',
       );
+
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        dev.log('🎉 ICE CONNECTION ESTABLISHED!');
+        // Log which candidate pair was selected
+        _logSelectedCandidatePair();
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        dev.log('❌ ICE CONNECTION FAILED - Network connectivity issue');
+        // Try to restart ICE
+        _restartIce();
+      } else if (state ==
+          RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        dev.log('⚠️ ICE CONNECTION DISCONNECTED - Attempting reconnection');
+      }
     };
     pc.onConnectionState = (state) async {
       dev.log('remote pc: onConnectionState($state) ${DateTime.now()}');
@@ -139,50 +148,74 @@ class SignalRConsumerSession implements IWebrtcSession {
     pc.onRenegotiationNeeded = _onRemoteRenegotiationNeeded;
     pc.onDataChannel = _onDataChannel;
 
-    RTCRtpTransceiver? videoTransceiver = await pc.addTransceiver(
-      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-    );
-
-    final capabilities = await getRtpReceiverCapabilities('video');
-    if (capabilities.codecs != null) {
-      List<RTCRtpCodecCapability> codecs =
-          capabilities.codecs!
-              .where(
-                (codec) =>
-                    codec.mimeType.toLowerCase() == 'h264' ||
-                    codec.mimeType.toLowerCase() == 'video/h264',
-              )
-              .toList();
-      if (codecs.isNotEmpty) {
-        await videoTransceiver.setCodecPreferences(codecs);
-        for (var codec in codecs) {
-          dev.log(
-            'Preferred Video Codec Set: ${codec.mimeType}, ${codec.sdpFmtpLine}',
-          );
-        }
-      } else {
-        dev.log(
-          'H264 codec not found in local capabilities. Cannot set preference.',
-        );
-      }
-    } else {
-      dev.log(
-        'WebRTCRemotePeer: Warning - Could not get receiver capabilities.',
-      );
-    }
+    // Don't add transceivers here - let them be created from the remote offer
+    // This ensures proper matching of media lines
 
     _peerConnection = pc;
-    //startStatsProbe(_peerConnection!);
+  }
+
+  Future<void> _logSelectedCandidatePair() async {
+    try {
+      var stats = await _peerConnection!.getStats();
+      for (var stat in stats) {
+        if (stat.type == 'candidate-pair' &&
+            stat.values['state'] == 'succeeded') {
+          dev.log('✅ Selected candidate pair: ${stat.values}');
+        }
+      }
+    } catch (e) {
+      dev.log('Failed to get stats: $e');
+    }
+  }
+
+  Future<void> _restartIce() async {
+    try {
+      dev.log('Attempting ICE restart...');
+      await _peerConnection!.restartIce();
+    } catch (e) {
+      dev.log('ICE restart failed: $e');
+    }
   }
 
   void _onIceCandidate(RTCIceCandidate candidate) {
     dev.log('Local ICE Candidate: ${candidate.toMap()}');
+
+    var candidateStr = candidate.candidate ?? '';
+
+    // Enhanced candidate analysis
+    bool isHost = candidateStr.contains('typ host');
+    bool isSrflx = candidateStr.contains('typ srflx');
+    bool isRelay = candidateStr.contains('typ relay');
+
+    // Extract IP address for analysis
+    var ipMatch = RegExp(r'(\d+\.\d+\.\d+\.\d+)').firstMatch(candidateStr);
+    var ip = ipMatch?.group(1) ?? 'unknown';
+
+    dev.log(
+      'Candidate Analysis: Host=$isHost, SRFLX=$isSrflx, Relay=$isRelay, IP=$ip',
+    );
+
+    // Skip mDNS candidates
+    if (candidateStr.contains('.local')) {
+      dev.log('Skipping mDNS candidate: $candidateStr');
+      return;
+    }
+
+    // 🔥 Send ALL candidates for maximum compatibility testing
+    if (isHost) {
+      dev.log('✅ Sending HOST candidate: $ip');
+    } else if (isSrflx) {
+      dev.log('✅ Sending SRFLX candidate: $ip');
+    } else if (isRelay) {
+      dev.log('✅ Sending RELAY candidate: $ip');
+    }
+
     var ice = RTCIceCandidate(
       candidate.candidate,
       candidate.sdpMid,
       candidate.sdpMLineIndex,
     );
+
     if (_session != null) {
       signalingHandler.sendTrickle(
         TrickleMessage(session: _session!, candidate: ice, id: '4'),
@@ -248,22 +281,32 @@ class SignalRConsumerSession implements IWebrtcSession {
 
   void _onTrack(RTCTrackEvent event) {
     dev.log('onTrack: ${event.streams.length} ${event.track.kind}');
+
+    // Make sure the track is properly added to your video renderer
+    if (event.track.kind == 'video') {
+      dev.log('Video track received: ${event.track.id}');
+      // You need to set this track to your RTCVideoRenderer
+      // Make sure you have a video renderer widget in your UI that displays this track
+    }
+
     onTrack?.call(event);
   }
 
   Future<void> _negotiate(InviteResponse msg) async {
     final oaConstraints = <String, dynamic>{
       'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': true},
-      'optional': [],
+      'optional': [
+        {'DtlsSrtpKeyAgreement': true},
+      ],
     };
 
     final remoteDesc = RTCSessionDescription(msg.offer.sdp, msg.offer.type);
-
     dev.log('''
         **** Received Offer ****
         \n ${remoteDesc.toMap()}
         ****''');
 
+    // Don't pre-create transceivers - let WebRTC create them from the offer
     dev.log('Attempting to set remote description...');
     await _peerConnection!
         .setRemoteDescription(remoteDesc)
@@ -274,11 +317,71 @@ class SignalRConsumerSession implements IWebrtcSession {
           dev.log('setRemoteDescription FAILED: $e', error: e);
         });
 
+    // Now configure the transceivers that were created from the remote offer
+    var transceivers = await _peerConnection!.getTransceivers();
+    dev.log(
+      'Found ${transceivers.length} transceivers after setRemoteDescription',
+    );
+
+    for (var i = 0; i < transceivers.length; i++) {
+      var transceiver = transceivers[i];
+      dev.log('Processing transceiver $i: MID=${transceiver.mid}');
+
+      try {
+        var currentDir = await transceiver.getDirection();
+        dev.log('  Current direction: $currentDir');
+
+        // Force all transceivers to receive-only
+        await transceiver.setDirection(TransceiverDirection.RecvOnly);
+        dev.log('  Set direction to RecvOnly');
+
+        // Log receiver track info
+        if (transceiver.receiver.track != null) {
+          dev.log(
+            '  Receiver track: ${transceiver.receiver.track!.kind} - ${transceiver.receiver.track!.id}',
+          );
+        }
+      } catch (e) {
+        dev.log('  Failed to configure transceiver: $e');
+      }
+    }
+
+    // Wait for WebRTC internal state to stabilize
+    dev.log('Waiting for WebRTC internal state to stabilize...');
+    await Future.delayed(const Duration(milliseconds: 200));
+
+    // Create answer with explicit video/audio constraints
+    dev.log('Creating answer...');
     var answer = await _peerConnection!.createAnswer(oaConstraints);
+
     dev.log('''
         **** Creating Answer ****
         \n ${answer.toMap()}
         ****''');
+
+    // Check if video is being accepted or rejected
+    if (answer.sdp != null && answer.sdp!.contains('m=video 0')) {
+      dev.log('WARNING: Answer still rejecting video (m=video 0)');
+
+      // Try to diagnose the issue
+      dev.log('Diagnosing video rejection...');
+      var finalTransceivers = await _peerConnection!.getTransceivers();
+      for (var i = 0; i < finalTransceivers.length; i++) {
+        var t = finalTransceivers[i];
+        dev.log(
+          'Transceiver $i: MID=${t.mid}, Track=${t.receiver.track?.kind}',
+        );
+        try {
+          var dir = await t.getDirection();
+          var currentDir = await t.getCurrentDirection();
+          dev.log('  Direction: $dir, Current: $currentDir');
+        } catch (e) {
+          dev.log('  Direction error: $e');
+        }
+      }
+    } else {
+      dev.log('SUCCESS: Answer accepts video!');
+    }
 
     dev.log('Attempting to set local description...');
     await _peerConnection!
@@ -289,6 +392,7 @@ class SignalRConsumerSession implements IWebrtcSession {
         .catchError((e) {
           dev.log('setLocalDescription FAILED: $e', error: e);
         });
+
     await signalingHandler.sendInvite(
       InviteRequest(
         session: msg.session,
@@ -317,6 +421,7 @@ class SignalRConsumerSession implements IWebrtcSession {
             signalingHandler.connectionId,
             authorization: '',
             deviceId: match,
+            iceServers: iceServers,
           ),
         );
       }

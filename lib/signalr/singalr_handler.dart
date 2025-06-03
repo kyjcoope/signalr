@@ -13,9 +13,11 @@ class SignalRHandler {
     required this.onInvite,
     required this.onTrickle,
     required this.signalServiceUrl,
-  }) : _connection = HubConnectionBuilder()
-            .withUrl(signalServiceUrl)
-            .withAutomaticReconnect(retryDelays: [0, 5000, 5000, 5000]).build();
+  }) : _connection =
+           HubConnectionBuilder()
+               .withUrl(signalServiceUrl)
+               .withAutomaticReconnect(retryDelays: [0, 5000, 5000, 5000])
+               .build();
   void Function(ConnectResponse) onConnect;
   void Function(RegisterResponse) onRegister;
   void Function(InviteResponse) onInvite;
@@ -34,19 +36,26 @@ class SignalRHandler {
 
   Future<void> setupSignaling() async {
     _connection.on(
-        'error', (arguments) => dev.log('WebRTC SignalR Error: $arguments'));
-    _connection
-        .onreconnecting(({error}) => dev.log('reconnecting with $error'));
+      'error',
+      (arguments) => dev.log('WebRTC SignalR Error: $arguments'),
+    );
+    _connection.onreconnecting(
+      ({error}) => dev.log('reconnecting with $error'),
+    );
     _connection.onreconnected(
-        ({connectionId}) => dev.log('reconnected with $connectionId'));
+      ({connectionId}) => dev.log('reconnected with $connectionId'),
+    );
     _connection.onclose(({error}) => dev.log('Connection closed. $error'));
     _connection.on('register', _onRegister);
     _connection.on('connect', _onConnect);
     _connection.on('invite', _onInvite);
     _connection.on('trickle', _onTrickle);
 
-    await _connection.start()?.onError((e, stack) => dev.log(
-        'WebRTC SignalR Connection Error starting subscription $e at $stack'));
+    await _connection.start()?.onError(
+      (e, stack) => dev.log(
+        'WebRTC SignalR Connection Error starting subscription $e at $stack',
+      ),
+    );
 
     dev.log(
       'Initial Connection Start: ${_connection.state}, id is ${_connection.connectionId}',
@@ -57,8 +66,10 @@ class SignalRHandler {
 
   void _onRegister(List<Object?>? arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    dev.log('Received register message: ${arguments.length}',
-        name: 'SignalRHandler._onRegister');
+    dev.log(
+      'Received register message: ${arguments.length}',
+      name: 'SignalRHandler._onRegister',
+    );
     dev.log('Received register message: ${arguments.length}');
     final data = jsonDecode(arguments[0].toString());
     onRegister(RegisterResponse.fromJson(data));
@@ -67,17 +78,19 @@ class SignalRHandler {
   void _onConnect(arguments) {
     if (arguments == null || arguments.isEmpty) return;
     dev.log('Received connect message: $arguments');
-    final data = arguments[0] is Map
-        ? arguments[0]
-        : jsonDecode(arguments[0].toString());
+    final data =
+        arguments[0] is Map
+            ? arguments[0]
+            : jsonDecode(arguments[0].toString());
     onConnect(ConnectResponse.fromJson(data));
   }
 
   void _onInvite(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    final data = arguments[0] is Map
-        ? arguments[0]
-        : jsonDecode(arguments[0].toString());
+    final data =
+        arguments[0] is Map
+            ? arguments[0]
+            : jsonDecode(arguments[0].toString());
     final inviteResponse = InviteResponse.fromJson(data);
     dev.log('Received invite message: $inviteResponse');
     onInvite(inviteResponse);
@@ -85,9 +98,21 @@ class SignalRHandler {
 
   void _onTrickle(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    final data = arguments[0] is Map
-        ? arguments[0]
-        : jsonDecode(arguments[0].toString());
+    final data =
+        arguments[0] is Map
+            ? arguments[0]
+            : jsonDecode(arguments[0].toString());
+
+    if (data['iceCandidate'] != null) {
+      final candidate = data['iceCandidate'];
+      if (candidate['sdpMid'] == null) {
+        candidate['sdpMid'] = candidate['sdpMLineIndex']?.toString() ?? "0";
+      }
+      if (candidate['sdpMLineIndex'] == null) {
+        candidate['sdpMLineIndex'] = 0;
+      }
+    }
+
     final trickleResponse = TrickleMessage.fromJson(data);
     dev.log('Received trickle message: $trickleResponse');
     onTrickle(trickleResponse);
@@ -97,17 +122,17 @@ class SignalRHandler {
     dev.log(
       'Sending WebRTC SignalR Message: status is ${_connection.state}, id is ${_connection.connectionId}',
     );
-    await _connection
-        .invoke('SendMessage', args: [message]).catchError((error) {
+    await _connection.invoke('SendMessage', args: [message]).catchError((
+      error,
+    ) {
       dev.log('Error sending SignalR message:', error: error);
       return false;
     });
   }
 
-  Future<void> sendRegister(String auth) async => await _send(RegisterRequest(
-        authorization: auth,
-        id: _connection.connectionId ?? '',
-      ));
+  Future<void> sendRegister(String auth) async => await _send(
+    RegisterRequest(authorization: auth, id: _connection.connectionId ?? ''),
+  );
 
   Future<void> sendConnect(ConnectRequest request) async =>
       await _send(request);

@@ -124,7 +124,8 @@ class IceServersParam implements SignalRParam {
   SignalRParamType get type => SignalRParamType.iceServers;
 
   @override
-  String get value => iceServers.toString();
+  List<Map<String, Object?>> get value =>
+      iceServers.map((ice) => ice.toJson()).toList();
 }
 
 class DeviceGuidParam implements SignalRParam {

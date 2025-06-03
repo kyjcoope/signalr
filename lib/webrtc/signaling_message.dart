@@ -29,10 +29,7 @@ class WelcomeMessage implements SignalingMessage {
   @override
   SignalingMessageType get type => SignalingMessageType.welcome;
 
-  Map<String, String> toJson() => {
-        'type': type.json,
-        'peerId': peerId,
-      };
+  Map<String, String> toJson() => {'type': type.json, 'peerId': peerId};
 }
 
 class Producer {
@@ -43,10 +40,7 @@ class Producer {
   String id;
   Map<String, dynamic> meta;
 
-  Map<String, Object> toJson() => {
-        'id': id,
-        'meta': meta,
-      };
+  Map<String, Object> toJson() => {'id': id, 'meta': meta};
 
   @override
   String toString() => 'Producer: $id';
@@ -58,19 +52,13 @@ class ListMessage implements SignalingMessage {
   ListMessage({required this.producers});
 
   factory ListMessage.fromJson(dynamic json) => ListMessage(
-        producers: listFromJson(
-          json['producers'],
-          (p) => Producer.fromJson(p),
-        ),
-      );
+    producers: listFromJson(json['producers'], (p) => Producer.fromJson(p)),
+  );
   final List<Producer> producers;
   @override
   SignalingMessageType get type => SignalingMessageType.list;
 
-  Map<String, Object> toJson() => {
-        'type': type.json,
-        'producers': producers,
-      };
+  Map<String, Object> toJson() => {'type': type.json, 'producers': producers};
 }
 
 class PeerStatusChangedMessage implements SignalingMessage {
@@ -94,11 +82,11 @@ class PeerStatusChangedMessage implements SignalingMessage {
   SignalingMessageType get type => SignalingMessageType.peerStatusChanged;
 
   Map<String, Object> toJson() => {
-        'type': type.json,
-        'peerId': peerId,
-        'roles': roles,
-        'meta': meta,
-      };
+    'type': type.json,
+    'peerId': peerId,
+    'roles': roles,
+    'meta': meta,
+  };
 }
 
 class StartSessionMessage implements SignalingMessage {
@@ -109,10 +97,10 @@ class StartSessionMessage implements SignalingMessage {
   });
 
   factory StartSessionMessage.fromJson(dynamic json) => StartSessionMessage(
-        peerId: json['peerId'] ?? '',
-        sessionId: json['sessionId'] ?? '',
-        offer: json['offer'] ?? '',
-      );
+    peerId: json['peerId'] ?? '',
+    sessionId: json['sessionId'] ?? '',
+    offer: json['offer'] ?? '',
+  );
   final String peerId;
   final String sessionId;
   final String? offer;
@@ -121,33 +109,30 @@ class StartSessionMessage implements SignalingMessage {
   SignalingMessageType get type => SignalingMessageType.startSession;
 
   Map<String, String?> toJson() => {
-        'type': type.json,
-        'peerId': peerId,
-        'sessionId': sessionId,
-        'offer': offer,
-      };
+    'type': type.json,
+    'peerId': peerId,
+    'sessionId': sessionId,
+    'offer': offer,
+  };
 }
 
 class SessionStartedMessage implements SignalingMessage {
-  SessionStartedMessage({
-    required this.sessionId,
-    required this.peerId,
-  });
+  SessionStartedMessage({required this.sessionId, required this.peerId});
 
   factory SessionStartedMessage.fromJson(dynamic json) => SessionStartedMessage(
-        sessionId: json['sessionId'] ?? '',
-        peerId: json['peerId'] ?? '',
-      );
+    sessionId: json['sessionId'] ?? '',
+    peerId: json['peerId'] ?? '',
+  );
   final String sessionId;
   final String peerId;
   @override
   SignalingMessageType get type => SignalingMessageType.sessionStarted;
 
   Map<String, String> toJson() => {
-        'type': type.json,
-        'sessionId': sessionId,
-        'peerId': peerId,
-      };
+    'type': type.json,
+    'sessionId': sessionId,
+    'peerId': peerId,
+  };
 }
 
 class EndSessionMessage implements SignalingMessage {
@@ -159,50 +144,38 @@ class EndSessionMessage implements SignalingMessage {
   @override
   SignalingMessageType get type => SignalingMessageType.endSession;
 
-  Map<String, String> toJson() => {
-        'type': type.json,
-        'sessionId': sessionId,
-      };
+  Map<String, String> toJson() => {'type': type.json, 'sessionId': sessionId};
 }
 
 extension RTCIceCandidateExt on RTCIceCandidate {
   static RTCIceCandidate fromJson(dynamic json) => RTCIceCandidate(
-        json['candidate'],
-        json['sdpMid'],
-        json['sdpMLineIndex'],
-      );
-
+    json['candidate'],
+    json['sdpMid'] ?? json['sdpMLineIndex']?.toString() ?? "0",
+    json['sdpMLineIndex'] ?? 0,
+  );
   Map<String, Object?> toJson() => {
-        'candidate': candidate,
-        'sdpMid': sdpMid,
-        'sdpMLineIndex': sdpMLineIndex,
-      };
+    'candidate': candidate,
+    'sdpMid': sdpMid,
+    'sdpMLineIndex': sdpMLineIndex,
+  };
 }
 
 class SdpWrapper {
   SdpWrapper({required this.type, required this.sdp});
 
-  factory SdpWrapper.fromJson(dynamic json) => SdpWrapper(
-        type: json['type'] ?? '',
-        sdp: json['sdp'] ?? '',
-      );
+  factory SdpWrapper.fromJson(dynamic json) =>
+      SdpWrapper(type: json['type'] ?? '', sdp: json['sdp'] ?? '');
   String type;
   String sdp;
 
-  Map<String, String> toJson() => {
-        'type': type,
-        'sdp': sdp,
-      };
+  Map<String, String> toJson() => {'type': type, 'sdp': sdp};
 
   @override
   String toString() => 'SDP: $type :: $sdp';
 }
 
 extension RTCSEssionDescriptionExt on RTCSessionDescription {
-  Map<String, String> toJson() => {
-        'type': type ?? '',
-        'sdp': sdp ?? '',
-      };
+  Map<String, String> toJson() => {'type': type ?? '', 'sdp': sdp ?? ''};
 }
 
 class PeerMessage implements SignalingMessage {
@@ -213,10 +186,10 @@ class PeerMessage implements SignalingMessage {
   });
 
   factory PeerMessage.fromJson(dynamic json) => PeerMessage(
-        sessionId: json['sessionId'] ?? '',
-        sdp: SdpWrapper.fromJson(json['sdp'] ?? {}),
-        iceCandiate: json['inceCandiate'] ?? {},
-      );
+    sessionId: json['sessionId'] ?? '',
+    sdp: SdpWrapper.fromJson(json['sdp'] ?? {}),
+    iceCandiate: json['inceCandiate'] ?? {},
+  );
   final String sessionId;
   final SdpWrapper sdp;
   final Map<dynamic, dynamic> iceCandiate;
@@ -225,9 +198,9 @@ class PeerMessage implements SignalingMessage {
   SignalingMessageType get type => SignalingMessageType.peer;
 
   Map<String, dynamic> toJson() => {
-        'type': type.json,
-        'sessionId': sessionId,
-        'sdp': sdp.toJson(),
-        'iceCandiate': iceCandiate,
-      };
+    'type': type.json,
+    'sessionId': sessionId,
+    'sdp': sdp.toJson(),
+    'iceCandiate': iceCandiate,
+  };
 }
