@@ -139,6 +139,9 @@ class SignalRHandler {
 
   Future<void> sendInvite(InviteRequest request) async => await _send(request);
 
+  Future<void> sendInviteAnswer(InviteAnswerMessage request) async =>
+      await _send(request);
+
   Future<void> sendTrickle(TrickleMessage request) async =>
       await _send(request);
 }

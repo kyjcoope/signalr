@@ -83,6 +83,8 @@ class SignalRConsumerSession implements IWebrtcSession {
       {'urls': 'stun:stun.l.google.com:19302'},
       {'urls': 'stun:stun1.l.google.com:19302'},
       {'urls': 'stun:stun2.l.google.com:19302'},
+      {'urls': 'stun:stun3.l.google.com:19302'},
+      {'urls': 'stun:stun4.l.google.com:19302'},
       ...iceServers.map((e) => e.toJson()),
     ];
 
@@ -351,10 +353,10 @@ class SignalRConsumerSession implements IWebrtcSession {
           dev.log('setLocalDescription FAILED: $e', error: e);
         });
 
-    await signalingHandler.sendInvite(
-      InviteRequest(
+    await signalingHandler.sendInviteAnswer(
+      InviteAnswerMessage(
         session: msg.session,
-        answer: SdpWrapper(type: answer.type ?? '', sdp: answer.sdp ?? ''),
+        answerSdp: SdpWrapper(type: answer.type ?? '', sdp: answer.sdp ?? ''),
         id: msg.id,
       ),
     );

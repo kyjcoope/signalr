@@ -163,6 +163,36 @@ class ConnectResponse implements SignalRMessage {
   };
 }
 
+class InviteAnswerMessage implements SignalRMessage {
+  InviteAnswerMessage({
+    required this.session,
+    required this.answerSdp,
+    required this.id,
+  });
+
+  final String session;
+  final SdpWrapper answerSdp;
+  @override
+  final String id;
+
+  @override
+  String get jsonRPC => '2.0';
+
+  @override
+  SignalRMethod get method => SignalRMethod.invite;
+
+  @override
+  SignalRParamsList get params => SignalRParamsList([]);
+
+  @override
+  Map<String, Object> toJson() => {
+    'jsonrpc': jsonRPC,
+    'method': method.json,
+    'result': {'session': session, 'answer': answerSdp.toJson()},
+    'id': id,
+  };
+}
+
 class InviteRequest implements SignalRMessage {
   InviteRequest({
     required this.session,

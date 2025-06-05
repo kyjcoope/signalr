@@ -15,7 +15,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     signalRUrl: 'https://jci-osp-api-gateway-dev.osp-jci.com/SignalingHub',
   );
   final renderer = RTCVideoRenderer();
-  final camId = 'nvr-jonah-1vms-1';
+  final camId = 'NVR-PG-1VMS-1054-2';
 
   @override
   void initState() {
