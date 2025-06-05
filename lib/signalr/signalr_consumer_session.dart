@@ -268,47 +268,7 @@ class SignalRConsumerSession implements IWebrtcSession {
 
     // Don't pre-create transceivers - let WebRTC create them from the offer
     dev.log('Attempting to set remote description...');
-    await _peerConnection!
-        .setRemoteDescription(remoteDesc)
-        .then((_) {
-          dev.log('setRemoteDescription SUCCESS');
-        })
-        .catchError((e) {
-          dev.log('setRemoteDescription FAILED: $e', error: e);
-        });
-
-    // Now configure the transceivers that were created from the remote offer
-    var transceivers = await _peerConnection!.getTransceivers();
-    dev.log(
-      'Found ${transceivers.length} transceivers after setRemoteDescription',
-    );
-
-    for (var i = 0; i < transceivers.length; i++) {
-      var transceiver = transceivers[i];
-      dev.log('Processing transceiver $i: MID=${transceiver.mid}');
-
-      try {
-        var currentDir = await transceiver.getDirection();
-        dev.log('  Current direction: $currentDir');
-
-        // Force all transceivers to receive-only
-        await transceiver.setDirection(TransceiverDirection.RecvOnly);
-        dev.log('  Set direction to RecvOnly');
-
-        // Log receiver track info
-        if (transceiver.receiver.track != null) {
-          dev.log(
-            '  Receiver track: ${transceiver.receiver.track!.kind} - ${transceiver.receiver.track!.id}',
-          );
-        }
-      } catch (e) {
-        dev.log('  Failed to configure transceiver: $e');
-      }
-    }
-
-    // Wait for WebRTC internal state to stabilize
-    dev.log('Waiting for WebRTC internal state to stabilize...');
-    await Future.delayed(const Duration(milliseconds: 200));
+    await _peerConnection!.setRemoteDescription(remoteDesc);
 
     // Create answer with explicit video/audio constraints
     dev.log('Creating answer...');
@@ -319,39 +279,8 @@ class SignalRConsumerSession implements IWebrtcSession {
         \n ${answer.toMap()}
         ****''');
 
-    // Check if video is being accepted or rejected
-    if (answer.sdp != null && answer.sdp!.contains('m=video 0')) {
-      dev.log('WARNING: Answer still rejecting video (m=video 0)');
-
-      // Try to diagnose the issue
-      dev.log('Diagnosing video rejection...');
-      var finalTransceivers = await _peerConnection!.getTransceivers();
-      for (var i = 0; i < finalTransceivers.length; i++) {
-        var t = finalTransceivers[i];
-        dev.log(
-          'Transceiver $i: MID=${t.mid}, Track=${t.receiver.track?.kind}',
-        );
-        try {
-          var dir = await t.getDirection();
-          var currentDir = await t.getCurrentDirection();
-          dev.log('  Direction: $dir, Current: $currentDir');
-        } catch (e) {
-          dev.log('  Direction error: $e');
-        }
-      }
-    } else {
-      dev.log('SUCCESS: Answer accepts video!');
-    }
-
     dev.log('Attempting to set local description...');
-    await _peerConnection!
-        .setLocalDescription(answer)
-        .then((_) {
-          dev.log('setLocalDescription SUCCESS');
-        })
-        .catchError((e) {
-          dev.log('setLocalDescription FAILED: $e', error: e);
-        });
+    await _peerConnection!.setLocalDescription(answer);
 
     await signalingHandler.sendInviteAnswer(
       InviteAnswerMessage(
