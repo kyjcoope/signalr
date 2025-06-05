@@ -45,6 +45,8 @@ abstract interface class SignalRMessage {
   SignalRMethod get method;
   SignalRParamsList get params;
   String get id;
+
+  Map<String, dynamic> toJson();
 }
 
 class RegisterRequest implements SignalRMessage {
@@ -63,11 +65,12 @@ class RegisterRequest implements SignalRMessage {
   SignalRParamsList get params =>
       SignalRParamsList([AuthorizationParam(authorization)]);
 
+  @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,
     'params': {'authorization': ''},
-    'id': id,
+    'id': '1',
   };
 }
 
@@ -115,6 +118,7 @@ class ConnectRequest implements SignalRMessage {
     if (iceServers != null) IceServersParam(iceServers!),
   ]);
 
+  @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,
@@ -150,6 +154,7 @@ class ConnectResponse implements SignalRMessage {
   SignalRParamsList get params =>
       SignalRParamsList([SessionParam(session), IceServersParam(iceServers)]);
 
+  @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,
@@ -179,6 +184,7 @@ class InviteRequest implements SignalRMessage {
   SignalRParamsList get params =>
       SignalRParamsList([SessionParam(session), OfferParam(answer)]);
 
+  @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,
@@ -214,6 +220,7 @@ class InviteResponse implements SignalRMessage {
   SignalRParamsList get params =>
       SignalRParamsList([SessionParam(session), OfferParam(offer)]);
 
+  @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,
@@ -259,6 +266,7 @@ class TrickleMessage implements SignalRMessage {
   SignalRParamsList get params =>
       SignalRParamsList([SessionParam(session), CandidateParam(candidate)]);
 
+  @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,

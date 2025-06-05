@@ -80,7 +80,19 @@ class CandidateParam implements SignalRParam {
   SignalRParamType get type => SignalRParamType.candidate;
 
   @override
-  dynamic get value => candidate.toJson();
+  dynamic get value => {
+    'candidate': candidate.candidate,
+    'sdpMid': candidate.sdpMid,
+    'sdpMLineIndex': candidate.sdpMLineIndex,
+    'usernameFragment': _extractUsernameFragment(),
+  };
+
+  String? _extractUsernameFragment() {
+    final candidateStr = candidate.candidate;
+    if (candidateStr == null) return null;
+    final ufragMatch = RegExp(r'ufrag\s+(\S+)').firstMatch(candidateStr);
+    return ufragMatch?.group(1);
+  }
 }
 
 class DeviceIdParam implements SignalRParam {

@@ -51,16 +51,16 @@ class SignalRHandler {
     _connection.on('invite', _onInvite);
     _connection.on('trickle', _onTrickle);
 
-    await _connection.start()?.onError(
-      (e, stack) => dev.log(
-        'WebRTC SignalR Connection Error starting subscription $e at $stack',
-      ),
-    );
+    try {
+      await _connection.start();
+      dev.log('✅ SignalR connection started successfully');
+      dev.log('Connection State: ${_connection.state}');
+      dev.log('Connection ID: ${_connection.connectionId}');
+    } catch (e) {
+      dev.log('❌ SignalR connection failed: $e');
+      rethrow;
+    }
 
-    dev.log(
-      'Initial Connection Start: ${_connection.state}, id is ${_connection.connectionId}',
-    );
-    dev.log('Send Register');
     await sendRegister('');
   }
 
@@ -120,14 +120,14 @@ class SignalRHandler {
 
   Future<void> _send(SignalRMessage message) async {
     dev.log(
-      'Sending WebRTC SignalR Message: status is ${_connection.state}, id is ${_connection.connectionId}',
+      'Sending WebRTC SignalR Message: status is ${_connection.state}, id is ${_connection.connectionId}, method: ${message.method.json}, params: ${message.params.toJson()}',
     );
-    await _connection.invoke('SendMessage', args: [message]).catchError((
-      error,
-    ) {
-      dev.log('Error sending SignalR message:', error: error);
-      return false;
-    });
+    await _connection
+        .invoke('SendMessage', args: [message.toJson()])
+        .catchError((error) {
+          dev.log('Error sending SignalR message:', error: error);
+          return false;
+        });
   }
 
   Future<void> sendRegister(String auth) async => await _send(

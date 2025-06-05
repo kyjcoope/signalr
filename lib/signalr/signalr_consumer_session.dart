@@ -79,28 +79,19 @@ class SignalRConsumerSession implements IWebrtcSession {
 
   Future<void> initLocalConnection() async {
     if (_peerConnection != null) return;
-
-    final publicIceServers = [
+    final defaultIceServers = [
       {'urls': 'stun:stun.l.google.com:19302'},
-      {
-        'urls': ['turn:relay1.expressturn.com:3478'],
-        'credential': 'JZEOEt2V3Qb0y27GRntt2u2PAYA=',
-        'username': 'ef4637CA62D2F3A41C1198C',
-      },
-      // Backup public TURN server
-      {
-        'urls': ['turn:openrelay.metered.ca:80'],
-        'credential': 'openrelayproject',
-        'username': 'openrelay',
-      },
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun2.l.google.com:19302'},
+      ...iceServers.map((e) => e.toJson()),
     ];
 
     final config = <String, dynamic>{
-      'iceServers': publicIceServers,
-      'iceTransportPolicy': 'relay', // Force TURN only
-      'sdpSemantics': 'unified-plan',
+      'iceServers': defaultIceServers,
+      'iceTransportPolicy': 'all',
+      'iceCandidatePoolSize': 0,
       'rtcpMuxPolicy': 'require',
-      'iceCandidatePoolSize': 10,
+      'sdpSemantics': 'unified-plan',
     };
 
     dev.log('Initializing WebRTC peer connection: $config');
@@ -124,11 +115,9 @@ class SignalRConsumerSession implements IWebrtcSession {
 
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
         dev.log('🎉 ICE CONNECTION ESTABLISHED!');
-        // Log which candidate pair was selected
         _logSelectedCandidatePair();
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
         dev.log('❌ ICE CONNECTION FAILED - Network connectivity issue');
-        // Try to restart ICE
         _restartIce();
       } else if (state ==
           RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
@@ -178,38 +167,7 @@ class SignalRConsumerSession implements IWebrtcSession {
   }
 
   void _onIceCandidate(RTCIceCandidate candidate) {
-    dev.log('Local ICE Candidate: ${candidate.toMap()}');
-
-    var candidateStr = candidate.candidate ?? '';
-
-    // Enhanced candidate analysis
-    bool isHost = candidateStr.contains('typ host');
-    bool isSrflx = candidateStr.contains('typ srflx');
-    bool isRelay = candidateStr.contains('typ relay');
-
-    // Extract IP address for analysis
-    var ipMatch = RegExp(r'(\d+\.\d+\.\d+\.\d+)').firstMatch(candidateStr);
-    var ip = ipMatch?.group(1) ?? 'unknown';
-
-    dev.log(
-      'Candidate Analysis: Host=$isHost, SRFLX=$isSrflx, Relay=$isRelay, IP=$ip',
-    );
-
-    // Skip mDNS candidates
-    if (candidateStr.contains('.local')) {
-      dev.log('Skipping mDNS candidate: $candidateStr');
-      return;
-    }
-
-    // 🔥 Send ALL candidates for maximum compatibility testing
-    if (isHost) {
-      dev.log('✅ Sending HOST candidate: $ip');
-    } else if (isSrflx) {
-      dev.log('✅ Sending SRFLX candidate: $ip');
-    } else if (isRelay) {
-      dev.log('✅ Sending RELAY candidate: $ip');
-    }
-
+    dev.log('Local ICE Candidate: ${candidate.candidate}');
     var ice = RTCIceCandidate(
       candidate.candidate,
       candidate.sdpMid,
