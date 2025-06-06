@@ -271,13 +271,19 @@ class TrickleMessage implements SignalRMessage {
 
   factory TrickleMessage.fromJson(dynamic json) {
     final candidate = json['params']['candidate'];
+    final sdpMLineIndex = candidate['sdpMLineIndex'];
+    String sdpMid = candidate['sdpMid'] ?? '';
+
+    if (sdpMid.isEmpty) {
+      if (sdpMLineIndex == 0) {
+        sdpMid = "video0";
+      } else if (sdpMLineIndex == 1) {
+        sdpMid = "application1";
+      }
+    }
     return TrickleMessage(
       session: json['params']['session'] ?? '',
-      candidate: RTCIceCandidate(
-        candidate['candidate'],
-        candidate['sdpMid'] ?? '',
-        candidate['sdpMLineIndex'],
-      ),
+      candidate: RTCIceCandidate(candidate['candidate'], sdpMid, sdpMLineIndex),
       id: json['id'] ?? '',
     );
   }

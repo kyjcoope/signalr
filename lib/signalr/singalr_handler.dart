@@ -103,16 +103,6 @@ class SignalRHandler {
             ? arguments[0]
             : jsonDecode(arguments[0].toString());
 
-    if (data['iceCandidate'] != null) {
-      final candidate = data['iceCandidate'];
-      if (candidate['sdpMid'] == null) {
-        candidate['sdpMid'] = candidate['sdpMLineIndex']?.toString() ?? "0";
-      }
-      if (candidate['sdpMLineIndex'] == null) {
-        candidate['sdpMLineIndex'] = 0;
-      }
-    }
-
     final trickleResponse = TrickleMessage.fromJson(data);
     dev.log('Received trickle message: $trickleResponse');
     onTrickle(trickleResponse);

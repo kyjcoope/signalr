@@ -139,9 +139,6 @@ class SignalRConsumerSession implements IWebrtcSession {
     pc.onRenegotiationNeeded = _onRemoteRenegotiationNeeded;
     pc.onDataChannel = _onDataChannel;
 
-    // Don't add transceivers here - let them be created from the remote offer
-    // This ensures proper matching of media lines
-
     _peerConnection = pc;
   }
 
@@ -241,14 +238,6 @@ class SignalRConsumerSession implements IWebrtcSession {
 
   void _onTrack(RTCTrackEvent event) {
     dev.log('onTrack: ${event.streams.length} ${event.track.kind}');
-
-    // Make sure the track is properly added to your video renderer
-    if (event.track.kind == 'video') {
-      dev.log('Video track received: ${event.track.id}');
-      // You need to set this track to your RTCVideoRenderer
-      // Make sure you have a video renderer widget in your UI that displays this track
-    }
-
     onTrack?.call(event);
   }
 
@@ -260,24 +249,28 @@ class SignalRConsumerSession implements IWebrtcSession {
       ],
     };
 
-    final remoteDesc = RTCSessionDescription(msg.offer.sdp, msg.offer.type);
-    dev.log('''
-        **** Received Offer ****
-        \n ${remoteDesc.toMap()}
-        ****''');
+    final String remoteSdp = msg.offer.sdp;
+    final String fixedSdp = remoteSdp.replaceAll(
+      RegExp(r'profile-level-id=64002a', caseSensitive: false),
+      'profile-level-id=42e01f',
+    );
 
-    // Don't pre-create transceivers - let WebRTC create them from the offer
+    final remoteDesc = RTCSessionDescription(fixedSdp, msg.offer.type);
+    dev.log('''
+      **** Received Offer ****
+      \n ${remoteDesc.toMap()}
+      ****''');
+
     dev.log('Attempting to set remote description...');
     await _peerConnection!.setRemoteDescription(remoteDesc);
 
-    // Create answer with explicit video/audio constraints
     dev.log('Creating answer...');
     var answer = await _peerConnection!.createAnswer(oaConstraints);
 
     dev.log('''
-        **** Creating Answer ****
-        \n ${answer.toMap()}
-        ****''');
+      **** Creating Answer ****
+      \n ${answer.toMap()}
+      ****''');
 
     dev.log('Attempting to set local description...');
     await _peerConnection!.setLocalDescription(answer);
