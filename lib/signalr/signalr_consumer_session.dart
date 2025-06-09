@@ -250,9 +250,17 @@ class SignalRConsumerSession implements IWebrtcSession {
     };
 
     final String remoteSdp = msg.offer.sdp;
-    final String fixedSdp = remoteSdp.replaceAll(
-      RegExp(r'profile-level-id=64002a', caseSensitive: false),
-      'profile-level-id=42e01f',
+    final String fixedSdp = remoteSdp.replaceAllMapped(
+      RegExp(r'profile-level-id=([a-fA-F0-9]+)', caseSensitive: false),
+      (match) {
+        final currentValue = match.group(1)?.toLowerCase();
+        if (currentValue == '42e01f') {
+          return match.group(0)!;
+        } else {
+          dev.log('Replacing profile-level-id=$currentValue with 42e01f');
+          return 'profile-level-id=42e01f';
+        }
+      },
     );
 
     final remoteDesc = RTCSessionDescription(fixedSdp, msg.offer.type);
