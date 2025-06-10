@@ -13,11 +13,10 @@ class SignalRHandler {
     required this.onInvite,
     required this.onTrickle,
     required this.signalServiceUrl,
-  }) : _connection =
-           HubConnectionBuilder()
-               .withUrl(signalServiceUrl)
-               .withAutomaticReconnect(retryDelays: [0, 5000, 5000, 5000])
-               .build();
+  }) : _connection = HubConnectionBuilder()
+           .withUrl(signalServiceUrl)
+           .withAutomaticReconnect(retryDelays: [0, 5000, 5000, 5000])
+           .build();
   void Function(ConnectResponse) onConnect;
   void Function(RegisterResponse) onRegister;
   void Function(InviteResponse) onInvite;
@@ -61,10 +60,12 @@ class SignalRHandler {
       rethrow;
     }
 
+    dev.log('send register');
     await sendRegister('');
   }
 
   void _onRegister(List<Object?>? arguments) {
+    dev.log('Received register message: $arguments');
     if (arguments == null || arguments.isEmpty) return;
     dev.log(
       'Received register message: ${arguments.length}',
@@ -78,19 +79,17 @@ class SignalRHandler {
   void _onConnect(arguments) {
     if (arguments == null || arguments.isEmpty) return;
     dev.log('Received connect message: $arguments');
-    final data =
-        arguments[0] is Map
-            ? arguments[0]
-            : jsonDecode(arguments[0].toString());
+    final data = arguments[0] is Map
+        ? arguments[0]
+        : jsonDecode(arguments[0].toString());
     onConnect(ConnectResponse.fromJson(data));
   }
 
   void _onInvite(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    final data =
-        arguments[0] is Map
-            ? arguments[0]
-            : jsonDecode(arguments[0].toString());
+    final data = arguments[0] is Map
+        ? arguments[0]
+        : jsonDecode(arguments[0].toString());
     final inviteResponse = InviteResponse.fromJson(data);
     dev.log('Received invite message: $inviteResponse');
     onInvite(inviteResponse);
@@ -98,10 +97,9 @@ class SignalRHandler {
 
   void _onTrickle(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    final data =
-        arguments[0] is Map
-            ? arguments[0]
-            : jsonDecode(arguments[0].toString());
+    final data = arguments[0] is Map
+        ? arguments[0]
+        : jsonDecode(arguments[0].toString());
 
     final trickleResponse = TrickleMessage.fromJson(data);
     dev.log('Received trickle message: $trickleResponse');
