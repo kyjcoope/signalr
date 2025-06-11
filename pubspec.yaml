@@ -37,6 +37,10 @@ dependencies:
   flutter_webrtc: ^0.14.1
   signalr_netcore: ^1.4.3
   collection: ^1.19.1
+  flutter_redux: ^0.10.0
+  redux: ^5.0.0
+  equatable: ^2.0.7
+  redux_thunk: ^0.4.0
 
 dev_dependencies:
   flutter_test:

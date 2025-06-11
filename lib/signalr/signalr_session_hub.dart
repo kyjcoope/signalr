@@ -7,7 +7,17 @@ import '../webrtc/webrtc_camera_session.dart';
 import 'signalr_message.dart';
 
 class SignalRSessionHub {
-  SignalRSessionHub({required String signalRUrl, this.onRegister}) {
+  static SignalRSessionHub? _instance;
+  static SignalRSessionHub get instance {
+    if (_instance == null) {
+      throw StateError(
+        'SignalRSessionHub not initialized. Call initialize() first.',
+      );
+    }
+    return _instance!;
+  }
+
+  SignalRSessionHub._({required String signalRUrl, this.onRegister}) {
     signalingHandler = SignalRHandler(
       signalServiceUrl: signalRUrl,
       onConnect: _onConnectResponse,
@@ -15,6 +25,36 @@ class SignalRSessionHub {
       onInvite: _onInvite,
       onTrickle: _onTrickleMessage,
     );
+  }
+
+  static Future<SignalRSessionHub> initialize({
+    required String signalRUrl,
+    VoidCallback? onRegister,
+  }) async {
+    if (_instance != null) {
+      dev.log('SignalRSessionHub already initialized');
+      return _instance!;
+    }
+
+    dev.log('Initializing SignalRSessionHub with URL: $signalRUrl');
+    _instance = SignalRSessionHub._(
+      signalRUrl: signalRUrl,
+      onRegister: onRegister,
+    );
+
+    await _instance!.signalingHandler.setupSignaling();
+    dev.log('SignalRSessionHub initialized successfully');
+
+    return _instance!;
+  }
+
+  static bool get isInitialized => _instance != null;
+
+  static void dispose() {
+    if (_instance != null) {
+      _instance!._dispose();
+      _instance = null;
+    }
   }
 
   late final SignalRHandler signalingHandler;
@@ -27,22 +67,17 @@ class SignalRSessionHub {
   Set<String> get availableProducers => _availableProducers;
   Map<String, WebRtcCameraSession> get activeSessions => _activeSessions;
 
-  Future<void> initialize() async {
-    await signalingHandler.setupSignaling();
-  }
-
-  void shutdown() {
-    // Close all active camera sessions
+  void _dispose() {
     for (var session in _activeSessions.values) {
       session.dispose();
     }
     _activeSessions.clear();
     signalingHandler.shutdown(_activeSessions.keys.toList());
     _availableProducers.clear();
+    dev.log('SignalRSessionHub disposed');
   }
 
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
-    // Find the full producer ID that starts with cameraId
     final fullProducerId = _availableProducers
         .where((p) => p.startsWith(cameraId))
         .firstOrNull;
@@ -52,13 +87,11 @@ class SignalRSessionHub {
       return null;
     }
 
-    // Check if already connected
     if (_activeSessions.containsKey(fullProducerId)) {
       dev.log('Camera $cameraId already connected');
       return _activeSessions[fullProducerId];
     }
 
-    // Create new camera session
     final cameraSession = WebRtcCameraSession(
       cameraId: fullProducerId,
       sessionHub: this,
@@ -66,7 +99,6 @@ class SignalRSessionHub {
 
     _activeSessions[fullProducerId] = cameraSession;
 
-    // Send connect request
     signalingHandler.sendConnect(
       ConnectRequest(
         signalingHandler.connectionId,
@@ -97,7 +129,6 @@ class SignalRSessionHub {
     dev.log('Session started: ${msg.session}');
     iceServers = msg.iceServers;
 
-    // Find the camera session that's waiting for this connection
     for (var session in _activeSessions.values) {
       if (session.sessionId == null) {
         session.handleConnectResponse(msg);
@@ -107,7 +138,6 @@ class SignalRSessionHub {
   }
 
   void _onInvite(InviteResponse msg) {
-    // Route invite to the correct camera session
     final session = _activeSessions.values
         .where((s) => s.sessionId == msg.session)
         .firstOrNull;
@@ -120,7 +150,6 @@ class SignalRSessionHub {
   }
 
   void _onTrickleMessage(TrickleMessage msg) {
-    // Route trickle to the correct camera session
     final session = _activeSessions.values
         .where((s) => s.sessionId == msg.session)
         .firstOrNull;
