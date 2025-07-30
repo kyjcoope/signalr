@@ -78,10 +78,11 @@ class SignalRHandler {
 
   void _onConnect(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    dev.log('Received connect message: $arguments');
+
     final data = arguments[0] is Map
         ? arguments[0]
         : jsonDecode(arguments[0].toString());
+    dev.log('Received connect message: $data');
     onConnect(ConnectResponse.fromJson(data));
   }
 
@@ -91,7 +92,7 @@ class SignalRHandler {
         ? arguments[0]
         : jsonDecode(arguments[0].toString());
     final inviteResponse = InviteResponse.fromJson(data);
-    dev.log('Received invite message: $inviteResponse');
+    dev.log('Received invite message: $data');
     onInvite(inviteResponse);
   }
 
@@ -102,14 +103,12 @@ class SignalRHandler {
         : jsonDecode(arguments[0].toString());
 
     final trickleResponse = TrickleMessage.fromJson(data);
-    dev.log('Received trickle message: $trickleResponse');
+    dev.log('Received trickle message: $data');
     onTrickle(trickleResponse);
   }
 
   Future<void> _send(SignalRMessage message) async {
-    dev.log(
-      'Sending WebRTC SignalR Message: status is ${_connection.state}, id is ${_connection.connectionId}, method: ${message.method.json}, params: ${message.params.toJson()}',
-    );
+    dev.log('Sending SignalR message: ${message.toJson()}');
     await _connection
         .invoke('SendMessage', args: [message.toJson()])
         .catchError((error) {

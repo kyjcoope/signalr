@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as dev;
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
@@ -113,23 +114,14 @@ class WebRtcCameraSession {
       ],
     };
 
-    final String remoteSdp = msg.offer.sdp;
-    final String fixedSdp = remoteSdp.replaceAllMapped(
-      RegExp(r'profile-level-id=([a-fA-F0-9]+)', caseSensitive: false),
-      (match) {
-        final currentValue = match.group(1)?.toLowerCase();
-        if (currentValue == '42e01f') {
-          return match.group(0)!;
-        } else {
-          dev.log(
-            '[$cameraId] Replacing profile-level-id=$currentValue with 42e01f',
-          );
-          return 'profile-level-id=42e01f';
-        }
-      },
-    );
+    final offerSdp = _isH264(msg.offer.sdp)
+        ? mungeSdp(msg.offer.sdp)
+        : msg.offer.sdp;
 
-    final remoteDesc = RTCSessionDescription(fixedSdp, msg.offer.type);
+    final remoteDesc = RTCSessionDescription(
+      mungeSdp(msg.offer.sdp),
+      msg.offer.type,
+    );
     dev.log('[$cameraId] Setting remote description');
     await _peerConnection!.setRemoteDescription(remoteDesc);
 
@@ -200,5 +192,34 @@ class WebRtcCameraSession {
     } else {
       _messageController.add(msg.text);
     }
+  }
+
+  bool _isH264(String sdp) =>
+      RegExp(r'\bH264/90000\b', caseSensitive: false).hasMatch(sdp);
+
+  String mungeSdp(String sdp) {
+    const iosAllowed = {'640c2a', '42e02a', '42e01f'};
+    final defaultId = Platform.isIOS ? '42e02a' : '42e01f';
+
+    // Fix profile‑level‑id
+    sdp = sdp.replaceAllMapped(RegExp(r'profile-level-id=([0-9A-Fa-f]{6})'), (
+      m,
+    ) {
+      final id = m[1]!.toLowerCase();
+      final goodId = Platform.isIOS
+          ? (iosAllowed.contains(id) ? id : defaultId)
+          : defaultId; // always 42e01f on Android
+      return 'profile-level-id=$goodId';
+    });
+
+    // Ensure level‑asymmetry‑allowed=1
+    if (!sdp.toLowerCase().contains('level-asymmetry-allowed')) {
+      sdp = sdp.replaceFirst(
+        'packetization-mode=1;',
+        'level-asymmetry-allowed=1;packetization-mode=1;',
+      );
+    }
+
+    return sdp;
   }
 }

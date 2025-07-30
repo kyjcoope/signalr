@@ -20,7 +20,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   final Map<String, RTCVideoRenderer> renderers = {};
   final Map<String, WebRtcCameraSession> cameraSessions = {};
 
-  final List<String> desiredCameras = ['exacqu-H110E1-2'];
+  final List<String> desiredCameras = ['c786c145-b282-429a-b4c3-c971e89fd063'];
 
   bool _isInitialized = false;
   bool _devicesRegistered = false;
