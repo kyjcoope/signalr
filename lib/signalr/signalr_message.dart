@@ -271,19 +271,11 @@ class TrickleMessage implements SignalRMessage {
 
   factory TrickleMessage.fromJson(dynamic json) {
     final candidateData = json['params']['candidate'];
+
     final sdpMLineIndex = candidateData['sdpMLineIndex'];
-    String sdpMid = candidateData['sdpMid'] ?? '';
+    final sdpMid = candidateData['sdpMid'] ?? '';
     final candidateString = candidateData['candidate'] ?? '';
 
-    if (sdpMid.isEmpty) {
-      if (sdpMLineIndex == 0) {
-        sdpMid = "video0"; // Or just "0" if your offer/answer uses that
-      } else if (sdpMLineIndex == 1) {
-        sdpMid = "audio1"; // Or just "1"
-      } else if (sdpMLineIndex == 2) {
-        sdpMid = "application2"; // Or just "2"
-      }
-    }
     return TrickleMessage(
       session: json['params']['session'] ?? '',
       candidate: RTCIceCandidate(candidateString, sdpMid, sdpMLineIndex),

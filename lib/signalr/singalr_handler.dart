@@ -45,6 +45,7 @@ class SignalRHandler {
       ({connectionId}) => dev.log('reconnected with $connectionId'),
     );
     _connection.onclose(({error}) => dev.log('Connection closed. $error'));
+    _connection.on('ReceivedSignalingMessage', _receivedSignalingMessage);
     _connection.on('register', _onRegister);
     _connection.on('connect', _onConnect);
     _connection.on('invite', _onInvite);
@@ -62,6 +63,24 @@ class SignalRHandler {
 
     dev.log('send register');
     await sendRegister('');
+  }
+
+  void _receivedSignalingMessage(List<Object?>? arguments) {
+    if (arguments == null || arguments.isEmpty) return;
+    final json = jsonDecode(arguments[0].toString());
+    final method = json['method'];
+    final result = json['result'];
+    final data = json['data'];
+
+    if (method == 'invite') {
+      _onInvite(arguments);
+    } else if (method == 'trickle') {
+      _onTrickle(arguments);
+    } else if (result != null) {
+      _onConnect(arguments);
+    } else if (data != null) {
+      onRegister(RegisterResponse.fromJson(data));
+    }
   }
 
   void _onRegister(List<Object?>? arguments) {

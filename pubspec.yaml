@@ -37,6 +37,7 @@ dependencies:
   flutter_webrtc: ^0.14.1
   signalr_netcore: ^1.4.3
   collection: ^1.19.1
+  universal_io: ^2.2.2
 
 dev_dependencies:
   flutter_test:

@@ -188,7 +188,7 @@ class PeerMessage implements SignalingMessage {
   factory PeerMessage.fromJson(dynamic json) => PeerMessage(
     sessionId: json['sessionId'] ?? '',
     sdp: SdpWrapper.fromJson(json['sdp'] ?? {}),
-    iceCandiate: json['inceCandiate'] ?? {},
+    iceCandiate: json['iceCandidate'] ?? {},
   );
   final String sessionId;
   final SdpWrapper sdp;

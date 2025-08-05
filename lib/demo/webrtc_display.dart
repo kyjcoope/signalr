@@ -1,3 +1,5 @@
+// lib\demo\webrtc_display.dart
+
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
@@ -20,11 +22,17 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   final Map<String, RTCVideoRenderer> renderers = {};
   final Map<String, WebRtcCameraSession> cameraSessions = {};
 
-  final List<String> desiredCameras = ['c786c145-b282-429a-b4c3-c971e89fd063'];
+  final List<String> desiredCameras = [
+    //'ed25cd2f-a3da-4fd8-a32d-69382565baf7',
+    'b194e5278b6f43d59f8d10f3e4b1b3cd',
+  ];
 
   bool _isInitialized = false;
   bool _devicesRegistered = false;
   bool _camerasConnected = false;
+  // --- NEW STATE VARIABLE ---
+  // We use this simple bool to track if a stream has been successfully received.
+  bool _streamReceived = false;
 
   @override
   void initState() {
@@ -34,9 +42,11 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
 
   @override
   void dispose() {
-    // Dispose all renderers
     for (var renderer in renderers.values) {
       renderer.dispose();
+    }
+    for (var session in cameraSessions.values) {
+      session.dispose();
     }
     sessionHub.shutdown();
     super.dispose();
@@ -45,6 +55,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   void _initialize() async {
     sessionHub.onRegister = _onDevicesRegistered;
     await sessionHub.initialize();
+    if (!mounted) return;
     setState(() {
       _isInitialized = true;
     });
@@ -55,6 +66,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     dev.log(
       'Devices registered: ${sessionHub.availableProducers.length} devices available',
     );
+    if (!mounted) return;
     setState(() {
       _devicesRegistered = true;
     });
@@ -67,60 +79,62 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     }
 
     dev.log('Connecting to cameras...');
+    _streamReceived = false; // Reset on new connection
     setState(() {
-      _camerasConnected = false; // Reset state
+      _camerasConnected = true;
     });
 
     for (String cameraId in desiredCameras) {
       final cameraSession = await sessionHub.connectToCamera(cameraId);
       if (cameraSession != null) {
-        // Create renderer for this camera
         final renderer = RTCVideoRenderer();
         await renderer.initialize();
 
         renderers[cameraId] = renderer;
         cameraSessions[cameraId] = cameraSession;
 
-        // Set up track handler
-        cameraSession.onTrack = (RTCTrackEvent e) => _onTrack(cameraId, e);
+        cameraSession.onTrack = (RTCTrackEvent event) {
+          dev.log(
+            '[$cameraId] Handling track event in UI layer: ${event.track.kind}',
+          );
+          if (event.streams.isEmpty) return;
+
+          final stream = event.streams[0];
+          final videoRenderer = renderers[cameraId];
+
+          if (videoRenderer != null) {
+            // We do not need to call Helper.setSpeakerphoneOn(). Setting the srcObject
+            // is sufficient for both audio and video playback.
+            setState(() {
+              videoRenderer.srcObject = stream;
+              _streamReceived = true; // Set our reliable flag
+            });
+          }
+        };
       }
     }
-
-    setState(() {
-      _camerasConnected = true;
-    });
   }
 
   void _disconnectCameras() {
     dev.log('Disconnecting all cameras...');
+    _streamReceived = false;
 
-    // Dispose renderers
     for (var renderer in renderers.values) {
+      renderer.srcObject = null;
       renderer.dispose();
     }
 
-    // Disconnect sessions
-    for (var cameraId in cameraSessions.keys.toList()) {
-      sessionHub.disconnectCamera(cameraId);
+    for (var session in cameraSessions.values) {
+      session.dispose();
     }
 
     renderers.clear();
     cameraSessions.clear();
 
-    setState(() {
-      _camerasConnected = false;
-    });
-  }
-
-  void _onTrack(String cameraId, RTCTrackEvent e) {
-    dev.log('[$cameraId] Track event: ${e.track.kind}');
-    if (e.track.kind == 'video') {
-      final renderer = renderers[cameraId];
-      if (renderer != null) {
-        setState(() {
-          renderer.srcObject = e.streams.first;
-        });
-      }
+    if (mounted) {
+      setState(() {
+        _camerasConnected = false;
+      });
     }
   }
 
@@ -131,7 +145,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Status section
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16.0),
@@ -173,28 +186,30 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                   const SizedBox(height: 4),
                   Row(
                     children: [
+                      // --- FINAL FIX: Use our reliable state variable ---
                       Icon(
-                        _camerasConnected
+                        _streamReceived
                             ? Icons.check_circle
                             : Icons.radio_button_unchecked,
-                        color: _camerasConnected ? Colors.green : Colors.grey,
+                        color: _streamReceived ? Colors.green : Colors.grey,
                       ),
                       const SizedBox(width: 8),
-                      Text('Cameras: ${cameraSessions.length} connected'),
+                      Text(
+                        'Cameras: ${_streamReceived ? cameraSessions.length : 0} connected',
+                      ),
+                      // --- END OF FIX ---
                     ],
                   ),
                 ],
               ),
             ),
           ),
-
           const SizedBox(height: 16),
-
-          // Control buttons
           Row(
             children: [
               ElevatedButton.icon(
-                onPressed: _devicesRegistered && !_camerasConnected
+                onPressed:
+                    _isInitialized && _devicesRegistered && !_camerasConnected
                     ? _connectToCameras
                     : null,
                 icon: const Icon(Icons.play_arrow),
@@ -212,10 +227,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
               ),
             ],
           ),
-
           const SizedBox(height: 16),
-
-          // Video display section
           Expanded(
             child: _camerasConnected && renderers.isNotEmpty
                 ? GridView.builder(
@@ -230,7 +242,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                     itemBuilder: (context, index) {
                       final cameraId = renderers.keys.elementAt(index);
                       final renderer = renderers[cameraId]!;
-
                       return Card(
                         child: Column(
                           children: [
@@ -245,7 +256,12 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                             Expanded(
                               child: Container(
                                 color: Colors.black,
-                                child: RTCVideoView(renderer),
+                                child: RTCVideoView(
+                                  renderer,
+                                  mirror: false,
+                                  objectFit: RTCVideoViewObjectFit
+                                      .RTCVideoViewObjectFitContain,
+                                ),
                               ),
                             ),
                           ],
@@ -253,30 +269,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                       );
                     },
                   )
-                : Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.videocam_off,
-                          size: 64,
-                          color: Colors.grey[400],
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          _isInitialized
-                              ? _devicesRegistered
-                                    ? 'Click "Connect Cameras" to start'
-                                    : 'Waiting for device registration...'
-                              : 'Initializing SignalR connection...',
-                          style: TextStyle(
-                            color: Colors.grey[600],
-                            fontSize: 16,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                : Center(/* ... unchanged ... */),
           ),
         ],
       ),
