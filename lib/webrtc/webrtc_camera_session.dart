@@ -74,7 +74,6 @@ class WebRtcCameraSession {
     _dataChannel?.close();
     _peerConnection?.close();
     _messageController.close();
-    dev.log('[$cameraId] Session disposed');
   }
 
   void sendDataChannelMessage(String text) {
@@ -99,6 +98,7 @@ class WebRtcCameraSession {
 
   Future<void> handleTrickle(TrickleMessage msg) async {
     if (_peerConnection == null || (msg.candidate.candidate ?? '').isEmpty) {
+      dev.log('[$cameraId] No peer connection or empty candidate, ignoring');
       return;
     }
 
@@ -116,6 +116,7 @@ class WebRtcCameraSession {
   }
 
   Future<void> _negotiate(InviteResponse msg) async {
+    iceCandidatesGathering = Completer<void>();
     final oaConstraints = <String, dynamic>{
       'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': true},
       'optional': [
@@ -127,13 +128,14 @@ class WebRtcCameraSession {
         ? mungeSdp(msg.offer.sdp)
         : msg.offer.sdp;
 
-    final remoteDesc = RTCSessionDescription(offerSdp, msg.offer.type);
+    final remoteDesc = RTCSessionDescription(msg.offer.sdp, msg.offer.type);
     await _peerConnection!.setRemoteDescription(remoteDesc);
 
     final answer = await _peerConnection!.createAnswer(oaConstraints);
     await _peerConnection!.setLocalDescription(answer);
 
-    await iceCandidatesGathering.future;
+    final timeout = Future.delayed(const Duration(seconds: 7));
+    await Future.any([iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
 
     await sessionHub.signalingHandler.sendInviteAnswer(
