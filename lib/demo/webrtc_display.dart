@@ -24,7 +24,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
 
   final List<String> desiredCameras = [
     //'ed25cd2f-a3da-4fd8-a32d-69382565baf7',
-    'b194e5278b6f43d59f8d10f3e4b1b3cd',
+    'c7f37e4854884b4c970ae6a7ffbdc445',
   ];
 
   bool _isInitialized = false;

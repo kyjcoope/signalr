@@ -1,10 +1,7 @@
-// lib\webrtc\webrtc_camera_session.dart
-
 import 'dart:async';
 import 'dart:developer' as dev;
 
-import 'dart:typed_data';
-import 'dart:ui';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
 import 'package:universal_io/io.dart';
@@ -21,13 +18,6 @@ class WebRtcCameraSession {
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
   String? sessionId;
-  String? _offerSdp; // Stores the original offer for sdpMid correction
-
-  // Buffers and flags to solve signaling race conditions
-  final List<RTCIceCandidate> _localCandidateBuffer = [];
-  final List<RTCIceCandidate> _remoteCandidateBuffer = [];
-  bool _isAnswerSent = false;
-  bool _isRemoteDescriptionSet = false;
 
   final StreamController<String> _messageController =
       StreamController<String>.broadcast();
@@ -35,39 +25,47 @@ class WebRtcCameraSession {
   // Callbacks
   VoidCallback? onConnectionComplete;
   VoidCallback? onDataChannelReady;
-  void Function(RTCTrackEvent event)? onTrack;
+  void Function(RTCTrackEvent)? onTrack;
   void Function(Uint8List)? onDataFrame;
 
   Stream<String> get messageStream => _messageController.stream;
 
   Future<void> initializeConnection() async {
     if (_peerConnection != null) return;
-    _isAnswerSent = false;
-    _isRemoteDescriptionSet = false;
-    _localCandidateBuffer.clear();
-    _remoteCandidateBuffer.clear();
 
     final defaultIceServers = [
       {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun2.l.google.com:19302'},
+      {'urls': 'stun:stun3.l.google.com:19302'},
+      {'urls': 'stun:stun4.l.google.com:19302'},
       ...sessionHub.iceServers.map((e) => e.toJson()),
     ];
 
     final config = <String, dynamic>{
       'iceServers': defaultIceServers,
       'iceTransportPolicy': 'all',
+      'iceCandidatePoolSize': 0,
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
-      'bundlePolicy': 'max-compat',
     };
 
-    dev.log('[$cameraId] Initializing WebRTC peer connection with max-compat.');
-    var pc = await createPeerConnection(config);
+    dev.log('[$cameraId] Initializing WebRTC peer connection');
+    final pc = await createPeerConnection(config);
 
     pc.onTrack = _onTrack;
     pc.onIceConnectionState = _onIceConnectionState;
     pc.onConnectionState = _onConnectionState;
     pc.onIceCandidate = _onIceCandidate;
     pc.onDataChannel = _onDataChannel;
+    pc.onIceGatheringState = (state) {
+      dev.log('[$cameraId] ICE gathering state: $state');
+      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        if (!iceCandidatesGathering.isCompleted) {
+          iceCandidatesGathering.complete();
+        }
+      }
+    };
 
     _peerConnection = pc;
   }
@@ -79,6 +77,12 @@ class WebRtcCameraSession {
     dev.log('[$cameraId] Session disposed');
   }
 
+  void sendDataChannelMessage(String text) {
+    if (_dataChannel == null) return;
+    dev.log('[$cameraId] Sending data channel message: $text');
+    _dataChannel!.send(RTCDataChannelMessage(text));
+  }
+
   void handleConnectResponse(ConnectResponse msg) {
     sessionId = msg.session;
     dev.log('[$cameraId] Session started: $sessionId');
@@ -87,132 +91,62 @@ class WebRtcCameraSession {
 
   Future<void> handleInvite(InviteResponse msg) async {
     if (msg.offer.type == 'offer') {
-      _offerSdp = msg.offer.sdp;
       await _negotiate(msg);
     }
   }
 
-  Future<void> _negotiate(InviteResponse msg) async {
-    final offerSdp = mungeSdp(msg.offer.sdp);
-    final remoteDesc = RTCSessionDescription(offerSdp, msg.offer.type);
-
-    try {
-      dev.log('[$cameraId] Setting remote description...');
-      await _peerConnection!.setRemoteDescription(remoteDesc);
-      dev.log('[$cameraId] Set remote description successfully.');
-
-      _isRemoteDescriptionSet = true;
-      dev.log(
-        '[$cameraId] Draining ${_remoteCandidateBuffer.length} buffered remote candidates.',
-      );
-      for (final candidate in _remoteCandidateBuffer) {
-        await _peerConnection!.addCandidate(candidate);
-      }
-      _remoteCandidateBuffer.clear();
-    } catch (e) {
-      dev.log('[$cameraId] ❌ ERROR setting remote description: $e');
-      return;
-    }
-
-    var answer = await _peerConnection!.createAnswer();
-    await _peerConnection!.setLocalDescription(answer);
-
-    await sessionHub.signalingHandler.sendInviteAnswer(
-      InviteAnswerMessage(
-        session: msg.session,
-        answerSdp: SdpWrapper(type: answer.type ?? '', sdp: answer.sdp ?? ''),
-        id: msg.id,
-      ),
-    );
-
-    _isAnswerSent = true;
-    for (final candidate in _localCandidateBuffer) {
-      _sendTrickle(candidate);
-    }
-    _localCandidateBuffer.clear();
-  }
+  Completer<void> iceCandidatesGathering = Completer<void>();
 
   Future<void> handleTrickle(TrickleMessage msg) async {
     if (_peerConnection == null || (msg.candidate.candidate ?? '').isEmpty) {
       return;
     }
 
-    RTCIceCandidate candidate = msg.candidate;
-
-    if ((candidate.sdpMid ?? '').isEmpty &&
-        candidate.sdpMLineIndex != null &&
-        _offerSdp != null) {
-      final derivedSdpMid = _getMidForMlineIndex(
-        _offerSdp!,
-        candidate.sdpMLineIndex!,
+    dev.log('[$cameraId] Received remote ICE candidate');
+    try {
+      var ice = RTCIceCandidate(
+        msg.candidate.candidate,
+        msg.candidate.sdpMid,
+        msg.candidate.sdpMLineIndex,
       );
-      if (derivedSdpMid != null) {
-        candidate = RTCIceCandidate(
-          candidate.candidate!,
-          derivedSdpMid,
-          candidate.sdpMLineIndex,
-        );
-      }
-    }
-
-    if (_isRemoteDescriptionSet) {
-      try {
-        await _peerConnection!.addCandidate(candidate);
-      } catch (e) {
-        dev.log('[$cameraId] ⚠️ Error adding remote ICE candidate: $e.');
-      }
-    } else {
-      dev.log(
-        '[$cameraId] Remote description not set yet. Buffering remote ICE candidate.',
-      );
-      _remoteCandidateBuffer.add(candidate);
+      await _peerConnection!.addCandidate(ice);
+    } catch (e) {
+      dev.log('[$cameraId] Error adding remote ICE candidate: $e');
     }
   }
 
-  void _onIceCandidate(RTCIceCandidate candidate) {
-    if (candidate.candidate == null) {
-      dev.log('[$cameraId] End of local ICE candidates.');
-      return;
-    }
-    // Buffer local candidates to enforce signaling order.
-    if (_isAnswerSent) {
-      _sendTrickle(candidate);
-    } else {
-      _localCandidateBuffer.add(candidate);
-    }
-  }
+  Future<void> _negotiate(InviteResponse msg) async {
+    final oaConstraints = <String, dynamic>{
+      'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': true},
+      'optional': [
+        {'DtlsSrtpKeyAgreement': true},
+      ],
+    };
 
-  void _sendTrickle(RTCIceCandidate candidate) {
-    if (sessionId != null) {
-      sessionHub.signalingHandler.sendTrickle(
-        TrickleMessage(session: sessionId!, candidate: candidate, id: '4'),
-      );
-    }
-  }
+    final offerSdp = _isH264(msg.offer.sdp)
+        ? mungeSdp(msg.offer.sdp)
+        : msg.offer.sdp;
 
-  String? _getMidForMlineIndex(String sdp, int mlineIndex) {
-    final lines = sdp.split(RegExp(r'\r\n|\n'));
-    int currentMline = -1;
-    String? currentMid;
-    for (final line in lines) {
-      if (line.startsWith('m=')) {
-        currentMline++;
-        currentMid = null;
-      }
-      if (line.startsWith('a=mid:')) {
-        currentMid = line.substring(6).trim();
-      }
-      if (currentMline == mlineIndex && currentMid != null) {
-        return currentMid;
-      }
-    }
-    return null;
+    final remoteDesc = RTCSessionDescription(offerSdp, msg.offer.type);
+    await _peerConnection!.setRemoteDescription(remoteDesc);
+
+    final answer = await _peerConnection!.createAnswer(oaConstraints);
+    await _peerConnection!.setLocalDescription(answer);
+
+    await iceCandidatesGathering.future;
+    final finalAnswer = await _peerConnection!.getLocalDescription();
+
+    await sessionHub.signalingHandler.sendInviteAnswer(
+      InviteAnswerMessage(
+        session: msg.session,
+        answerSdp: SdpWrapper(type: finalAnswer!.type!, sdp: finalAnswer.sdp!),
+        id: msg.id,
+      ),
+    );
   }
 
   void _onTrack(RTCTrackEvent event) {
-    dev.log(
-      '[$cameraId] Raw onTrack event received for track: ${event.track.kind}',
-    );
+    dev.log('[$cameraId] Track received: ${event.track.kind}');
     onTrack?.call(event);
   }
 
@@ -230,6 +164,23 @@ class WebRtcCameraSession {
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       dev.log('[$cameraId] 🎉 PEER CONNECTION ESTABLISHED!');
       onConnectionComplete?.call();
+    }
+  }
+
+  void _onIceCandidate(RTCIceCandidate candidate) {
+    dev.log('[$cameraId] Local ICE candidate generated');
+    if (candidate.candidate == null || candidate.candidate!.isEmpty) {
+      dev.log('[$cameraId] ✅ End of LOCAL candidates signal received.');
+      if (!iceCandidatesGathering.isCompleted) {
+        dev.log('[$cameraId] 🔓 Unlocking negotiation gate for local peer.');
+        iceCandidatesGathering.complete();
+      }
+      return;
+    }
+    if (sessionId != null) {
+      sessionHub.signalingHandler.sendTrickle(
+        TrickleMessage(session: sessionId!, candidate: candidate, id: '4'),
+      );
     }
   }
 
