@@ -30,8 +30,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   bool _isInitialized = false;
   bool _devicesRegistered = false;
   bool _camerasConnected = false;
-  // --- NEW STATE VARIABLE ---
-  // We use this simple bool to track if a stream has been successfully received.
   bool _streamReceived = false;
 
   @override
@@ -79,7 +77,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     }
 
     dev.log('Connecting to cameras...');
-    _streamReceived = false; // Reset on new connection
+    _streamReceived = false;
     setState(() {
       _camerasConnected = true;
     });
@@ -103,11 +101,9 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
           final videoRenderer = renderers[cameraId];
 
           if (videoRenderer != null) {
-            // We do not need to call Helper.setSpeakerphoneOn(). Setting the srcObject
-            // is sufficient for both audio and video playback.
             setState(() {
               videoRenderer.srcObject = stream;
-              _streamReceived = true; // Set our reliable flag
+              _streamReceived = true;
             });
           }
         };
@@ -186,7 +182,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                   const SizedBox(height: 4),
                   Row(
                     children: [
-                      // --- FINAL FIX: Use our reliable state variable ---
                       Icon(
                         _streamReceived
                             ? Icons.check_circle
@@ -197,7 +192,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                       Text(
                         'Cameras: ${_streamReceived ? cameraSessions.length : 0} connected',
                       ),
-                      // --- END OF FIX ---
                     ],
                   ),
                 ],
@@ -269,7 +263,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                       );
                     },
                   )
-                : Center(/* ... unchanged ... */),
+                : Center(),
           ),
         ],
       ),

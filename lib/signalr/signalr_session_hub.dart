@@ -83,7 +83,7 @@ class SignalRSessionHub {
     final session = _activeSessions.remove(cameraId);
     if (session != null) {
       session.dispose();
-      // signalingHandler.endSession(session.sessionId);
+      //signalingHandler.endSession(session.sessionId);
     }
   }
 
@@ -97,7 +97,6 @@ class SignalRSessionHub {
     dev.log('Session started: ${msg.session}');
     iceServers = msg.iceServers;
 
-    // Find the camera session that's waiting for this connection
     for (var session in _activeSessions.values) {
       if (session.sessionId == null) {
         session.handleConnectResponse(msg);
@@ -107,7 +106,6 @@ class SignalRSessionHub {
   }
 
   void _onInvite(InviteResponse msg) {
-    // Route invite to the correct camera session
     final session = _activeSessions.values
         .where((s) => s.sessionId == msg.session)
         .firstOrNull;
@@ -120,7 +118,6 @@ class SignalRSessionHub {
   }
 
   void _onTrickleMessage(TrickleMessage msg) {
-    // Route trickle to the correct camera session
     final session = _activeSessions.values
         .where((s) => s.sessionId == msg.session)
         .firstOrNull;

@@ -124,6 +124,7 @@ class WebRtcCameraSession {
       ],
     };
 
+    // SDP munging for iOS and Android H.264 compatibility
     final offerSdp = _isH264(msg.offer.sdp)
         ? mungeSdp(msg.offer.sdp)
         : msg.offer.sdp;
