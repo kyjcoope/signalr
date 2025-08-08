@@ -28,6 +28,9 @@ class WebRtcCameraSession {
   void Function(RTCTrackEvent)? onTrack;
   void Function(Uint8List)? onDataFrame;
 
+  bool remoteDescSet = false;
+  List<TrickleMessage> pendingTrickles = [];
+
   Stream<String> get messageStream => _messageController.stream;
 
   Future<void> initializeConnection() async {
@@ -58,9 +61,23 @@ class WebRtcCameraSession {
     pc.onConnectionState = _onConnectionState;
     pc.onIceCandidate = _onIceCandidate;
     pc.onDataChannel = _onDataChannel;
-    pc.onIceGatheringState = (state) {
+    pc.onIceGatheringState = (state) async {
       dev.log('[$cameraId] ICE gathering state: $state');
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        try {
+          final txs = await pc.getTransceivers();
+          for (final t in txs) {
+            final mid = t.mid;
+            if (mid.isNotEmpty) {
+              _sendEndOfCandidates(mid);
+            }
+          }
+        } catch (_) {
+          dev.log('[$cameraId] Error getting transceivers');
+          for (final mid in const ['audio', 'video', 'data']) {
+            _sendEndOfCandidates(mid);
+          }
+        }
         if (!iceCandidatesGathering.isCompleted) {
           iceCandidatesGathering.complete();
         }
@@ -68,6 +85,17 @@ class WebRtcCameraSession {
     };
 
     _peerConnection = pc;
+  }
+
+  void _sendEndOfCandidates(String mid) {
+    if (sessionId == null) return;
+    dev.log('[$cameraId] Sending End-Of-Candidates for mid=$mid');
+
+    // Empty candidate + sdpMid only
+    final eoc = RTCIceCandidate('', mid, null);
+    sessionHub.signalingHandler.sendTrickle(
+      TrickleMessage(session: sessionId!, candidate: eoc, id: 'eoc'),
+    );
   }
 
   void dispose() {
@@ -97,21 +125,42 @@ class WebRtcCameraSession {
   Completer<void> iceCandidatesGathering = Completer<void>();
 
   Future<void> handleTrickle(TrickleMessage msg) async {
-    if (_peerConnection == null || (msg.candidate.candidate ?? '').isEmpty) {
-      dev.log('[$cameraId] No peer connection or empty candidate, ignoring');
+    if ((msg.candidate.candidate ?? '').isEmpty) return;
+    if (_peerConnection == null || !remoteDescSet) {
+      pendingTrickles.add(msg);
       return;
     }
 
     dev.log('[$cameraId] Received remote ICE candidate');
     try {
-      var ice = RTCIceCandidate(
-        msg.candidate.candidate,
-        msg.candidate.sdpMid,
-        msg.candidate.sdpMLineIndex,
+      await _peerConnection!.addCandidate(
+        RTCIceCandidate(
+          msg.candidate.candidate,
+          msg.candidate.sdpMid,
+          msg.candidate.sdpMLineIndex,
+        ),
       );
-      await _peerConnection!.addCandidate(ice);
     } catch (e) {
       dev.log('[$cameraId] Error adding remote ICE candidate: $e');
+    }
+  }
+
+  Future<void> _drainQueuedRemoteIce() async {
+    if (pendingTrickles.isEmpty) return;
+    dev.log('[$cameraId] Draining ${pendingTrickles.length} queued remote ICE');
+    while (pendingTrickles.isNotEmpty) {
+      final trickle = pendingTrickles.removeAt(0);
+      try {
+        await _peerConnection?.addCandidate(
+          RTCIceCandidate(
+            trickle.candidate.candidate,
+            trickle.candidate.sdpMid,
+            trickle.candidate.sdpMLineIndex,
+          ),
+        );
+      } catch (e) {
+        dev.log('[$cameraId] Error adding queued ICE: $e');
+      }
     }
   }
 
@@ -131,11 +180,18 @@ class WebRtcCameraSession {
 
     final remoteDesc = RTCSessionDescription(msg.offer.sdp, msg.offer.type);
     await _peerConnection!.setRemoteDescription(remoteDesc);
+    remoteDescSet = true;
+
+    // Drain any queued remote ICE now that SRD is done
+    await _drainQueuedRemoteIce();
 
     final answer = await _peerConnection!.createAnswer(oaConstraints);
     await _peerConnection!.setLocalDescription(answer);
 
-    final timeout = Future.delayed(const Duration(seconds: 7));
+    // Android doesn't seem to get RTCIceGatheringState.RTCIceGatheringStateComplete
+    // so iceCandidatesGathering is never completed. So we use a timeout
+    // to ensure we don't get deadlocked.
+    final timeout = Future.delayed(const Duration(seconds: 5));
     await Future.any([iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
 
