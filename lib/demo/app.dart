@@ -9,29 +9,11 @@ class App extends StatefulWidget {
 }
 
 class _AppState extends State<App> {
-  bool showDisplay = false;
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Flutter WebRTC Example')),
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text('webrtc client'),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  showDisplay = !showDisplay;
-                });
-              },
-              child: Text(showDisplay ? 'Hide Display' : 'Show Display'),
-            ),
-            if (showDisplay) Flexible(child: WebRtcDisplay()),
-          ],
-        ),
-      ),
+      appBar: AppBar(title: const Text('SignalR WebRTC Demo')),
+      body: const WebRtcDisplay(), // Always show the display
     );
   }
 }

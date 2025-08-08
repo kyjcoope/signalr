@@ -13,11 +13,10 @@ class SignalRHandler {
     required this.onInvite,
     required this.onTrickle,
     required this.signalServiceUrl,
-  }) : _connection =
-           HubConnectionBuilder()
-               .withUrl(signalServiceUrl)
-               .withAutomaticReconnect(retryDelays: [0, 5000, 5000, 5000])
-               .build();
+  }) : _connection = HubConnectionBuilder()
+           .withUrl(signalServiceUrl)
+           .withAutomaticReconnect(retryDelays: [0, 5000, 5000, 5000])
+           .build();
   void Function(ConnectResponse) onConnect;
   void Function(RegisterResponse) onRegister;
   void Function(InviteResponse) onInvite;
@@ -46,6 +45,7 @@ class SignalRHandler {
       ({connectionId}) => dev.log('reconnected with $connectionId'),
     );
     _connection.onclose(({error}) => dev.log('Connection closed. $error'));
+    _connection.on('ReceivedSignalingMessage', _receivedSignalingMessage);
     _connection.on('register', _onRegister);
     _connection.on('connect', _onConnect);
     _connection.on('invite', _onInvite);
@@ -61,10 +61,30 @@ class SignalRHandler {
       rethrow;
     }
 
+    dev.log('send register');
     await sendRegister('');
   }
 
+  void _receivedSignalingMessage(List<Object?>? arguments) {
+    if (arguments == null || arguments.isEmpty) return;
+    final json = jsonDecode(arguments[0].toString());
+    final method = json['method'];
+    final result = json['result'];
+    final data = json['data'];
+
+    if (method == 'invite') {
+      _onInvite(arguments);
+    } else if (method == 'trickle') {
+      _onTrickle(arguments);
+    } else if (result != null) {
+      _onConnect(arguments);
+    } else if (data != null) {
+      onRegister(RegisterResponse.fromJson(data));
+    }
+  }
+
   void _onRegister(List<Object?>? arguments) {
+    dev.log('Received register message: $arguments');
     if (arguments == null || arguments.isEmpty) return;
     dev.log(
       'Received register message: ${arguments.length}',
@@ -77,51 +97,37 @@ class SignalRHandler {
 
   void _onConnect(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    dev.log('Received connect message: $arguments');
-    final data =
-        arguments[0] is Map
-            ? arguments[0]
-            : jsonDecode(arguments[0].toString());
+
+    final data = arguments[0] is Map
+        ? arguments[0]
+        : jsonDecode(arguments[0].toString());
+    dev.log('Received connect message: $data');
     onConnect(ConnectResponse.fromJson(data));
   }
 
   void _onInvite(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    final data =
-        arguments[0] is Map
-            ? arguments[0]
-            : jsonDecode(arguments[0].toString());
+    final data = arguments[0] is Map
+        ? arguments[0]
+        : jsonDecode(arguments[0].toString());
     final inviteResponse = InviteResponse.fromJson(data);
-    dev.log('Received invite message: $inviteResponse');
+    dev.log('Received invite message: $data');
     onInvite(inviteResponse);
   }
 
   void _onTrickle(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-    final data =
-        arguments[0] is Map
-            ? arguments[0]
-            : jsonDecode(arguments[0].toString());
-
-    if (data['iceCandidate'] != null) {
-      final candidate = data['iceCandidate'];
-      if (candidate['sdpMid'] == null) {
-        candidate['sdpMid'] = candidate['sdpMLineIndex']?.toString() ?? "0";
-      }
-      if (candidate['sdpMLineIndex'] == null) {
-        candidate['sdpMLineIndex'] = 0;
-      }
-    }
+    final data = arguments[0] is Map
+        ? arguments[0]
+        : jsonDecode(arguments[0].toString());
 
     final trickleResponse = TrickleMessage.fromJson(data);
-    dev.log('Received trickle message: $trickleResponse');
+    dev.log('Received trickle message: $data');
     onTrickle(trickleResponse);
   }
 
   Future<void> _send(SignalRMessage message) async {
-    dev.log(
-      'Sending WebRTC SignalR Message: status is ${_connection.state}, id is ${_connection.connectionId}, method: ${message.method.json}, params: ${message.params.toJson()}',
-    );
+    dev.log('Sending SignalR message: ${message.toJson()}');
     await _connection
         .invoke('SendMessage', args: [message.toJson()])
         .catchError((error) {
@@ -138,6 +144,9 @@ class SignalRHandler {
       await _send(request);
 
   Future<void> sendInvite(InviteRequest request) async => await _send(request);
+
+  Future<void> sendInviteAnswer(InviteAnswerMessage request) async =>
+      await _send(request);
 
   Future<void> sendTrickle(TrickleMessage request) async =>
       await _send(request);
