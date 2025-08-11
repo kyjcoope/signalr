@@ -20,14 +20,18 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   bool _isInitialized = false;
   bool _devicesRegistered = false;
 
-  final _favoritesStore = FavoritesStore();
+  final _store = FavoritesStore();
   bool _favoritesOnly = false;
+  bool _workingOnly = false;
+
+  final GlobalKey<CameraListState> _cameraListKey =
+      GlobalKey<CameraListState>();
 
   @override
   void initState() {
     super.initState();
     _initialize();
-    _loadFavoritesOnly();
+    _loadToggles();
   }
 
   @override
@@ -56,15 +60,24 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     });
   }
 
-  Future<void> _loadFavoritesOnly() async {
-    final favOnly = await _favoritesStore.loadFavoritesOnly();
+  Future<void> _loadToggles() async {
+    final favOnly = await _store.loadFavoritesOnly();
+    final workOnly = await _store.loadWorkingOnly();
     if (!mounted) return;
-    setState(() => _favoritesOnly = favOnly);
+    setState(() {
+      _favoritesOnly = favOnly;
+      _workingOnly = workOnly;
+    });
   }
 
   Future<void> _setFavoritesOnly(bool v) async {
     setState(() => _favoritesOnly = v);
-    await _favoritesStore.saveFavoritesOnly(v);
+    await _store.saveFavoritesOnly(v);
+  }
+
+  Future<void> _setWorkingOnly(bool v) async {
+    setState(() => _workingOnly = v);
+    await _store.saveWorkingOnly(v);
   }
 
   @override
@@ -81,7 +94,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
               padding: const EdgeInsets.all(16.0),
               child: Column(
                 children: [
-                  // Header: Status (left) + settings (right)
                   Row(
                     children: [
                       Text(
@@ -89,19 +101,67 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                         style: Theme.of(context).textTheme.headlineSmall,
                       ),
                       const Spacer(),
-                      Row(
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 12,
                         children: [
-                          const Icon(Icons.star, color: Colors.amber, size: 18),
-                          const SizedBox(width: 6),
-                          const Text('Favorites only'),
-                          const SizedBox(width: 6),
-                          Switch(
-                            value: _favoritesOnly,
-                            onChanged: _setFavoritesOnly,
-                            materialTapTargetSize:
-                                MaterialTapTargetSize.shrinkWrap,
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.star,
+                                color: Colors.amber,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 6),
+                              const Text('Favorites only'),
+                              const SizedBox(width: 6),
+                              Switch(
+                                value: _favoritesOnly,
+                                onChanged: _setFavoritesOnly,
+                                materialTapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ],
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.check_circle,
+                                color: Colors.green,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 6),
+                              const Text('Working only'),
+                              const SizedBox(width: 6),
+                              Switch(
+                                value: _workingOnly,
+                                onChanged: _setWorkingOnly,
+                                materialTapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ],
                           ),
                         ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () =>
+                            _cameraListKey.currentState?.connectAll(),
+                        icon: const Icon(Icons.play_circle_fill),
+                        label: const Text('Connect all'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: () => _cameraListKey.currentState?.stopAll(),
+                        icon: const Icon(Icons.stop_circle, color: Colors.red),
+                        label: const Text('Stop all'),
                       ),
                     ],
                   ),
@@ -146,8 +206,10 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                     child: Text('Waiting for device registration...'),
                   )
                 : CameraList(
+                    key: _cameraListKey,
                     sessionHub: sessionHub,
                     favoritesOnly: _favoritesOnly,
+                    workingOnly: _workingOnly,
                   ),
           ),
         ],

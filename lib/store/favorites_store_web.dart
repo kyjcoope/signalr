@@ -4,7 +4,11 @@ import 'package:web/web.dart' as web;
 class FavoritesStore {
   static const _favKey = 'favorite_cameras';
   static const _favOnlyKey = 'favorite_cameras_only';
-  static const _maxAge = 31536000; // 1 year
+
+  static const _workKey = 'working_cameras';
+  static const _workOnlyKey = 'working_cameras_only';
+
+  static const _maxAge = 31536000;
 
   Future<Set<String>> loadFavorites() async {
     final raw = _readCookie(_favKey) ?? _readLocal(_favKey);
@@ -33,6 +37,35 @@ class FavoritesStore {
     final v = value ? '1' : '0';
     _writeCookie(_favOnlyKey, v, maxAge: _maxAge);
     _writeLocal(_favOnlyKey, v);
+  }
+
+  Future<Set<String>> loadWorking() async {
+    final raw = _readCookie(_workKey) ?? _readLocal(_workKey);
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final list = (jsonDecode(raw) as List).cast<String>();
+      return list.toSet();
+    } catch (_) {
+      return raw.split('|').where((e) => e.isNotEmpty).toSet();
+    }
+  }
+
+  Future<void> saveWorking(Set<String> ids) async {
+    final payload = jsonEncode(ids.toList()..sort());
+    _writeCookie(_workKey, payload, maxAge: _maxAge);
+    _writeLocal(_workKey, payload);
+  }
+
+  Future<bool> loadWorkingOnly() async {
+    final raw = _readCookie(_workOnlyKey) ?? _readLocal(_workOnlyKey);
+    if (raw == null) return false;
+    return raw == '1' || raw.toLowerCase() == 'true';
+  }
+
+  Future<void> saveWorkingOnly(bool value) async {
+    final v = value ? '1' : '0';
+    _writeCookie(_workOnlyKey, v, maxAge: _maxAge);
+    _writeLocal(_workOnlyKey, v);
   }
 
   String? _readCookie(String name) {

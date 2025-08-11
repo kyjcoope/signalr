@@ -150,8 +150,8 @@ class EndSessionMessage implements SignalingMessage {
 extension RTCIceCandidateExt on RTCIceCandidate {
   static RTCIceCandidate fromJson(dynamic json) => RTCIceCandidate(
     json['candidate'] ?? '',
-    json['sdpMid'], // don't synthesize
-    json['sdpMLineIndex'], // let it be null or int
+    json['sdpMid'],
+    json['sdpMLineIndex'],
   );
   Map<String, Object?> toJson() => {
     'candidate': candidate,

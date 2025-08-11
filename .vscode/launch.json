@@ -2,23 +2,10 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Flutter: Debug (Web Server:7357)",
+      "name": "Flutter Chrome (Port 7357)",
       "request": "launch",
       "type": "dart",
-      "deviceId": "web-server",
-      "args": ["--web-port", "7357", "--web-hostname", "localhost"]
-    },
-    {
-      "name": "Flutter: Debug (Chrome:7357)",
-      "request": "launch",
-      "type": "dart",
-      "deviceId": "chrome",
-      "args": ["--web-port", "7357", "--web-hostname", "localhost"]
-    },
-    {
-      "name": "Flutter: Debug",
-      "request": "launch",
-      "type": "dart"
+      "args": ["-d", "chrome", "--web-port", "7357"]
     }
   ]
 }

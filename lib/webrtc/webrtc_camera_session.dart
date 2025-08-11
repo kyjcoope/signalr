@@ -28,6 +28,8 @@ class WebRtcCameraSession {
   VoidCallback? onDataChannelReady;
   void Function(RTCTrackEvent)? onTrack;
   void Function(Uint8List)? onDataFrame;
+  VoidCallback? onLocalIceCandidate;
+  bool _localIceSeen = false;
 
   bool remoteDescSet = false;
   List<TrickleMessage> pendingTrickles = [];
@@ -37,50 +39,19 @@ class WebRtcCameraSession {
   Future<void> initializeConnection() async {
     if (_peerConnection != null) return;
 
-    List<Map<String, dynamic>> _tcpTlsTurnServers() {
-      return sessionHub.iceServers
-          .map((e) => e.toJson())
-          .map<Map<String, dynamic>>((srv) {
-            final urlsField = srv['urls'] ?? srv['url'];
-            final urls = urlsField is List
-                ? urlsField.cast<String>()
-                : [urlsField as String];
-
-            // keep: turns:*  OR  turn:* with ?transport=tcp
-            final tcpUrls = urls.where((u) {
-              final lu = u.toLowerCase();
-              return lu.startsWith('turns:') ||
-                  (lu.startsWith('turn:') && lu.contains('transport=tcp'));
-            }).toList();
-
-            if (tcpUrls.isEmpty) return {};
-            return {
-              'urls': tcpUrls,
-              if (srv['username'] != null) 'username': srv['username'],
-              if (srv['credential'] != null) 'credential': srv['credential'],
-            };
-          })
-          .where((m) => m.isNotEmpty)
-          .toList();
+    final iceServers = <Map<String, dynamic>>[
+      for (var s in sessionHub.iceServers) s.toJson(),
+    ];
+    if (iceServers.isEmpty) {
+      iceServers.add({'urls': 'stun:stun.l.google.com:19302'});
     }
 
-    final iceServers = <Map<String, dynamic>>[];
-    for (var server in sessionHub.iceServers) {
-      iceServers.add(server.toJson());
-    }
-
-    // It's a good practice to add a public STUN server as a fallback
-    iceServers.add({'urls': 'stun:stun.l.google.com:19302'});
-
-    dev.log('Ice servers: ${iceServers.map((e) => e['urls']).join(', ')}');
-
-    // Use it in your RTCPeerConnection config
     final config = <String, dynamic>{
       'iceServers': iceServers,
-      //'iceTransportPolicy': 'all', // force TURN only
       'sdpSemantics': 'unified-plan',
-      // 'rtcpMuxPolicy': 'require', // optional, defaults to require in most stacks
-      // 'iceCandidatePoolSize': 0,  // optional; can leave as default
+      'iceTransportPolicy': 'all',
+      'bundlePolicy': 'balanced',
+      'rtcpMuxPolicy': 'require',
     };
 
     dev.log('[$cameraId] Initializing WebRTC peer connection');
@@ -103,8 +74,8 @@ class WebRtcCameraSession {
           final txs = await pc.getTransceivers();
           for (final t in txs) {
             final mid = t.mid;
-            if (mid != null && mid.isNotEmpty) {
-              _sendEndOfCandidates(mid); // <-- IMPORTANT
+            if (mid.isNotEmpty) {
+              _sendEndOfCandidates(mid);
             }
           }
         } catch (_) {
@@ -122,10 +93,6 @@ class WebRtcCameraSession {
 
     await _peerConnection!.addTransceiver(
       kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-    );
-    await _peerConnection!.addTransceiver(
-      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
   }
@@ -165,7 +132,13 @@ class WebRtcCameraSession {
   Completer<void> iceCandidatesGathering = Completer<void>();
 
   Future<void> handleTrickle(TrickleMessage msg) async {
-    if ((msg.candidate.candidate ?? '').isEmpty) return;
+    if ((msg.candidate.candidate ?? '').isEmpty) {
+      // End-of-candidates indication
+      dev.log(
+        '[$cameraId] Received end-of-candidates for mid=${msg.candidate.sdpMid}',
+      );
+      return;
+    }
     if (_peerConnection == null || !remoteDescSet) {
       pendingTrickles.add(msg);
       return;
@@ -173,12 +146,14 @@ class WebRtcCameraSession {
 
     dev.log('[$cameraId] Received remote ICE candidate');
     try {
+      String? mid = msg.candidate.sdpMid;
+      final mline = msg.candidate.sdpMLineIndex;
+      if ((mid == null || mid.isEmpty) && mline != null) {
+        mid = mline == 0 ? 'video0' : 'application1';
+      }
+
       await _peerConnection!.addCandidate(
-        RTCIceCandidate(
-          msg.candidate.candidate,
-          msg.candidate.sdpMid,
-          msg.candidate.sdpMLineIndex,
-        ),
+        RTCIceCandidate(msg.candidate.candidate, mid, mline),
       );
     } catch (e) {
       dev.log('[$cameraId] Error adding remote ICE candidate: $e');
@@ -191,12 +166,14 @@ class WebRtcCameraSession {
     while (pendingTrickles.isNotEmpty) {
       final trickle = pendingTrickles.removeAt(0);
       try {
+        String? mid = trickle.candidate.sdpMid;
+        final mline = trickle.candidate.sdpMLineIndex;
+        if ((mid == null || mid.isEmpty) && mline != null) {
+          mid = mline == 0 ? 'video0' : 'application1';
+        }
+
         await _peerConnection?.addCandidate(
-          RTCIceCandidate(
-            trickle.candidate.candidate,
-            trickle.candidate.sdpMid,
-            trickle.candidate.sdpMLineIndex,
-          ),
+          RTCIceCandidate(trickle.candidate.candidate, mid, mline),
         );
       } catch (e) {
         dev.log('[$cameraId] Error adding queued ICE: $e');
@@ -211,16 +188,14 @@ class WebRtcCameraSession {
         ? mungeSdp(msg.offer.sdp)
         : msg.offer.sdp;
 
-    // Use the munged offer
     await _peerConnection!.setRemoteDescription(
       RTCSessionDescription(offerSdp, msg.offer.type),
     );
 
-    final answer = await _peerConnection!.createAnswer({
-      'optional': [
-        {'DtlsSrtpKeyAgreement': true},
-      ],
-    });
+    remoteDescSet = true;
+    await _drainQueuedRemoteIce();
+
+    final answer = await _peerConnection!.createAnswer({});
     await _peerConnection!.setLocalDescription(answer);
 
     final finalAnswer = await _peerConnection!.getLocalDescription();
@@ -233,7 +208,6 @@ class WebRtcCameraSession {
     );
 
     await _drainQueuedRemoteIce();
-    remoteDescSet = true;
   }
 
   void _onTrack(RTCTrackEvent event) {
@@ -276,6 +250,11 @@ class WebRtcCameraSession {
 
   void _onIceCandidate(RTCIceCandidate c) {
     if ((c.candidate ?? '').isNotEmpty) {
+      if (!_localIceSeen) {
+        _localIceSeen = true;
+        onLocalIceCandidate?.call();
+      }
+
       final cand = c.candidate!;
       final m = RegExp(
         r'candidate:\S+ \d (udp|tcp) \S+ ([0-9a-fA-F\.:]+) (\d+) typ (\w+)',

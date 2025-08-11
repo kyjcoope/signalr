@@ -84,7 +84,7 @@ class CandidateParam implements SignalRParam {
     'candidate': candidate.candidate,
     'sdpMid': candidate.sdpMid,
     'sdpMLineIndex': candidate.sdpMLineIndex,
-    'usernameFragment': _extractUsernameFragment(),
+    //'usernameFragment': _extractUsernameFragment(),
   };
 
   String? _extractUsernameFragment() {

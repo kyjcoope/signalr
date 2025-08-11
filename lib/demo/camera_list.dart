@@ -11,16 +11,18 @@ class CameraList extends StatefulWidget {
     super.key,
     required this.sessionHub,
     required this.favoritesOnly,
+    required this.workingOnly,
   });
 
   final SignalRSessionHub sessionHub;
   final bool favoritesOnly;
+  final bool workingOnly;
 
   @override
-  State<CameraList> createState() => _CameraListState();
+  CameraListState createState() => CameraListState();
 }
 
-class _CameraListState extends State<CameraList> {
+class CameraListState extends State<CameraList> {
   final Map<String, RTCVideoRenderer> _renderers = {};
   final Map<String, WebRtcCameraSession> _sessions = {};
 
@@ -30,8 +32,9 @@ class _CameraListState extends State<CameraList> {
   static const double _videoWidth = 320;
   static const double _videoHeight = 180;
 
-  final FavoritesStore _favoritesStore = FavoritesStore();
+  final FavoritesStore _store = FavoritesStore();
   Set<String> _favorites = {};
+  Set<String> _working = {};
 
   @override
   void initState() {
@@ -40,14 +43,16 @@ class _CameraListState extends State<CameraList> {
       final q = _filterCtrl.text.trim();
       if (q != _filter) setState(() => _filter = q);
     });
-    _loadPrefs();
+    _loadPersisted();
   }
 
-  Future<void> _loadPrefs() async {
-    final favs = await _favoritesStore.loadFavorites();
+  Future<void> _loadPersisted() async {
+    final favs = await _store.loadFavorites();
+    final working = await _store.loadWorking();
     if (!mounted) return;
     setState(() {
       _favorites = favs;
+      _working = working;
     });
   }
 
@@ -66,6 +71,42 @@ class _CameraListState extends State<CameraList> {
     super.dispose();
   }
 
+  List<String> _visibleCameras() {
+    final all = widget.sessionHub.availableProducers.toList()..sort();
+
+    List<String> base = all;
+    if (widget.favoritesOnly) {
+      base = base.where((id) => _favorites.contains(id)).toList();
+    }
+    if (widget.workingOnly) {
+      base = base.where((id) => _working.contains(id)).toList();
+    }
+
+    final filtered = _filter.isEmpty
+        ? base
+        : base
+              .where((id) => id.toLowerCase().contains(_filter.toLowerCase()))
+              .toList();
+
+    return filtered;
+  }
+
+  Future<void> connectAll() async {
+    final targets = _visibleCameras();
+    for (final id in targets) {
+      if (!_sessions.containsKey(id)) {
+        await _connect(id);
+      }
+    }
+  }
+
+  Future<void> stopAll() async {
+    final ids = _sessions.keys.toList();
+    for (final id in ids) {
+      _disconnect(id);
+    }
+  }
+
   Future<void> _connect(String cameraId) async {
     dev.log('Connecting $cameraId...');
     final session = await widget.sessionHub.connectToCamera(cameraId);
@@ -80,6 +121,15 @@ class _CameraListState extends State<CameraList> {
         renderer.srcObject = event.streams[0];
       });
       dev.log('[$cameraId] track: ${event.track.kind}');
+    };
+
+    session.onLocalIceCandidate = () async {
+      if (!_working.contains(cameraId)) {
+        setState(() {
+          _working.add(cameraId);
+        });
+        await _store.saveWorking(_working);
+      }
     };
 
     setState(() {
@@ -108,22 +158,13 @@ class _CameraListState extends State<CameraList> {
         _favorites.add(cameraId);
       }
     });
-    await _favoritesStore.saveFavorites(_favorites);
+    await _store.saveFavorites(_favorites);
   }
 
   @override
   Widget build(BuildContext context) {
     final all = widget.sessionHub.availableProducers.toList()..sort();
-
-    final base = widget.favoritesOnly
-        ? all.where((id) => _favorites.contains(id)).toList()
-        : all;
-
-    final cameras = _filter.isEmpty
-        ? base
-        : base
-              .where((id) => id.toLowerCase().contains(_filter.toLowerCase()))
-              .toList();
+    final cameras = _visibleCameras();
 
     if (all.isEmpty) {
       return const Center(child: Text('No cameras available'));
@@ -131,7 +172,6 @@ class _CameraListState extends State<CameraList> {
 
     return Column(
       children: [
-        // Filter row: search + count (favorites toggle is in Status card)
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: Row(
@@ -170,6 +210,7 @@ class _CameraListState extends State<CameraList> {
               final connected = _sessions.containsKey(cameraId);
               final renderer = _renderers[cameraId];
               final isFav = _favorites.contains(cameraId);
+              final isWorking = _working.contains(cameraId);
 
               return Card(
                 margin: const EdgeInsets.symmetric(vertical: 6),
@@ -178,7 +219,6 @@ class _CameraListState extends State<CameraList> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Header row: Favorite (left) + ID + Start/Stop
                       Row(
                         children: [
                           IconButton(
@@ -197,6 +237,38 @@ class _CameraListState extends State<CameraList> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
+                          if (isWorking) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.green.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.green),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: const [
+                                  Icon(
+                                    Icons.check_circle,
+                                    color: Colors.green,
+                                    size: 14,
+                                  ),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'Working',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.green,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                           const SizedBox(width: 8),
                           connected
                               ? OutlinedButton.icon(
@@ -214,7 +286,6 @@ class _CameraListState extends State<CameraList> {
                                 ),
                         ],
                       ),
-                      // Fixed-size panel, only when connected
                       if (connected && renderer != null) ...[
                         const SizedBox(height: 8),
                         Align(
