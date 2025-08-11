@@ -122,7 +122,7 @@ class SignalRHandler {
         : jsonDecode(arguments[0].toString());
 
     final trickleResponse = TrickleMessage.fromJson(data);
-    dev.log('Received trickle message: $data');
+    dev.log('Received trickle message data: $data');
     onTrickle(trickleResponse);
   }
 

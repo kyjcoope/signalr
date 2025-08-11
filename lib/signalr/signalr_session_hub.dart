@@ -72,7 +72,8 @@ class SignalRSessionHub {
         signalingHandler.connectionId,
         authorization: '',
         deviceId: fullProducerId,
-        iceServers: iceServers,
+        //iceServers: iceServers,
+        profile: '',
       ),
     );
 

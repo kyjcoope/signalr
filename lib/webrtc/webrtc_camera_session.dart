@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:developer' as dev;
 
+import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
@@ -36,31 +37,65 @@ class WebRtcCameraSession {
   Future<void> initializeConnection() async {
     if (_peerConnection != null) return;
 
-    final defaultIceServers = [
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:stun1.l.google.com:19302'},
-      {'urls': 'stun:stun2.l.google.com:19302'},
-      {'urls': 'stun:stun3.l.google.com:19302'},
-      {'urls': 'stun:stun4.l.google.com:19302'},
-      ...sessionHub.iceServers.map((e) => e.toJson()),
-    ];
+    List<Map<String, dynamic>> _tcpTlsTurnServers() {
+      return sessionHub.iceServers
+          .map((e) => e.toJson())
+          .map<Map<String, dynamic>>((srv) {
+            final urlsField = srv['urls'] ?? srv['url'];
+            final urls = urlsField is List
+                ? urlsField.cast<String>()
+                : [urlsField as String];
 
+            // keep: turns:*  OR  turn:* with ?transport=tcp
+            final tcpUrls = urls.where((u) {
+              final lu = u.toLowerCase();
+              return lu.startsWith('turns:') ||
+                  (lu.startsWith('turn:') && lu.contains('transport=tcp'));
+            }).toList();
+
+            if (tcpUrls.isEmpty) return {};
+            return {
+              'urls': tcpUrls,
+              if (srv['username'] != null) 'username': srv['username'],
+              if (srv['credential'] != null) 'credential': srv['credential'],
+            };
+          })
+          .where((m) => m.isNotEmpty)
+          .toList();
+    }
+
+    final iceServers = <Map<String, dynamic>>[];
+    for (var server in sessionHub.iceServers) {
+      iceServers.add(server.toJson());
+    }
+
+    // It's a good practice to add a public STUN server as a fallback
+    iceServers.add({'urls': 'stun:stun.l.google.com:19302'});
+
+    dev.log('Ice servers: ${iceServers.map((e) => e['urls']).join(', ')}');
+
+    // Use it in your RTCPeerConnection config
     final config = <String, dynamic>{
-      'iceServers': defaultIceServers,
-      'iceTransportPolicy': 'all',
-      'iceCandidatePoolSize': 0,
-      'rtcpMuxPolicy': 'require',
+      'iceServers': iceServers,
+      //'iceTransportPolicy': 'all', // force TURN only
       'sdpSemantics': 'unified-plan',
+      // 'rtcpMuxPolicy': 'require', // optional, defaults to require in most stacks
+      // 'iceCandidatePoolSize': 0,  // optional; can leave as default
     };
 
     dev.log('[$cameraId] Initializing WebRTC peer connection');
     final pc = await createPeerConnection(config);
+
+    dev.log('cfg: ${(pc.getConfiguration).toString()}');
 
     pc.onTrack = _onTrack;
     pc.onIceConnectionState = _onIceConnectionState;
     pc.onConnectionState = _onConnectionState;
     pc.onIceCandidate = _onIceCandidate;
     pc.onDataChannel = _onDataChannel;
+    pc.onSignalingState = (s) => dev.log('[$cameraId] Signaling state: $s');
+    pc.onRenegotiationNeeded = () =>
+        dev.log('[$cameraId] Renegotiation needed');
     pc.onIceGatheringState = (state) async {
       dev.log('[$cameraId] ICE gathering state: $state');
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
@@ -68,13 +103,12 @@ class WebRtcCameraSession {
           final txs = await pc.getTransceivers();
           for (final t in txs) {
             final mid = t.mid;
-            if (mid.isNotEmpty) {
-              _sendEndOfCandidates(mid);
+            if (mid != null && mid.isNotEmpty) {
+              _sendEndOfCandidates(mid); // <-- IMPORTANT
             }
           }
         } catch (_) {
-          dev.log('[$cameraId] Error getting transceivers');
-          for (final mid in const ['audio', 'video', 'data']) {
+          for (final mid in const ['video0', 'application1']) {
             _sendEndOfCandidates(mid);
           }
         }
@@ -85,14 +119,20 @@ class WebRtcCameraSession {
     };
 
     _peerConnection = pc;
+
+    await _peerConnection!.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    await _peerConnection!.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
   }
 
   void _sendEndOfCandidates(String mid) {
     if (sessionId == null) return;
-    dev.log('[$cameraId] Sending End-Of-Candidates for mid=$mid');
-
-    // Empty candidate + sdpMid only
-    final eoc = RTCIceCandidate('', mid, null);
+    final eoc = RTCIceCandidate(null, mid, null);
     sessionHub.signalingHandler.sendTrickle(
       TrickleMessage(session: sessionId!, candidate: eoc, id: 'eoc'),
     );
@@ -166,35 +206,24 @@ class WebRtcCameraSession {
 
   Future<void> _negotiate(InviteResponse msg) async {
     iceCandidatesGathering = Completer<void>();
-    final oaConstraints = <String, dynamic>{
-      'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': true},
-      'optional': [
-        {'DtlsSrtpKeyAgreement': true},
-      ],
-    };
 
-    // SDP munging for iOS and Android H.264 compatibility
     final offerSdp = _isH264(msg.offer.sdp)
         ? mungeSdp(msg.offer.sdp)
         : msg.offer.sdp;
 
-    final remoteDesc = RTCSessionDescription(msg.offer.sdp, msg.offer.type);
-    await _peerConnection!.setRemoteDescription(remoteDesc);
-    remoteDescSet = true;
+    // Use the munged offer
+    await _peerConnection!.setRemoteDescription(
+      RTCSessionDescription(offerSdp, msg.offer.type),
+    );
 
-    // Drain any queued remote ICE now that SRD is done
-    await _drainQueuedRemoteIce();
-
-    final answer = await _peerConnection!.createAnswer(oaConstraints);
+    final answer = await _peerConnection!.createAnswer({
+      'optional': [
+        {'DtlsSrtpKeyAgreement': true},
+      ],
+    });
     await _peerConnection!.setLocalDescription(answer);
 
-    // Android doesn't seem to get RTCIceGatheringState.RTCIceGatheringStateComplete
-    // so iceCandidatesGathering is never completed. So we use a timeout
-    // to ensure we don't get deadlocked.
-    final timeout = Future.delayed(const Duration(seconds: 5));
-    await Future.any([iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
-
     await sessionHub.signalingHandler.sendInviteAnswer(
       InviteAnswerMessage(
         session: msg.session,
@@ -202,6 +231,9 @@ class WebRtcCameraSession {
         id: msg.id,
       ),
     );
+
+    await _drainQueuedRemoteIce();
+    remoteDescSet = true;
   }
 
   void _onTrack(RTCTrackEvent event) {
@@ -209,12 +241,28 @@ class WebRtcCameraSession {
     onTrack?.call(event);
   }
 
+  Timer? _statsTimer;
+
   void _onIceConnectionState(RTCIceConnectionState state) {
     dev.log('[$cameraId] ICE connection state: $state');
-    if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+    if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
+      _statsTimer?.cancel();
+      _statsTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => logSelected(_peerConnection!),
+      );
+    }
+    if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+        state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+      _statsTimer?.cancel();
+      logSelected(_peerConnection!);
       dev.log('[$cameraId] 🎉 ICE CONNECTION ESTABLISHED!');
-    } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-      dev.log('[$cameraId] ❌ ICE CONNECTION FAILED');
+    }
+    if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
+        state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+      _statsTimer?.cancel();
+      logSelected(_peerConnection!);
+      dev.log('[$cameraId] ❌ ICE ISSUE (state=$state)');
     }
   }
 
@@ -226,19 +274,31 @@ class WebRtcCameraSession {
     }
   }
 
-  void _onIceCandidate(RTCIceCandidate candidate) {
-    dev.log('[$cameraId] Local ICE candidate generated');
-    if (candidate.candidate == null || candidate.candidate!.isEmpty) {
-      dev.log('[$cameraId] ✅ End of LOCAL candidates signal received.');
+  void _onIceCandidate(RTCIceCandidate c) {
+    if ((c.candidate ?? '').isNotEmpty) {
+      final cand = c.candidate!;
+      final m = RegExp(
+        r'candidate:\S+ \d (udp|tcp) \S+ ([0-9a-fA-F\.:]+) (\d+) typ (\w+)',
+      ).firstMatch(cand);
+      if (m != null) {
+        final proto = m.group(1);
+        final ip = m.group(2);
+        final port = m.group(3);
+        final typ = m.group(4);
+        dev.log('[$cameraId] Local cand: typ=$typ proto=$proto $ip:$port');
+      } else {
+        dev.log('[$cameraId] Local cand: ${c.candidate}');
+      }
+    } else {
+      dev.log('[$cameraId] ✅ End of LOCAL candidates.');
       if (!iceCandidatesGathering.isCompleted) {
-        dev.log('[$cameraId] 🔓 Unlocking negotiation gate for local peer.');
         iceCandidatesGathering.complete();
       }
-      return;
     }
+
     if (sessionId != null) {
       sessionHub.signalingHandler.sendTrickle(
-        TrickleMessage(session: sessionId!, candidate: candidate, id: '4'),
+        TrickleMessage(session: sessionId!, candidate: c, id: '4'),
       );
     }
   }
@@ -293,5 +353,71 @@ class WebRtcCameraSession {
     }
 
     return sdp;
+  }
+
+  Future<void> logSelected(RTCPeerConnection pc) async {
+    final reports = await pc.getStats();
+
+    StatsReport? transport = reports.firstWhereOrNull(
+      (r) =>
+          r.type == 'transport' &&
+          (r.values['selectedCandidatePairId'] ?? '').toString().isNotEmpty,
+    );
+
+    String? pairId = transport?.values['selectedCandidatePairId'];
+    StatsReport? pair;
+
+    if (pairId != null && pairId.isNotEmpty) {
+      pair = reports.firstWhereOrNull(
+        (r) => r.id == pairId || (r.type == 'candidate-pair' && r.id == pairId),
+      );
+    }
+
+    // Fallback: look for a selected/nominated/active pair directly
+    pair ??= reports.firstWhereOrNull(
+      (r) =>
+          r.type == 'candidate-pair' &&
+          (r.values['selected']?.toString() == 'true' ||
+              r.values['nominated']?.toString() == 'true' ||
+              r.values['googActiveConnection']?.toString() == 'true'),
+    );
+
+    if (pair == null) {
+      print('logSelected: no selected candidate-pair yet');
+      return;
+    }
+
+    final localId = (pair.values['localCandidateId'] ?? '').toString();
+    final remoteId = (pair.values['remoteCandidateId'] ?? '').toString();
+    StatsReport? local = reports.firstWhereOrNull((r) => r.id == localId);
+    StatsReport? remote = reports.firstWhereOrNull((r) => r.id == remoteId);
+    if (local == null || remote == null) {
+      print('logSelected: local/remote candidate reports not found');
+      return;
+    }
+
+    String pick(Map v, List<String> keys) {
+      for (final k in keys) {
+        final val = v[k];
+        if (val != null && val.toString().isNotEmpty) return val.toString();
+      }
+      return '?';
+    }
+
+    final lv = local.values, rv = remote.values, pv = pair.values;
+    final localType = pick(lv, ['candidateType', 'googCandidateType']);
+    final localProto = pick(lv, ['protocol', 'transport']);
+    final localIp = pick(lv, ['ip', 'address', 'ipAddress']);
+    final localPort = pick(lv, ['port', 'portNumber']);
+    final remoteType = pick(rv, ['candidateType', 'googCandidateType']);
+    final remoteProto = pick(rv, ['protocol', 'transport']);
+    final remoteIp = pick(rv, ['ip', 'address', 'ipAddress']);
+    final remotePort = pick(rv, ['port', 'portNumber']);
+    final state = pick(pv, ['state', 'writable', 'googWritable']);
+
+    print(
+      'SELECTED => state=$state local=$localType/$localProto $localIp:$localPort '
+      'remote=$remoteType/$remoteProto $remoteIp:$remotePort',
+    );
   }
 }

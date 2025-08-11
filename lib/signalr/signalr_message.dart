@@ -69,8 +69,8 @@ class RegisterRequest implements SignalRMessage {
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,
-    'params': {'authorization': ''},
-    'id': '1',
+    'params': {'authorization': authorization},
+    'id': id,
   };
 }
 
@@ -123,7 +123,7 @@ class ConnectRequest implements SignalRMessage {
     'jsonrpc': jsonRPC,
     'method': method.json,
     'params': params.toJson(),
-    'id': '2',
+    'id': id,
   };
 }
 
@@ -187,7 +187,7 @@ class InviteAnswerMessage implements SignalRMessage {
   @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
-    'method': method.json,
+    //'method': method.json,
     'result': {'session': session, 'answer': answerSdp.toJson()},
     'id': id,
   };

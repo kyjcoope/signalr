@@ -38,6 +38,8 @@ dependencies:
   signalr_netcore: ^1.4.3
   collection: ^1.19.1
   universal_io: ^2.2.2
+  shared_preferences: ^2.5.3
+  web: ^1.1.1
 
 dev_dependencies:
   flutter_test:

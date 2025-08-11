@@ -1,15 +1,13 @@
-// lib\demo\webrtc_display.dart
-
 import 'package:flutter/material.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:signalr/signalr/signalr_session_hub.dart';
-
 import 'dart:developer' as dev;
 
-import '../webrtc/webrtc_camera_session.dart';
+import 'package:signalr/signalr/signalr_session_hub.dart';
+import 'package:signalr/store/favorites_store.dart';
+import 'camera_list.dart';
 
 class WebRtcDisplay extends StatefulWidget {
   const WebRtcDisplay({super.key});
+
   @override
   State<WebRtcDisplay> createState() => _WebRtcDisplay();
 }
@@ -19,38 +17,26 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     signalRUrl: 'https://jci-osp-api-gateway-dev.osp-jci.com/SignalingHub',
   );
 
-  final Map<String, RTCVideoRenderer> renderers = {};
-  final Map<String, WebRtcCameraSession> cameraSessions = {};
-
-  final List<String> desiredCameras = [
-    //'ed25cd2f-a3da-4fd8-a32d-69382565baf7',
-    '7fe07d3cfb894a96bf1bedb72b167ea5',
-  ];
-
   bool _isInitialized = false;
   bool _devicesRegistered = false;
-  bool _camerasConnected = false;
-  bool _streamReceived = false;
+
+  final _favoritesStore = FavoritesStore();
+  bool _favoritesOnly = false;
 
   @override
   void initState() {
     super.initState();
     _initialize();
+    _loadFavoritesOnly();
   }
 
   @override
   void dispose() {
-    for (var renderer in renderers.values) {
-      renderer.dispose();
-    }
-    for (var session in cameraSessions.values) {
-      session.dispose();
-    }
     sessionHub.shutdown();
     super.dispose();
   }
 
-  void _initialize() async {
+  Future<void> _initialize() async {
     sessionHub.onRegister = _onDevicesRegistered;
     await sessionHub.initialize();
     if (!mounted) return;
@@ -70,72 +56,21 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     });
   }
 
-  Future<void> _connectToCameras() async {
-    if (!_devicesRegistered) {
-      dev.log('Cannot connect - devices not yet registered');
-      return;
-    }
-
-    dev.log('Connecting to cameras...');
-    _streamReceived = false;
-    setState(() {
-      _camerasConnected = true;
-    });
-
-    for (String cameraId in desiredCameras) {
-      final cameraSession = await sessionHub.connectToCamera(cameraId);
-      if (cameraSession != null) {
-        final renderer = RTCVideoRenderer();
-        await renderer.initialize();
-
-        renderers[cameraId] = renderer;
-        cameraSessions[cameraId] = cameraSession;
-
-        cameraSession.onTrack = (RTCTrackEvent event) {
-          dev.log(
-            '[$cameraId] Handling track event in UI layer: ${event.track.kind}',
-          );
-          if (event.streams.isEmpty) return;
-
-          final stream = event.streams[0];
-          final videoRenderer = renderers[cameraId];
-
-          if (videoRenderer != null) {
-            setState(() {
-              videoRenderer.srcObject = stream;
-              _streamReceived = true;
-            });
-          }
-        };
-      }
-    }
+  Future<void> _loadFavoritesOnly() async {
+    final favOnly = await _favoritesStore.loadFavoritesOnly();
+    if (!mounted) return;
+    setState(() => _favoritesOnly = favOnly);
   }
 
-  void _disconnectCameras() {
-    dev.log('Disconnecting all cameras...');
-    _streamReceived = false;
-
-    for (var renderer in renderers.values) {
-      renderer.srcObject = null;
-      renderer.dispose();
-    }
-
-    for (var session in cameraSessions.values) {
-      session.dispose();
-    }
-
-    renderers.clear();
-    cameraSessions.clear();
-
-    if (mounted) {
-      setState(() {
-        _camerasConnected = false;
-      });
-    }
+  Future<void> _setFavoritesOnly(bool v) async {
+    setState(() => _favoritesOnly = v);
+    await _favoritesStore.saveFavoritesOnly(v);
   }
 
   @override
   Widget build(BuildContext context) {
+    final devicesCount = sessionHub.availableProducers.length;
+
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
@@ -145,11 +80,30 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
             child: Padding(
               padding: const EdgeInsets.all(16.0),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Status',
-                    style: Theme.of(context).textTheme.headlineSmall,
+                  // Header: Status (left) + settings (right)
+                  Row(
+                    children: [
+                      Text(
+                        'Status',
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                      const Spacer(),
+                      Row(
+                        children: [
+                          const Icon(Icons.star, color: Colors.amber, size: 18),
+                          const SizedBox(width: 6),
+                          const Text('Favorites only'),
+                          const SizedBox(width: 6),
+                          Switch(
+                            value: _favoritesOnly,
+                            onChanged: _setFavoritesOnly,
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -175,22 +129,9 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        'Devices: ${_devicesRegistered ? "${sessionHub.availableProducers.length} registered" : "Registering..."}',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(
-                        _streamReceived
-                            ? Icons.check_circle
-                            : Icons.radio_button_unchecked,
-                        color: _streamReceived ? Colors.green : Colors.grey,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Cameras: ${_streamReceived ? cameraSessions.length : 0} connected',
+                        _devicesRegistered
+                            ? 'Devices: $devicesCount registered'
+                            : 'Devices: Registering...',
                       ),
                     ],
                   ),
@@ -199,71 +140,15 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
             ),
           ),
           const SizedBox(height: 16),
-          Row(
-            children: [
-              ElevatedButton.icon(
-                onPressed:
-                    _isInitialized && _devicesRegistered && !_camerasConnected
-                    ? _connectToCameras
-                    : null,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('Connect Cameras'),
-              ),
-              const SizedBox(width: 16),
-              ElevatedButton.icon(
-                onPressed: _camerasConnected ? _disconnectCameras : null,
-                icon: const Icon(Icons.stop),
-                label: const Text('Disconnect'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red[100],
-                  foregroundColor: Colors.red[800],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
           Expanded(
-            child: _camerasConnected && renderers.isNotEmpty
-                ? GridView.builder(
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          childAspectRatio: 16 / 9,
-                          crossAxisSpacing: 8,
-                          mainAxisSpacing: 8,
-                        ),
-                    itemCount: renderers.length,
-                    itemBuilder: (context, index) {
-                      final cameraId = renderers.keys.elementAt(index);
-                      final renderer = renderers[cameraId]!;
-                      return Card(
-                        child: Column(
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.all(8.0),
-                              child: Text(
-                                cameraId,
-                                style: const TextStyle(fontSize: 12),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            Expanded(
-                              child: Container(
-                                color: Colors.black,
-                                child: RTCVideoView(
-                                  renderer,
-                                  mirror: false,
-                                  objectFit: RTCVideoViewObjectFit
-                                      .RTCVideoViewObjectFitContain,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+            child: !_devicesRegistered
+                ? const Center(
+                    child: Text('Waiting for device registration...'),
                   )
-                : Center(),
+                : CameraList(
+                    sessionHub: sessionHub,
+                    favoritesOnly: _favoritesOnly,
+                  ),
           ),
         ],
       ),
