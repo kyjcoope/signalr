@@ -50,7 +50,6 @@ class WebRtcCameraSession {
       'iceServers': iceServers,
       'sdpSemantics': 'unified-plan',
       'iceTransportPolicy': 'all',
-      'bundlePolicy': 'balanced',
       'rtcpMuxPolicy': 'require',
     };
 
@@ -90,11 +89,6 @@ class WebRtcCameraSession {
     };
 
     _peerConnection = pc;
-
-    await _peerConnection!.addTransceiver(
-      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-    );
   }
 
   void _sendEndOfCandidates(String mid) {
@@ -133,7 +127,6 @@ class WebRtcCameraSession {
 
   Future<void> handleTrickle(TrickleMessage msg) async {
     if ((msg.candidate.candidate ?? '').isEmpty) {
-      // End-of-candidates indication
       dev.log(
         '[$cameraId] Received end-of-candidates for mid=${msg.candidate.sdpMid}',
       );
@@ -146,15 +139,18 @@ class WebRtcCameraSession {
 
     dev.log('[$cameraId] Received remote ICE candidate');
     try {
+      // Map empty sdpMid to correct mid string
       String? mid = msg.candidate.sdpMid;
       final mline = msg.candidate.sdpMLineIndex;
-      if ((mid == null || mid.isEmpty) && mline != null) {
-        mid = mline == 0 ? 'video0' : 'application1';
+      if (mid == null || mid.isEmpty) {
+        if (mline == 0) {
+          mid = 'video0';
+        } else if (mline == 1) {
+          mid = 'application1';
+        }
       }
-
-      await _peerConnection!.addCandidate(
-        RTCIceCandidate(msg.candidate.candidate, mid, mline),
-      );
+      final candidate = RTCIceCandidate(msg.candidate.candidate, mid, mline);
+      await _peerConnection!.addCandidate(candidate);
     } catch (e) {
       dev.log('[$cameraId] Error adding remote ICE candidate: $e');
     }
@@ -168,13 +164,19 @@ class WebRtcCameraSession {
       try {
         String? mid = trickle.candidate.sdpMid;
         final mline = trickle.candidate.sdpMLineIndex;
-        if ((mid == null || mid.isEmpty) && mline != null) {
-          mid = mline == 0 ? 'video0' : 'application1';
+        if (mid == null || mid.isEmpty) {
+          if (mline == 0) {
+            mid = 'video0';
+          } else if (mline == 1) {
+            mid = 'application1';
+          }
         }
-
-        await _peerConnection?.addCandidate(
-          RTCIceCandidate(trickle.candidate.candidate, mid, mline),
+        final candidate = RTCIceCandidate(
+          trickle.candidate.candidate,
+          mid,
+          mline,
         );
+        await _peerConnection?.addCandidate(candidate);
       } catch (e) {
         dev.log('[$cameraId] Error adding queued ICE: $e');
       }
@@ -255,16 +257,27 @@ class WebRtcCameraSession {
         onLocalIceCandidate?.call();
       }
 
-      final cand = c.candidate!;
+      final candStr = c.candidate!;
       final m = RegExp(
-        r'candidate:\S+ \d (udp|tcp) \S+ ([0-9a-fA-F\.:]+) (\d+) typ (\w+)',
-      ).firstMatch(cand);
+        r'candidate:\S+ \d (udp|tcp) \S+ ([0-9a-fA-F\.\-:]+) (\d+) typ (\w+)',
+      ).firstMatch(candStr);
       if (m != null) {
         final proto = m.group(1);
-        final ip = m.group(2);
+        final ip = m.group(2) ?? '';
         final port = m.group(3);
-        final typ = m.group(4);
+        final typ = m.group(4)?.toLowerCase();
         dev.log('[$cameraId] Local cand: typ=$typ proto=$proto $ip:$port');
+
+        // Drop host candidates (.local/private) to avoid confusing the remote
+        final isMdns = ip.endsWith('.local');
+        final isPrivateV4 = RegExp(
+          r'^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)',
+        ).hasMatch(ip);
+        final isHost = typ == 'host';
+        if (isHost && (isMdns || isPrivateV4)) {
+          dev.log('[$cameraId] Skipping host candidate to remote: $ip:$port');
+          return;
+        }
       } else {
         dev.log('[$cameraId] Local cand: ${c.candidate}');
       }
