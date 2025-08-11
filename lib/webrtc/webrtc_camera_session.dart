@@ -39,18 +39,21 @@ class WebRtcCameraSession {
   Future<void> initializeConnection() async {
     if (_peerConnection != null) return;
 
-    final iceServers = <Map<String, dynamic>>[
-      for (var s in sessionHub.iceServers) s.toJson(),
+    final defaultIceServers = [
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun2.l.google.com:19302'},
+      {'urls': 'stun:stun3.l.google.com:19302'},
+      {'urls': 'stun:stun4.l.google.com:19302'},
+      ...sessionHub.iceServers.map((e) => e.toJson()),
     ];
-    if (iceServers.isEmpty) {
-      iceServers.add({'urls': 'stun:stun.l.google.com:19302'});
-    }
 
     final config = <String, dynamic>{
-      'iceServers': iceServers,
-      'sdpSemantics': 'unified-plan',
+      'iceServers': defaultIceServers,
       'iceTransportPolicy': 'all',
+      'iceCandidatePoolSize': 0,
       'rtcpMuxPolicy': 'require',
+      'sdpSemantics': 'unified-plan',
     };
 
     dev.log('[$cameraId] Initializing WebRTC peer connection');
@@ -93,7 +96,7 @@ class WebRtcCameraSession {
 
   void _sendEndOfCandidates(String mid) {
     if (sessionId == null) return;
-    final eoc = RTCIceCandidate(null, mid, null);
+    final eoc = RTCIceCandidate('', mid, null);
     sessionHub.signalingHandler.sendTrickle(
       TrickleMessage(session: sessionId!, candidate: eoc, id: 'eoc'),
     );
@@ -139,10 +142,9 @@ class WebRtcCameraSession {
 
     dev.log('[$cameraId] Received remote ICE candidate');
     try {
-      // Map empty sdpMid to correct mid string
       String? mid = msg.candidate.sdpMid;
       final mline = msg.candidate.sdpMLineIndex;
-      if (mid == null || mid.isEmpty) {
+      if (mid == null) {
         if (mline == 0) {
           mid = 'video0';
         } else if (mline == 1) {
@@ -164,7 +166,7 @@ class WebRtcCameraSession {
       try {
         String? mid = trickle.candidate.sdpMid;
         final mline = trickle.candidate.sdpMLineIndex;
-        if (mid == null || mid.isEmpty) {
+        if (mid == null) {
           if (mline == 0) {
             mid = 'video0';
           } else if (mline == 1) {
@@ -197,9 +199,18 @@ class WebRtcCameraSession {
     remoteDescSet = true;
     await _drainQueuedRemoteIce();
 
-    final answer = await _peerConnection!.createAnswer({});
+    final oaConstraints = <String, dynamic>{
+      'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': true},
+      'optional': [
+        {'DtlsSrtpKeyAgreement': true},
+      ],
+    };
+
+    final answer = await _peerConnection!.createAnswer(oaConstraints);
     await _peerConnection!.setLocalDescription(answer);
 
+    final timeout = Future.delayed(const Duration(seconds: 5));
+    await Future.any([iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
     await sessionHub.signalingHandler.sendInviteAnswer(
       InviteAnswerMessage(
