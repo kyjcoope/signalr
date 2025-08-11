@@ -67,8 +67,8 @@ class WebRtcCameraSession {
     pc.onIceCandidate = _onIceCandidate;
     pc.onDataChannel = _onDataChannel;
     pc.onSignalingState = (s) => dev.log('[$cameraId] Signaling state: $s');
-    pc.onRenegotiationNeeded = () =>
-        dev.log('[$cameraId] Renegotiation needed');
+    pc.onRenegotiationNeeded =
+        () => dev.log('[$cameraId] Renegotiation needed');
     pc.onIceGatheringState = (state) async {
       dev.log('[$cameraId] ICE gathering state: $state');
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
@@ -110,7 +110,7 @@ class WebRtcCameraSession {
 
   void sendDataChannelMessage(String text) {
     if (_dataChannel == null) return;
-    dev.log('[$cameraId] Sending data channel message: $text');
+    //dev.log('[$cameraId] Sending data channel message: $text');
     _dataChannel!.send(RTCDataChannelMessage(text));
   }
 
@@ -188,9 +188,8 @@ class WebRtcCameraSession {
   Future<void> _negotiate(InviteResponse msg) async {
     iceCandidatesGathering = Completer<void>();
 
-    final offerSdp = _isH264(msg.offer.sdp)
-        ? mungeSdp(msg.offer.sdp)
-        : msg.offer.sdp;
+    final offerSdp =
+        _isH264(msg.offer.sdp) ? mungeSdp(msg.offer.sdp) : msg.offer.sdp;
 
     await _peerConnection!.setRemoteDescription(
       RTCSessionDescription(offerSdp, msg.offer.type),
@@ -321,7 +320,7 @@ class WebRtcCameraSession {
   }
 
   void _onDataChannelMessage(RTCDataChannelMessage msg) {
-    dev.log('[$cameraId] Data channel message: ${msg.text}');
+    //dev.log('[$cameraId] Data channel message: ${msg.text}');
     if (msg.isBinary) {
       onDataFrame?.call(Uint8List.fromList(msg.binary));
     } else {
@@ -341,9 +340,10 @@ class WebRtcCameraSession {
       m,
     ) {
       final id = m[1]!.toLowerCase();
-      final goodId = Platform.isIOS
-          ? (iosAllowed.contains(id) ? id : defaultId)
-          : defaultId; // always 42e01f on Android
+      final goodId =
+          Platform.isIOS
+              ? (iosAllowed.contains(id) ? id : defaultId)
+              : defaultId; // always 42e01f on Android
       return 'profile-level-id=$goodId';
     });
 
