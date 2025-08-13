@@ -248,13 +248,12 @@ class WebRtcLogger {
 
     final block =
         StringBuffer()
-          ..writeln('$tagStr┌──────────────── WebRTC status ────────────────')
+          ..writeln('$tagStr WebRTC status:')
           ..writeln(iceLine)
           ..writeln(pathLine)
           ..writeln(dtlsLine)
           ..writeln(videoLine)
-          ..writeln(audioLine)
-          ..write('$tagStr└────────────────────────────────────────────────');
+          ..writeln(audioLine);
 
     dev.log(block.toString());
   }

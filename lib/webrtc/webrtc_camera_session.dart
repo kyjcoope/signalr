@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:developer' as dev;
 
 import 'package:flutter/foundation.dart';
@@ -22,10 +23,10 @@ class WebRtcCameraSession {
 
   final String cameraId;
   final SignalRSessionHub sessionHub;
-
   final bool turnTcpOnly;
   final bool restartOnDisconnect;
 
+  bool _remoteDescSet = false;
   bool enableDetailedLogging;
   void setLoggingEnabled(bool v) {
     enableDetailedLogging = v;
@@ -49,8 +50,7 @@ class WebRtcCameraSession {
   void Function(Uint8List)? onDataFrame;
   VoidCallback? onLocalIceCandidate;
 
-  bool _remoteDescSet = false;
-  final List<TrickleMessage> _pendingTrickles = [];
+  final Queue<TrickleMessage> _pendingTrickles = Queue<TrickleMessage>();
   Map<int, String> _mlineToMid = {};
   final Set<String> _eocSentForMid = {};
   Completer<void> _iceCandidatesGathering = Completer<void>();
@@ -90,7 +90,7 @@ class WebRtcCameraSession {
       return;
     }
     if (_peerConnection == null || !_remoteDescSet) {
-      _pendingTrickles.add(msg);
+      _pendingTrickles.addLast(msg);
       return;
     }
 
@@ -117,13 +117,21 @@ class WebRtcCameraSession {
   }
 
   void sendDataChannelMessage(String text) {
-    _dataChannel?.send(RTCDataChannelMessage(text));
+    final ch = _dataChannel;
+    if (ch == null ||
+        ch.state != RTCDataChannelState.RTCDataChannelOpen ||
+        text.isEmpty) {
+      return;
+    }
+    ch.send(RTCDataChannelMessage(text));
   }
 
   Future<void> close() async {
     _logger.stop();
 
     try {
+      _dataChannel?.onMessage = null;
+      _dataChannel?.onDataChannelState = null;
       await _dataChannel?.close();
     } catch (_) {}
     _dataChannel = null;
@@ -142,20 +150,23 @@ class WebRtcCameraSession {
         await pc.close();
       } catch (_) {}
     }
+
     _peerConnection = null;
     _remoteDescSet = false;
     _pendingTrickles.clear();
     _mlineToMid.clear();
     _eocSentForMid.clear();
     _iceRestartInFlight = false;
-    await _messageController.close();
+    sessionId = null;
+
+    try {
+      await _messageController.close();
+    } catch (_) {}
 
     dev.log('[$cameraId] Session closed and cleaned up');
   }
 
-  void dispose() {
-    close();
-  }
+  Future<void> dispose() => close();
 
   List<Map<String, dynamic>> _toJsonServers() =>
       sessionHub.iceServers.map((e) => e.toJson()).toList();
@@ -208,7 +219,7 @@ class WebRtcCameraSession {
     final config = <String, dynamic>{
       'iceServers': defaultIceServers,
       'iceTransportPolicy': (turnTcpOnly) ? 'relay' : 'all',
-      'iceCandidatePoolSize': 2,
+      'iceCandidatePoolSize': 0,
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
     };
@@ -244,7 +255,7 @@ class WebRtcCameraSession {
       '[$cameraId] Draining ${_pendingTrickles.length} queued remote ICE',
     );
     while (_pendingTrickles.isNotEmpty) {
-      final t = _pendingTrickles.removeAt(0);
+      final t = _pendingTrickles.removeFirst();
       try {
         final mline = t.candidate.sdpMLineIndex;
         final mid = _resolveMid(t.candidate.sdpMid, mline);
@@ -281,14 +292,7 @@ class WebRtcCameraSession {
     _remoteDescSet = true;
     await _drainQueuedRemoteIce();
 
-    final oaConstraints = <String, dynamic>{
-      'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': true},
-      'optional': [
-        {'DtlsSrtpKeyAgreement': true},
-      ],
-    };
-
-    final answer = await _peerConnection!.createAnswer(oaConstraints);
+    final answer = await _peerConnection!.createAnswer();
     await _peerConnection!.setLocalDescription(answer);
 
     final timeout = Future.delayed(const Duration(seconds: 5));
@@ -314,42 +318,21 @@ class WebRtcCameraSession {
     dev.log('[$cameraId] ICE connection state: $state');
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
-      final pc = _peerConnection;
-      if (pc != null && enableDetailedLogging) {
-        _logger.setTag('[$cameraId]');
-        _logger.setEnabled(true);
-        _logger.start(
-          pc,
-          interval: const Duration(seconds: 1),
-          tag: '[$cameraId]',
-        );
-      }
+      _startLogger();
     }
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
         state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-      final pc = _peerConnection;
-      if (pc != null && enableDetailedLogging) {
-        _logger.setTag('[$cameraId]');
-        await _logger.logOnce(pc, tag: '[$cameraId]');
-        _logger.stop();
-      }
+      await _logOnce();
+      _logger.stop();
       dev.log('[$cameraId] 🎉 ICE CONNECTION ESTABLISHED!');
       _iceRestartInFlight = false;
     }
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
         state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-      final pc = _peerConnection;
-      if (pc != null && enableDetailedLogging) {
-        _logger.setTag('[$cameraId]');
-        _logger.start(
-          pc,
-          interval: const Duration(seconds: 1),
-          tag: '[$cameraId]',
-        );
-        await _logger.logOnce(pc, tag: '[$cameraId]');
-      }
+      _startLogger();
+      await _logOnce();
       dev.log('[$cameraId] ❌ ICE ISSUE (state=$state)');
     }
 
@@ -451,8 +434,13 @@ class WebRtcCameraSession {
       dev.log('[$cameraId] Auto ICE restart disabled; not restarting.');
       return;
     }
-    if (_peerConnection == null) {
+    final pc = _peerConnection;
+    if (pc == null) {
       dev.log('[$cameraId] No peer connection to restart.');
+      return;
+    }
+    if (pc.signalingState == RTCSignalingState.RTCSignalingStateClosed) {
+      dev.log('[$cameraId] Signaling is closed; cannot restart ICE.');
       return;
     }
     if (onLocalOffer == null) {
@@ -467,13 +455,12 @@ class WebRtcCameraSession {
     }
 
     try {
-      await _peerConnection!.restartIce(); // fresh creds on next offer
-      final offer = await _peerConnection!.createOffer({'iceRestart': true});
-      await _peerConnection!.setLocalDescription(offer);
+      await pc.restartIce();
+      final offer = await pc.createOffer({'iceRestart': true});
+      await pc.setLocalDescription(offer);
       _iceRestartInFlight = true;
 
       dev.log('[$cameraId] Requested ICE restart and created local offer');
-      // app must signal this offer and later call handleLocalOfferAnswer
       onLocalOffer!.call(offer);
     } catch (e) {
       dev.log('[$cameraId] ICE restart attempt failed: $e');
@@ -529,5 +516,22 @@ class WebRtcCameraSession {
       }
     }
     return map;
+  }
+
+  void _startLogger() {
+    if (!enableDetailedLogging) return;
+    final pc = _peerConnection;
+    if (pc == null) return;
+    _logger.setTag('[$cameraId]');
+    _logger.setEnabled(true);
+    _logger.start(pc, interval: const Duration(seconds: 1), tag: '[$cameraId]');
+  }
+
+  Future<void> _logOnce() async {
+    if (!enableDetailedLogging) return;
+    final pc = _peerConnection;
+    if (pc == null) return;
+    _logger.setTag('[$cameraId]');
+    await _logger.logOnce(pc, tag: '[$cameraId]');
   }
 }
