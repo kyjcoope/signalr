@@ -56,6 +56,15 @@ class CameraListState extends State<CameraList> {
     });
   }
 
+  Future<void> resetFavoritesAndWorking() async {
+    setState(() {
+      _favorites.clear();
+      _working.clear();
+    });
+    await _store.saveFavorites(_favorites);
+    await _store.saveWorking(_working);
+  }
+
   @override
   void dispose() {
     for (final r in _renderers.values) {
@@ -82,11 +91,12 @@ class CameraListState extends State<CameraList> {
       base = base.where((id) => _working.contains(id)).toList();
     }
 
-    final filtered = _filter.isEmpty
-        ? base
-        : base
-              .where((id) => id.toLowerCase().contains(_filter.toLowerCase()))
-              .toList();
+    final filtered =
+        _filter.isEmpty
+            ? base
+            : base
+                .where((id) => id.toLowerCase().contains(_filter.toLowerCase()))
+                .toList();
 
     return filtered;
   }
@@ -184,13 +194,14 @@ class CameraListState extends State<CameraList> {
                     prefixIcon: const Icon(Icons.search),
                     isDense: true,
                     border: const OutlineInputBorder(),
-                    suffixIcon: _filter.isEmpty
-                        ? null
-                        : IconButton(
-                            tooltip: 'Clear',
-                            icon: const Icon(Icons.clear),
-                            onPressed: () => _filterCtrl.clear(),
-                          ),
+                    suffixIcon:
+                        _filter.isEmpty
+                            ? null
+                            : IconButton(
+                              tooltip: 'Clear',
+                              icon: const Icon(Icons.clear),
+                              onPressed: () => _filterCtrl.clear(),
+                            ),
                   ),
                 ),
               ),
@@ -272,18 +283,15 @@ class CameraListState extends State<CameraList> {
                           const SizedBox(width: 8),
                           connected
                               ? OutlinedButton.icon(
-                                  onPressed: () => _disconnect(cameraId),
-                                  icon: const Icon(
-                                    Icons.stop,
-                                    color: Colors.red,
-                                  ),
-                                  label: const Text('Stop'),
-                                )
+                                onPressed: () => _disconnect(cameraId),
+                                icon: const Icon(Icons.stop, color: Colors.red),
+                                label: const Text('Stop'),
+                              )
                               : ElevatedButton.icon(
-                                  onPressed: () => _connect(cameraId),
-                                  icon: const Icon(Icons.play_arrow),
-                                  label: const Text('Start'),
-                                ),
+                                onPressed: () => _connect(cameraId),
+                                icon: const Icon(Icons.play_arrow),
+                                label: const Text('Start'),
+                              ),
                         ],
                       ),
                       if (connected && renderer != null) ...[
@@ -298,8 +306,9 @@ class CameraListState extends State<CameraList> {
                               child: RTCVideoView(
                                 renderer,
                                 mirror: false,
-                                objectFit: RTCVideoViewObjectFit
-                                    .RTCVideoViewObjectFitContain,
+                                objectFit:
+                                    RTCVideoViewObjectFit
+                                        .RTCVideoViewObjectFitContain,
                               ),
                             ),
                           ),

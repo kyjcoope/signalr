@@ -115,7 +115,7 @@ class ConnectRequest implements SignalRMessage {
     DeviceIdParam(deviceId),
     if (profile != null) ProfileParam(profile!),
     if (session != null) SessionParam(session!),
-    if (iceServers != null) IceServersParam(iceServers!),
+    //if (iceServers != null) IceServersParam(iceServers!),
   ]);
 
   @override
@@ -123,7 +123,7 @@ class ConnectRequest implements SignalRMessage {
     'jsonrpc': jsonRPC,
     'method': method.json,
     'params': params.toJson(),
-    'id': id,
+    'id': '2',
   };
 }
 
@@ -302,7 +302,7 @@ class TrickleMessage implements SignalRMessage {
     'jsonrpc': jsonRPC,
     'method': method.json,
     'params': params.toJson(),
-    'id': id,
+    //'id': id,
   };
 
   @override

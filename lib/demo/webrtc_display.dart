@@ -148,12 +148,27 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                     ],
                   ),
                   const SizedBox(height: 8),
+                  // Add reset button below toggles
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton.icon(
+                        onPressed:
+                            () =>
+                                _cameraListKey.currentState
+                                    ?.resetFavoritesAndWorking(),
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Reset favorites & working'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
                       ElevatedButton.icon(
-                        onPressed: () =>
-                            _cameraListKey.currentState?.connectAll(),
+                        onPressed:
+                            () => _cameraListKey.currentState?.connectAll(),
                         icon: const Icon(Icons.play_circle_fill),
                         label: const Text('Connect all'),
                       ),
@@ -165,52 +180,23 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Icon(
-                        _isInitialized ? Icons.check_circle : Icons.pending,
-                        color: _isInitialized ? Colors.green : Colors.orange,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'SignalR: ${_isInitialized ? "Connected" : "Connecting..."}',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(
-                        _devicesRegistered ? Icons.check_circle : Icons.pending,
-                        color: _devicesRegistered
-                            ? Colors.green
-                            : Colors.orange,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _devicesRegistered
-                            ? 'Devices: $devicesCount registered'
-                            : 'Devices: Registering...',
-                      ),
-                    ],
-                  ),
                 ],
               ),
             ),
           ),
           const SizedBox(height: 16),
           Expanded(
-            child: !_devicesRegistered
-                ? const Center(
-                    child: Text('Waiting for device registration...'),
-                  )
-                : CameraList(
-                    key: _cameraListKey,
-                    sessionHub: sessionHub,
-                    favoritesOnly: _favoritesOnly,
-                    workingOnly: _workingOnly,
-                  ),
+            child:
+                !_devicesRegistered
+                    ? const Center(
+                      child: Text('Waiting for device registration...'),
+                    )
+                    : CameraList(
+                      key: _cameraListKey,
+                      sessionHub: sessionHub,
+                      favoritesOnly: _favoritesOnly,
+                      workingOnly: _workingOnly,
+                    ),
           ),
         ],
       ),
