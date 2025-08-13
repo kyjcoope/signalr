@@ -18,6 +18,7 @@ class SignalRHandler {
                .withUrl(signalServiceUrl)
                .withAutomaticReconnect(retryDelays: [0, 5000, 5000, 5000])
                .build();
+
   void Function(ConnectResponse) onConnect;
   void Function(RegisterResponse) onRegister;
   void Function(InviteResponse) onInvite;
@@ -27,11 +28,25 @@ class SignalRHandler {
 
   String get connectionId => _connection.connectionId ?? '';
 
-  void shutdown(List<String> sessions) async {
-    for (var session in sessions) {
-      await _connection.invoke('LeaveSession', args: [session]);
+  Future<void> shutdown(List<String> sessionIds) async {
+    for (final sessionId in sessionIds) {
+      try {
+        await _connection.invoke('LeaveSession', args: [sessionId]);
+        dev.log('Left session during shutdown: $sessionId');
+      } catch (e) {
+        dev.log('Error leaving session $sessionId during shutdown: $e');
+      }
     }
     await _connection.stop();
+  }
+
+  Future<void> leaveSession(String sessionId) async {
+    try {
+      await _connection.invoke('LeaveSession', args: [sessionId]);
+      dev.log('Left session: $sessionId');
+    } catch (e) {
+      dev.log('Error leaving session $sessionId: $e');
+    }
   }
 
   Future<void> setupSignaling() async {
@@ -87,18 +102,12 @@ class SignalRHandler {
   void _onRegister(List<Object?>? arguments) {
     dev.log('Received register message: $arguments');
     if (arguments == null || arguments.isEmpty) return;
-    dev.log(
-      'Received register message: ${arguments.length}',
-      name: 'SignalRHandler._onRegister',
-    );
-    dev.log('Received register message: ${arguments.length}');
     final data = jsonDecode(arguments[0].toString());
     onRegister(RegisterResponse.fromJson(data));
   }
 
   void _onConnect(arguments) {
     if (arguments == null || arguments.isEmpty) return;
-
     final data =
         arguments[0] is Map
             ? arguments[0]
@@ -124,7 +133,6 @@ class SignalRHandler {
         arguments[0] is Map
             ? arguments[0]
             : jsonDecode(arguments[0].toString());
-
     final trickleResponse = TrickleMessage.fromJson(data);
     dev.log('Received trickle message data: $data');
     onTrickle(trickleResponse);
@@ -150,17 +158,10 @@ class SignalRHandler {
   }
 
   Future<void> sendRegister(String auth) async =>
-      await _invoke(RegisterRequest(authorization: auth, id: '1'));
-
-  Future<void> sendConnect(ConnectRequest request) async =>
-      await _invoke(request);
-
-  Future<void> sendInvite(InviteRequest request) async =>
-      await _invoke(request);
-
+      _invoke(RegisterRequest(authorization: auth, id: '1'));
+  Future<void> sendConnect(ConnectRequest request) async => _invoke(request);
+  Future<void> sendInvite(InviteRequest request) async => _invoke(request);
   Future<void> sendInviteAnswer(InviteAnswerMessage request) async =>
-      await _send(request);
-
-  Future<void> sendTrickle(TrickleMessage request) async =>
-      await _send(request);
+      _send(request);
+  Future<void> sendTrickle(TrickleMessage request) async => _send(request);
 }

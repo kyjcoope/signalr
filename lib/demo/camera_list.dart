@@ -113,7 +113,7 @@ class CameraListState extends State<CameraList> {
   Future<void> stopAll() async {
     final ids = _sessions.keys.toList();
     for (final id in ids) {
-      _disconnect(id);
+      await _disconnect(id);
     }
   }
 
@@ -148,14 +148,13 @@ class CameraListState extends State<CameraList> {
     });
   }
 
-  void _disconnect(String cameraId) {
+  Future<void> _disconnect(String cameraId) async {
     dev.log('Disconnecting $cameraId...');
+    await widget.sessionHub.disconnectCamera(cameraId);
     final renderer = _renderers.remove(cameraId);
-    final session = _sessions.remove(cameraId);
-
     renderer?.srcObject = null;
     renderer?.dispose();
-    session?.dispose();
+    _sessions.remove(cameraId);
 
     setState(() {});
   }

@@ -11,10 +11,40 @@ import '../signalr/signalr_message.dart';
 import '../webrtc/signaling_message.dart';
 
 class WebRtcCameraSession {
-  WebRtcCameraSession({required this.cameraId, required this.sessionHub});
+  WebRtcCameraSession({
+    required this.cameraId,
+    required this.sessionHub,
+
+    /// If true, prefer TURN (relay) routes by setting iceTransportPolicy: relay.
+    this.preferRelay = false,
+
+    /// If true, use only TURN over TLS/TCP (turns: / ?transport=tcp) and force relay.
+    this.turnTcpOnly = false,
+
+    /// If true, wait longer (10s) for local ICE candidates before sending the answer.
+    /// Otherwise waits ~5s.
+    this.longAnswerGatherWait = false,
+
+    /// If true, attempt an automatic ICE restart on 'disconnected'.
+    /// Skips if [onLocalOffer] is not provided.
+    this.autoRestartOnDisconnect = true,
+
+    /// Callback to deliver a *local* offer (e.g., from ICE restart) so the app can signal it.
+    /// You MUST send this to the remote and later call [handleLocalOfferAnswer] with the answer.
+    this.onLocalOffer,
+  });
 
   final String cameraId;
   final SignalRSessionHub sessionHub;
+
+  /// Options
+  final bool preferRelay;
+  final bool turnTcpOnly;
+  final bool longAnswerGatherWait;
+  final bool autoRestartOnDisconnect;
+
+  /// App-level signaling hook for locally-generated offers (e.g., ICE restarts).
+  final void Function(RTCSessionDescription offer)? onLocalOffer;
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
@@ -29,31 +59,101 @@ class WebRtcCameraSession {
   void Function(RTCTrackEvent)? onTrack;
   void Function(Uint8List)? onDataFrame;
   VoidCallback? onLocalIceCandidate;
-  bool _localIceSeen = false;
 
   bool remoteDescSet = false;
   List<TrickleMessage> pendingTrickles = [];
 
+  Map<int, String> _mlineToMid = {};
+  final Set<String> _eocSentForMid = {};
+
+  // Track whether an auto-restart is currently in flight to avoid spamming.
+  bool _iceRestartInFlight = false;
+
+  String? _resolveMid(String? sdpMid, int? mline) {
+    final hasMid = sdpMid != null && sdpMid.isNotEmpty;
+    if (hasMid) return sdpMid;
+    if (mline != null) return _mlineToMid[mline];
+    return null;
+  }
+
+  Map<int, String> _buildMLineToMid(String sdp) {
+    final lines = sdp.split(RegExp(r'\r?\n'));
+    final map = <int, String>{};
+    var mIndex = -1;
+    for (final line in lines) {
+      if (line.startsWith('m=')) mIndex++;
+      if (line.startsWith('a=mid:')) {
+        final mid = line.substring('a=mid:'.length).trim();
+        if (mIndex >= 0) map[mIndex] = mid;
+      }
+    }
+    return map;
+  }
+
   Stream<String> get messageStream => _messageController.stream;
+
+  Duration get _answerGatherTimeout =>
+      longAnswerGatherWait
+          ? const Duration(seconds: 10)
+          : const Duration(seconds: 5);
+
+  List<Map<String, dynamic>> _toJsonServers() =>
+      sessionHub.iceServers.map((e) => e.toJson()).toList();
+
+  List<Map<String, dynamic>> _filteredIceServers() {
+    // Start with provided servers; optionally add public STUN if not forcing TURN-only.
+    final servers = <Map<String, dynamic>>[];
+    if (!turnTcpOnly) {
+      servers.addAll([
+        {'urls': 'stun:stun.l.google.com:19302'},
+        {'urls': 'stun:stun1.l.google.com:19302'},
+        {'urls': 'stun:stun2.l.google.com:19302'},
+        {'urls': 'stun:stun3.l.google.com:19302'},
+        {'urls': 'stun:stun4.l.google.com:19302'},
+      ]);
+    }
+    servers.addAll(_toJsonServers());
+
+    if (turnTcpOnly) {
+      // Keep only TURN over TLS/TCP.
+      bool keepUrl(dynamic url) {
+        final u = url.toString().toLowerCase();
+        return u.startsWith('turns:') || u.contains('transport=tcp');
+      }
+
+      List<dynamic> normalizeUrls(dynamic v) =>
+          v is List
+              ? v
+              : v != null
+              ? [v]
+              : const [];
+
+      final tcpOnly = <Map<String, dynamic>>[];
+      for (final s in servers) {
+        final list = normalizeUrls(s['urls']).where(keepUrl).toList();
+        if (list.isEmpty) continue;
+        final copy = Map<String, dynamic>.from(s);
+        copy['urls'] = list;
+        tcpOnly.add(copy);
+      }
+      return tcpOnly;
+    }
+
+    return servers;
+  }
 
   Future<void> initializeConnection() async {
     if (_peerConnection != null) return;
 
-    final defaultIceServers = [
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:stun1.l.google.com:19302'},
-      {'urls': 'stun:stun2.l.google.com:19302'},
-      {'urls': 'stun:stun3.l.google.com:19302'},
-      {'urls': 'stun:stun4.l.google.com:19302'},
-      ...sessionHub.iceServers.map((e) => e.toJson()),
-    ];
+    final defaultIceServers = _filteredIceServers();
 
     final config = <String, dynamic>{
       'iceServers': defaultIceServers,
-      'iceTransportPolicy': 'all',
-      'iceCandidatePoolSize': 0,
+      'iceTransportPolicy': (preferRelay || turnTcpOnly) ? 'relay' : 'all',
+      'iceCandidatePoolSize': 2,
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
+      //'bundlePolicy': 'max-bundle',
     };
 
     dev.log('[$cameraId] Initializing WebRTC peer connection');
@@ -72,17 +172,28 @@ class WebRtcCameraSession {
     pc.onIceGatheringState = (state) async {
       dev.log('[$cameraId] ICE gathering state: $state');
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
-        try {
-          final txs = await pc.getTransceivers();
-          for (final t in txs) {
-            final mid = t.mid;
-            if (mid.isNotEmpty) {
+        if (_mlineToMid.isNotEmpty) {
+          for (final mid in _mlineToMid.values) {
+            if (_eocSentForMid.add(mid)) {
               _sendEndOfCandidates(mid);
             }
           }
-        } catch (_) {
-          for (final mid in const ['video0', 'application1']) {
-            _sendEndOfCandidates(mid);
+        } else {
+          try {
+            final txs = await pc.getTransceivers();
+            for (final t in txs) {
+              final mid = t.mid;
+              if (mid.isNotEmpty && _eocSentForMid.add(mid)) {
+                _sendEndOfCandidates(mid);
+              }
+            }
+          } catch (_) {
+            dev.log(
+              '[$cameraId] Unable to get transceivers, sending EOC for default mids',
+            );
+            for (final mid in const ['audio0', 'video0', 'application1']) {
+              if (_eocSentForMid.add(mid)) _sendEndOfCandidates(mid);
+            }
           }
         }
         if (!iceCandidatesGathering.isCompleted) {
@@ -103,6 +214,7 @@ class WebRtcCameraSession {
   }
 
   void dispose() {
+    stopStatusLogging();
     _dataChannel?.close();
     _peerConnection?.close();
     _messageController.close();
@@ -110,7 +222,6 @@ class WebRtcCameraSession {
 
   void sendDataChannelMessage(String text) {
     if (_dataChannel == null) return;
-    //dev.log('[$cameraId] Sending data channel message: $text');
     _dataChannel!.send(RTCDataChannelMessage(text));
   }
 
@@ -120,10 +231,24 @@ class WebRtcCameraSession {
     initializeConnection();
   }
 
+  /// Apply an *incoming* server-initiated offer (normal path).
   Future<void> handleInvite(InviteResponse msg) async {
     if (msg.offer.type == 'offer') {
       await _negotiate(msg);
     }
+  }
+
+  /// Apply the *answer* to a locally-created offer (e.g., from ICE restart).
+  /// Call this after you invoked [onLocalOffer] and signaled it to the remote.
+  Future<void> handleLocalOfferAnswer(SdpWrapper answer) async {
+    final pc = _peerConnection;
+    if (pc == null) return;
+    final desc = RTCSessionDescription(answer.sdp, answer.type);
+    await pc.setRemoteDescription(desc);
+    dev.log(
+      '[$cameraId] Applied remote answer to local offer (ICE restart complete)',
+    );
+    _iceRestartInFlight = false;
   }
 
   Completer<void> iceCandidatesGathering = Completer<void>();
@@ -142,17 +267,21 @@ class WebRtcCameraSession {
 
     dev.log('[$cameraId] Received remote ICE candidate');
     try {
-      String? mid = msg.candidate.sdpMid;
       final mline = msg.candidate.sdpMLineIndex;
+      final mid = _resolveMid(msg.candidate.sdpMid, mline);
+
       if (mid == null) {
-        if (mline == 0) {
-          mid = 'video0';
-        } else if (mline == 1) {
-          mid = 'application1';
-        }
+        dev.log(
+          '[$cameraId] Could not resolve mid for remote candidate '
+          '(mline=$mline, rawMid="${msg.candidate.sdpMid}") — dropping',
+        );
+        return;
       }
+
       final candidate = RTCIceCandidate(msg.candidate.candidate, mid, mline);
       await _peerConnection!.addCandidate(candidate);
+
+      dev.log('[$cameraId] ✅ Added remote ICE: mid=$mid mline=$mline');
     } catch (e) {
       dev.log('[$cameraId] Error adding remote ICE candidate: $e');
     }
@@ -162,23 +291,23 @@ class WebRtcCameraSession {
     if (pendingTrickles.isEmpty) return;
     dev.log('[$cameraId] Draining ${pendingTrickles.length} queued remote ICE');
     while (pendingTrickles.isNotEmpty) {
-      final trickle = pendingTrickles.removeAt(0);
+      final t = pendingTrickles.removeAt(0);
       try {
-        String? mid = trickle.candidate.sdpMid;
-        final mline = trickle.candidate.sdpMLineIndex;
+        final mline = t.candidate.sdpMLineIndex;
+        final mid = _resolveMid(t.candidate.sdpMid, mline);
+
         if (mid == null) {
-          if (mline == 0) {
-            mid = 'video0';
-          } else if (mline == 1) {
-            mid = 'application1';
-          }
+          dev.log(
+            '[$cameraId] Could not resolve mid for queued candidate '
+            '(mline=$mline, rawMid="${t.candidate.sdpMid}") — dropping',
+          );
+          continue;
         }
-        final candidate = RTCIceCandidate(
-          trickle.candidate.candidate,
-          mid,
-          mline,
-        );
-        await _peerConnection?.addCandidate(candidate);
+
+        final c = RTCIceCandidate(t.candidate.candidate, mid, mline);
+        await _peerConnection?.addCandidate(c);
+
+        dev.log('[$cameraId] ✅ Added queued ICE: mid=$mid mline=$mline');
       } catch (e) {
         dev.log('[$cameraId] Error adding queued ICE: $e');
       }
@@ -194,6 +323,7 @@ class WebRtcCameraSession {
     await _peerConnection!.setRemoteDescription(
       RTCSessionDescription(offerSdp, msg.offer.type),
     );
+    _mlineToMid = _buildMLineToMid(offerSdp);
 
     remoteDescSet = true;
     await _drainQueuedRemoteIce();
@@ -208,7 +338,7 @@ class WebRtcCameraSession {
     final answer = await _peerConnection!.createAnswer(oaConstraints);
     await _peerConnection!.setLocalDescription(answer);
 
-    final timeout = Future.delayed(const Duration(seconds: 5));
+    final timeout = Future.delayed(_answerGatherTimeout);
     await Future.any([iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
     await sessionHub.signalingHandler.sendInviteAnswer(
@@ -227,28 +357,63 @@ class WebRtcCameraSession {
     onTrack?.call(event);
   }
 
-  Timer? _statsTimer;
-
-  void _onIceConnectionState(RTCIceConnectionState state) {
+  void _onIceConnectionState(RTCIceConnectionState state) async {
     dev.log('[$cameraId] ICE connection state: $state');
     if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
-      _statsTimer?.cancel();
-      _statsTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => logSelected(_peerConnection!),
-      );
+      startStatusLogging(const Duration(seconds: 1));
     }
+
     if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
         state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-      _statsTimer?.cancel();
-      logSelected(_peerConnection!);
+      stopStatusLogging();
+      final pc = _peerConnection;
+      if (pc != null) logStatus(pc);
       dev.log('[$cameraId] 🎉 ICE CONNECTION ESTABLISHED!');
+      _iceRestartInFlight = false;
     }
+
     if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
         state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-      _statsTimer?.cancel();
-      logSelected(_peerConnection!);
+      // Keep logging to capture what’s happening.
+      startStatusLogging(const Duration(seconds: 1));
+      final pc = _peerConnection;
+      if (pc != null) logStatus(pc);
       dev.log('[$cameraId] ❌ ICE ISSUE (state=$state)');
+    }
+
+    if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+      // Let consent checks try a few times.
+      await Future.delayed(const Duration(seconds: 3));
+
+      if (!autoRestartOnDisconnect) {
+        dev.log('[$cameraId] Auto ICE restart disabled; not restarting.');
+        return;
+      }
+      if (onLocalOffer == null) {
+        dev.log(
+          '[$cameraId] Skipping ICE restart: onLocalOffer callback is not set.',
+        );
+        return;
+      }
+      if (_iceRestartInFlight) {
+        dev.log('[$cameraId] ICE restart already in flight; skipping.');
+        return;
+      }
+
+      try {
+        await _peerConnection
+            ?.restartIce(); // triggers fresh creds on next offer
+        final offer = await _peerConnection!.createOffer({'iceRestart': true});
+        await _peerConnection!.setLocalDescription(offer);
+        _iceRestartInFlight = true;
+
+        dev.log('[$cameraId] Requested ICE restart and created local offer');
+        // APP MUST SIGNAL THIS OFFER AND THEN CALL handleLocalOfferAnswer(...)
+        onLocalOffer?.call(offer);
+      } catch (e) {
+        dev.log('[$cameraId] ICE restart attempt failed: $e');
+        _iceRestartInFlight = false;
+      }
     }
   }
 
@@ -261,37 +426,7 @@ class WebRtcCameraSession {
   }
 
   void _onIceCandidate(RTCIceCandidate c) {
-    if ((c.candidate ?? '').isNotEmpty) {
-      if (!_localIceSeen) {
-        _localIceSeen = true;
-        onLocalIceCandidate?.call();
-      }
-
-      final candStr = c.candidate!;
-      final m = RegExp(
-        r'candidate:\S+ \d (udp|tcp) \S+ ([0-9a-fA-F\.\-:]+) (\d+) typ (\w+)',
-      ).firstMatch(candStr);
-      if (m != null) {
-        final proto = m.group(1);
-        final ip = m.group(2) ?? '';
-        final port = m.group(3);
-        final typ = m.group(4)?.toLowerCase();
-        dev.log('[$cameraId] Local cand: typ=$typ proto=$proto $ip:$port');
-
-        // Drop host candidates (.local/private) to avoid confusing the remote
-        final isMdns = ip.endsWith('.local');
-        final isPrivateV4 = RegExp(
-          r'^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)',
-        ).hasMatch(ip);
-        final isHost = typ == 'host';
-        if (isHost && (isMdns || isPrivateV4)) {
-          dev.log('[$cameraId] Skipping host candidate to remote: $ip:$port');
-          return;
-        }
-      } else {
-        dev.log('[$cameraId] Local cand: ${c.candidate}');
-      }
-    } else {
+    if ((c.candidate ?? '').isEmpty) {
       dev.log('[$cameraId] ✅ End of LOCAL candidates.');
       if (!iceCandidatesGathering.isCompleted) {
         iceCandidatesGathering.complete();
@@ -320,7 +455,6 @@ class WebRtcCameraSession {
   }
 
   void _onDataChannelMessage(RTCDataChannelMessage msg) {
-    //dev.log('[$cameraId] Data channel message: ${msg.text}');
     if (msg.isBinary) {
       onDataFrame?.call(Uint8List.fromList(msg.binary));
     } else {
@@ -335,7 +469,7 @@ class WebRtcCameraSession {
     const iosAllowed = {'640c2a', '42e02a', '42e01f'};
     final defaultId = Platform.isIOS ? '42e02a' : '42e01f';
 
-    // Fix profile‑level‑id
+    // Fix profile-level-id
     sdp = sdp.replaceAllMapped(RegExp(r'profile-level-id=([0-9A-Fa-f]{6})'), (
       m,
     ) {
@@ -343,11 +477,11 @@ class WebRtcCameraSession {
       final goodId =
           Platform.isIOS
               ? (iosAllowed.contains(id) ? id : defaultId)
-              : defaultId; // always 42e01f on Android
+              : defaultId;
       return 'profile-level-id=$goodId';
     });
 
-    // Ensure level‑asymmetry‑allowed=1
+    // Ensure level-asymmetry-allowed=1
     if (!sdp.toLowerCase().contains('level-asymmetry-allowed')) {
       sdp = sdp.replaceFirst(
         'packetization-mode=1;',
@@ -358,55 +492,100 @@ class WebRtcCameraSession {
     return sdp;
   }
 
-  Future<void> logSelected(RTCPeerConnection pc) async {
+  void startStatusLogging([Duration every = const Duration(seconds: 1)]) {
+    _statusTimer?.cancel();
+    if (_peerConnection == null) return;
+    _statusTimer = Timer.periodic(every, (_) => logStatus(_peerConnection!));
+  }
+
+  void stopStatusLogging() {
+    _statusTimer?.cancel();
+    _statusTimer = null;
+  }
+
+  DateTime? _lastStatsAt;
+  int? _lastVidRxBytes, _lastVidTxBytes, _lastAudRxBytes, _lastAudTxBytes;
+  Timer? _statusTimer;
+
+  Future<void> logStatus(RTCPeerConnection pc) async {
     final reports = await pc.getStats();
-
-    StatsReport? transport = reports.firstWhereOrNull(
-      (r) =>
-          r.type == 'transport' &&
-          (r.values['selectedCandidatePairId'] ?? '').toString().isNotEmpty,
-    );
-
-    String? pairId = transport?.values['selectedCandidatePairId'];
-    StatsReport? pair;
-
-    if (pairId != null && pairId.isNotEmpty) {
-      pair = reports.firstWhereOrNull(
-        (r) => r.id == pairId || (r.type == 'candidate-pair' && r.id == pairId),
-      );
-    }
-
-    // Fallback: look for a selected/nominated/active pair directly
-    pair ??= reports.firstWhereOrNull(
-      (r) =>
-          r.type == 'candidate-pair' &&
-          (r.values['selected']?.toString() == 'true' ||
-              r.values['nominated']?.toString() == 'true' ||
-              r.values['googActiveConnection']?.toString() == 'true'),
-    );
-
-    if (pair == null) {
-      print('logSelected: no selected candidate-pair yet');
+    if (reports.isEmpty) {
+      dev.log('STATUS: no stats yet');
       return;
     }
 
-    final localId = (pair.values['localCandidateId'] ?? '').toString();
-    final remoteId = (pair.values['remoteCandidateId'] ?? '').toString();
-    StatsReport? local = reports.firstWhereOrNull((r) => r.id == localId);
-    StatsReport? remote = reports.firstWhereOrNull((r) => r.id == remoteId);
-    if (local == null || remote == null) {
-      print('logSelected: local/remote candidate reports not found');
-      return;
+    // Index by id and type
+    final byId = {for (final r in reports) r.id: r};
+    Map<String, List<StatsReport>> byType = {};
+    for (final r in reports) {
+      (byType[r.type] ??= []).add(r);
     }
 
-    String pick(Map v, List<String> keys) {
+    // Helpers
+    String pick(Map v, List<String> keys, {String fallback = '?'}) {
       for (final k in keys) {
         final val = v[k];
         if (val != null && val.toString().isNotEmpty) return val.toString();
       }
-      return '?';
+      return fallback;
     }
 
+    double? pickNum(Map v, List<String> keys) {
+      for (final k in keys) {
+        final val = v[k];
+        if (val == null) continue;
+        final s = val.toString();
+        final d = double.tryParse(s);
+        if (d != null) return d;
+      }
+      return null;
+    }
+
+    int? pickInt(Map v, List<String> keys) {
+      final d = pickNum(v, keys);
+      return d?.round();
+    }
+
+    // ---- Transport / DTLS / ICE selection ----
+    StatsReport? transport = byType['transport']?.firstWhereOrNull(
+      (r) =>
+          pick(r.values, ['selectedCandidatePairId'], fallback: '').isNotEmpty,
+    );
+
+    String? pairId =
+        transport != null
+            ? pick(transport.values, ['selectedCandidatePairId'], fallback: '')
+            : null;
+
+    StatsReport? pair =
+        (pairId != null && pairId.isNotEmpty)
+            ? byId[pairId]
+            : byType['candidate-pair']?.firstWhereOrNull(
+              (r) =>
+                  pick(r.values, ['state']).toLowerCase() == 'succeeded' ||
+                  pick(r.values, ['selected', 'googActiveConnection']) ==
+                      'true' ||
+                  pick(r.values, ['nominated']) == 'true',
+            );
+
+    if (pair == null) {
+      dev.log('STATUS: no selected candidate-pair yet');
+      return;
+    }
+
+    // Local/remote candidates
+    final localId = pick(pair.values, ['localCandidateId']);
+    final remoteId = pick(pair.values, ['remoteCandidateId']);
+    final local = byId[localId];
+    final remote = byId[remoteId];
+    if (local == null || remote == null) {
+      dev.log(
+        'STATUS: candidate reports missing (local=$localId remote=$remoteId)',
+      );
+      return;
+    }
+
+    // Candidate details
     final lv = local.values, rv = remote.values, pv = pair.values;
     final localType = pick(lv, ['candidateType', 'googCandidateType']);
     final localProto = pick(lv, ['protocol', 'transport']);
@@ -416,11 +595,114 @@ class WebRtcCameraSession {
     final remoteProto = pick(rv, ['protocol', 'transport']);
     final remoteIp = pick(rv, ['ip', 'address', 'ipAddress']);
     final remotePort = pick(rv, ['port', 'portNumber']);
-    final state = pick(pv, ['state', 'writable', 'googWritable']);
+    final iceState = pick(pv, ['state', 'writable', 'googWritable']);
+    final rttSeconds = pickNum(pv, ['currentRoundTripTime', 'googRtt']) ?? 0;
+    final rttMs = (rttSeconds > 1 ? rttSeconds : rttSeconds * 1000)
+        .toStringAsFixed(1);
+    final outBps = pickNum(pv, ['availableOutgoingBitrate']) ?? 0;
+    final inBps = pickNum(pv, ['availableIncomingBitrate']) ?? 0;
+    final consentSent = pickInt(pv, ['consentRequestsSent']) ?? 0;
 
-    print(
-      'SELECTED => state=$state local=$localType/$localProto $localIp:$localPort '
-      'remote=$remoteType/$remoteProto $remoteIp:$remotePort',
+    // DTLS/TLS/SRTP (from 'transport' if present)
+    final tv = transport?.values ?? {};
+    final dtlsState = pick(tv, ['dtlsState', 'tlsCipher']);
+    final tlsVersion = pick(tv, ['tlsVersion'], fallback: '?');
+    final dtlsCipher = pick(tv, ['dtlsCipher'], fallback: '?');
+    final srtpCipher = pick(tv, ['srtpCipher'], fallback: '?');
+    final iceRole = pick(tv, ['iceRole'], fallback: '?');
+    final ufrag = pick(tv, [
+      'iceLocalUsernameFragment',
+      'localCertificateId',
+    ], fallback: '?');
+
+    // ---- RTP health (video/audio) ----
+    StatsReport? inV = byType['inbound-rtp']?.firstWhereOrNull(
+      (r) =>
+          (pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video') &&
+          (pick(r.values, ['remoteSource'], fallback: 'false') == 'false'),
     );
+    StatsReport? outV = byType['outbound-rtp']?.firstWhereOrNull(
+      (r) => pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video',
+    );
+    StatsReport? inA = byType['inbound-rtp']?.firstWhereOrNull(
+      (r) =>
+          (pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'audio') &&
+          (pick(r.values, ['remoteSource'], fallback: 'false') == 'false'),
+    );
+    StatsReport? outA = byType['outbound-rtp']?.firstWhereOrNull(
+      (r) => pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'audio',
+    );
+
+    final now = DateTime.now();
+    num kbps(num bitsPerSecond) =>
+        (bitsPerSecond <= 0) ? 0 : (bitsPerSecond / 1000.0);
+
+    // Compute simple bitrate deltas (kbps) since last sample
+    double? deltaKbps(int? nowBytes, int? lastBytes) {
+      if (nowBytes == null || lastBytes == null || _lastStatsAt == null) {
+        return null;
+      }
+      final dt = now.difference(_lastStatsAt!).inMilliseconds / 1000.0;
+      if (dt <= 0) return null;
+      final bits = (nowBytes - lastBytes) * 8.0;
+      return (bits / dt) / 1000.0;
+    }
+
+    // Video RX
+    final vidRxBytes = pickInt(inV?.values ?? {}, ['bytesReceived']);
+    final vidRxFps = pick(inV?.values ?? {}, ['framesPerSecond']);
+    final vidW = pick(inV?.values ?? {}, ['frameWidth']);
+    final vidH = pick(inV?.values ?? {}, ['frameHeight']);
+    final vidLost = pick(inV?.values ?? {}, ['packetsLost']);
+    final vidJitter = pick(inV?.values ?? {}, ['jitter']); // seconds
+
+    // Video TX
+    final vidTxBytes = pickInt(outV?.values ?? {}, ['bytesSent']);
+    final vidTxFps = pick(outV?.values ?? {}, ['framesPerSecond']);
+
+    // Audio RX/TX
+    final audRxBytes = pickInt(inA?.values ?? {}, ['bytesReceived']);
+    final audLost = pick(inA?.values ?? {}, ['packetsLost']);
+    final audJitter = pick(inA?.values ?? {}, ['jitter']); // seconds
+    final audTxBytes = pickInt(outA?.values ?? {}, ['bytesSent']);
+
+    final vidRxKbps = deltaKbps(vidRxBytes, _lastVidRxBytes);
+    final vidTxKbps = deltaKbps(vidTxBytes, _lastVidTxBytes);
+    final audRxKbps = deltaKbps(audRxBytes, _lastAudRxBytes);
+    final audTxKbps = deltaKbps(audTxBytes, _lastAudTxBytes);
+
+    // Update last-sample
+    _lastStatsAt = now;
+    _lastVidRxBytes = vidRxBytes ?? _lastVidRxBytes;
+    _lastVidTxBytes = vidTxBytes ?? _lastVidTxBytes;
+    _lastAudRxBytes = audRxBytes ?? _lastAudRxBytes;
+    _lastAudTxBytes = audTxBytes ?? _lastAudTxBytes;
+
+    // ---- Compose log ----
+    final iceLine =
+        'ICE sel=$iceState rtt=${rttMs}ms outAvail=${kbps(outBps).toStringAsFixed(0)}kbps '
+        'inAvail=${kbps(inBps).toStringAsFixed(0)}kbps consentSent=$consentSent';
+    final pathLine =
+        'path local=$localType/$localProto $localIp:$localPort  <->  '
+        'remote=$remoteType/$remoteProto $remoteIp:$remotePort';
+    final dtlsLine =
+        'DTLS state=$dtlsState tls=$tlsVersion dtlsCipher=$dtlsCipher srtp=$srtpCipher '
+        'iceRole=$iceRole ufrag=$ufrag';
+    final videoLine =
+        'RTP[video] rx=${vidRxKbps?.toStringAsFixed(0) ?? '?'}kbps ${vidW}x$vidH '
+        '${vidRxFps.isNotEmpty ? "fps=$vidRxFps " : ""}'
+        'lost=$vidLost jit=${vidJitter}s | '
+        'tx=${vidTxKbps?.toStringAsFixed(0) ?? '?'}kbps ${vidTxFps.isNotEmpty ? "fps=$vidTxFps" : ""}';
+    final audioLine =
+        'RTP[audio] rx=${audRxKbps?.toStringAsFixed(0) ?? '?'}kbps '
+        'lost=$audLost jit=${audJitter}s | '
+        'tx=${audTxKbps?.toStringAsFixed(0) ?? '?'}kbps';
+
+    dev.log('— STATUS —');
+    dev.log(iceLine);
+    dev.log(pathLine);
+    dev.log(dtlsLine);
+    dev.log(videoLine);
+    dev.log(audioLine);
   }
 }

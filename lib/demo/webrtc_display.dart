@@ -17,7 +17,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     signalRUrl: 'https://jci-osp-api-gateway-dev.osp-jci.com/SignalingHub',
   );
 
-  bool _isInitialized = false;
   bool _devicesRegistered = false;
 
   final _store = FavoritesStore();
@@ -44,9 +43,7 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
     sessionHub.onRegister = _onDevicesRegistered;
     await sessionHub.initialize();
     if (!mounted) return;
-    setState(() {
-      _isInitialized = true;
-    });
+    setState(() {});
     dev.log('SignalR session initialized');
   }
 
@@ -82,8 +79,6 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
 
   @override
   Widget build(BuildContext context) {
-    final devicesCount = sessionHub.availableProducers.length;
-
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(

@@ -31,28 +31,29 @@ class SignalRSessionHub {
     await signalingHandler.setupSignaling();
   }
 
-  void shutdown() {
-    // Close all active camera sessions
-    for (var session in _activeSessions.values) {
-      session.dispose();
+  Future<void> shutdown() async {
+    final sessions = _activeSessions.values.toList();
+    final sessionIds =
+        sessions.map((s) => s.sessionId).whereType<String>().toList();
+
+    for (final s in sessions) {
+      s.dispose();
     }
     _activeSessions.clear();
-    signalingHandler.shutdown(_activeSessions.keys.toList());
+    await signalingHandler.shutdown(sessionIds);
+
     _availableProducers.clear();
   }
 
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
-    // Find the full producer ID that starts with cameraId
-    final fullProducerId = _availableProducers
-        .where((p) => p.startsWith(cameraId))
-        .firstOrNull;
+    final fullProducerId =
+        _availableProducers.where((p) => p.startsWith(cameraId)).firstOrNull;
 
     if (fullProducerId == null) {
       dev.log('Camera $cameraId not found in available producers');
       return null;
     }
 
-    // Check if already connected
     if (_activeSessions.containsKey(fullProducerId)) {
       dev.log('Camera $cameraId already connected');
       return _activeSessions[fullProducerId];
@@ -72,7 +73,6 @@ class SignalRSessionHub {
         signalingHandler.connectionId,
         authorization: '',
         deviceId: fullProducerId,
-        //iceServers: iceServers,
         profile: '',
       ),
     );
@@ -80,11 +80,15 @@ class SignalRSessionHub {
     return cameraSession;
   }
 
-  void disconnectCamera(String cameraId) {
+  Future<void> disconnectCamera(String cameraId) async {
     final session = _activeSessions.remove(cameraId);
     if (session != null) {
+      final sessionId = session.sessionId;
       session.dispose();
-      //signalingHandler.endSession(session.sessionId);
+
+      if (sessionId != null && sessionId.isNotEmpty) {
+        await signalingHandler.leaveSession(sessionId);
+      }
     }
   }
 
@@ -107,10 +111,10 @@ class SignalRSessionHub {
   }
 
   void _onInvite(InviteResponse msg) {
-    final session = _activeSessions.values
-        .where((s) => s.sessionId == msg.session)
-        .firstOrNull;
-
+    final session =
+        _activeSessions.values
+            .where((s) => s.sessionId == msg.session)
+            .firstOrNull;
     if (session != null) {
       session.handleInvite(msg);
     } else {
@@ -119,9 +123,10 @@ class SignalRSessionHub {
   }
 
   void _onTrickleMessage(TrickleMessage msg) {
-    final session = _activeSessions.values
-        .where((s) => s.sessionId == msg.session)
-        .firstOrNull;
+    final session =
+        _activeSessions.values
+            .where((s) => s.sessionId == msg.session)
+            .firstOrNull;
 
     if (session != null) {
       session.handleTrickle(msg);
