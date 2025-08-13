@@ -11,10 +11,36 @@ import '../signalr/signalr_message.dart';
 import '../webrtc/signaling_message.dart';
 
 class WebRtcCameraSession {
-  WebRtcCameraSession({required this.cameraId, required this.sessionHub});
+  WebRtcCameraSession({
+    required this.cameraId,
+    required this.sessionHub,
+
+    /// If true, wait longer for local ICE gathering before sending the answer (10s vs 5s).
+    this.longInitialGatherWait = true,
+
+    /// If true, on Disconnected/Failed we will attempt restartIce() + createOffer(iceRestart: true).
+    /// The resulting offer is provided to [onLocalOffer] for you to send via signaling.
+    this.enableIceRestartRenegotiation = true,
+
+    /// If true, on ICE 'failed' we switch TURN config to TCP/TLS-only (turns:...:443?transport=tcp),
+    /// apply it to the pc, restart ICE, and emit a new offer via [onLocalOffer].
+    this.enableTcpTurnFallback = true,
+
+    /// If provided, called whenever this side generates an SDP offer (e.g., for ICE restart or TCP fallback).
+    /// You are responsible for sending it to the remote and driving the normal O/A flow.
+    this.onLocalOffer,
+  });
 
   final String cameraId;
   final SignalRSessionHub sessionHub;
+
+  /// Config toggles
+  final bool longInitialGatherWait;
+  final bool enableIceRestartRenegotiation;
+  final bool enableTcpTurnFallback;
+
+  /// Callback you can use to ship locally-created offers (renegotiations) to the remote peer.
+  final Future<void> Function(RTCSessionDescription offer)? onLocalOffer;
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
@@ -35,6 +61,7 @@ class WebRtcCameraSession {
 
   Map<int, String> _mlineToMid = {};
   final Set<String> _eocSentForMid = {};
+  bool _didTcpFallback = false;
 
   String? _resolveMid(String? sdpMid, int? mline) {
     final hasMid = sdpMid != null && sdpMid.isNotEmpty;
@@ -63,18 +90,18 @@ class WebRtcCameraSession {
     if (_peerConnection != null) return;
 
     final defaultIceServers = [
-      //{'urls': 'stun:stun.l.google.com:19302'},
-      //{'urls': 'stun:stun1.l.google.com:19302'},
-      //{'urls': 'stun:stun2.l.google.com:19302'},
-      //{'urls': 'stun:stun3.l.google.com:19302'},
-      //{'urls': 'stun:stun4.l.google.com:19302'},
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun2.l.google.com:19302'},
+      {'urls': 'stun:stun3.l.google.com:19302'},
+      {'urls': 'stun:stun4.l.google.com:19302'},
       ...sessionHub.iceServers.map((e) => e.toJson()),
     ];
 
     final config = <String, dynamic>{
       'iceServers': defaultIceServers,
-      'iceTransportPolicy': 'relay',
-      'iceCandidatePoolSize': 0,
+      'iceTransportPolicy': 'all',
+      'iceCandidatePoolSize': 2,
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
     };
@@ -137,6 +164,7 @@ class WebRtcCameraSession {
   }
 
   void dispose() {
+    stopStatusLogging();
     _dataChannel?.close();
     _peerConnection?.close();
     _messageController.close();
@@ -144,7 +172,6 @@ class WebRtcCameraSession {
 
   void sendDataChannelMessage(String text) {
     if (_dataChannel == null) return;
-    //dev.log('[$cameraId] Sending data channel message: $text');
     _dataChannel!.send(RTCDataChannelMessage(text));
   }
 
@@ -247,8 +274,13 @@ class WebRtcCameraSession {
     final answer = await _peerConnection!.createAnswer(oaConstraints);
     await _peerConnection!.setLocalDescription(answer);
 
-    final timeout = Future.delayed(const Duration(seconds: 5));
+    final timeout = Future.delayed(
+      longInitialGatherWait
+          ? const Duration(seconds: 10)
+          : const Duration(seconds: 5),
+    );
     await Future.any([iceCandidatesGathering.future, timeout]);
+
     final finalAnswer = await _peerConnection!.getLocalDescription();
     await sessionHub.signalingHandler.sendInviteAnswer(
       InviteAnswerMessage(
@@ -266,28 +298,43 @@ class WebRtcCameraSession {
     onTrack?.call(event);
   }
 
-  Timer? _statsTimer;
-
-  void _onIceConnectionState(RTCIceConnectionState state) {
+  void _onIceConnectionState(RTCIceConnectionState state) async {
     dev.log('[$cameraId] ICE connection state: $state');
     if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
-      _statsTimer?.cancel();
-      _statsTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => logSelected(_peerConnection!),
-      );
+      startStatusLogging(const Duration(seconds: 1));
     }
+
     if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
         state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-      _statsTimer?.cancel();
-      logSelected(_peerConnection!);
+      stopStatusLogging();
+      final pc = _peerConnection;
+      if (pc != null) logStatus(pc);
       dev.log('[$cameraId] 🎉 ICE CONNECTION ESTABLISHED!');
     }
+
     if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
         state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-      _statsTimer?.cancel();
-      logSelected(_peerConnection!);
+      stopStatusLogging();
+      final pc = _peerConnection;
+      if (pc != null) logStatus(pc);
       dev.log('[$cameraId] ❌ ICE ISSUE (state=$state)');
+    }
+
+    // Try restart + renegotiate on 'disconnected' (so we attempt recovery without tearing down)
+    if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+      await Future.delayed(const Duration(seconds: 3));
+      await _attemptIceRestartRenegotiation(reason: 'disconnected');
+    }
+
+    // On 'failed', do a stronger recovery: try TCP/TLS-only TURN fallback (once)
+    if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+      if (enableTcpTurnFallback && !_didTcpFallback) {
+        _didTcpFallback = true;
+        await _applyTcpTurnFallbackAndRestart();
+      } else {
+        // Even if no fallback, still try a restart+renegotiate once more
+        await _attemptIceRestartRenegotiation(reason: 'failed');
+      }
     }
   }
 
@@ -300,37 +347,7 @@ class WebRtcCameraSession {
   }
 
   void _onIceCandidate(RTCIceCandidate c) {
-    if ((c.candidate ?? '').isNotEmpty) {
-      // if (!_localIceSeen) {
-      //   _localIceSeen = true;
-      //   onLocalIceCandidate?.call();
-      // }
-
-      // final candStr = c.candidate!;
-      // final m = RegExp(
-      //   r'candidate:\S+ \d (udp|tcp) \S+ ([0-9a-fA-F\.\-:]+) (\d+) typ (\w+)',
-      // ).firstMatch(candStr);
-      // if (m != null) {
-      //   final proto = m.group(1);
-      //   final ip = m.group(2) ?? '';
-      //   final port = m.group(3);
-      //   final typ = m.group(4)?.toLowerCase();
-      //   dev.log('[$cameraId] Local cand: typ=$typ proto=$proto $ip:$port');
-
-      //   // Drop host candidates (.local/private) to avoid confusing the remote
-      //   final isMdns = ip.endsWith('.local');
-      //   final isPrivateV4 = RegExp(
-      //     r'^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)',
-      //   ).hasMatch(ip);
-      //   final isHost = typ == 'host';
-      //   if (isHost && (isMdns || isPrivateV4)) {
-      //     dev.log('[$cameraId] Skipping host candidate to remote: $ip:$port');
-      //     return;
-      //   }
-      // } else {
-      //   dev.log('[$cameraId] Local cand: ${c.candidate}');
-      // }
-    } else {
+    if ((c.candidate ?? '').isEmpty) {
       dev.log('[$cameraId] ✅ End of LOCAL candidates.');
       if (!iceCandidatesGathering.isCompleted) {
         iceCandidatesGathering.complete();
@@ -359,7 +376,6 @@ class WebRtcCameraSession {
   }
 
   void _onDataChannelMessage(RTCDataChannelMessage msg) {
-    //dev.log('[$cameraId] Data channel message: ${msg.text}');
     if (msg.isBinary) {
       onDataFrame?.call(Uint8List.fromList(msg.binary));
     } else {
@@ -374,7 +390,7 @@ class WebRtcCameraSession {
     const iosAllowed = {'640c2a', '42e02a', '42e01f'};
     final defaultId = Platform.isIOS ? '42e02a' : '42e01f';
 
-    // Fix profile‑level‑id
+    // Fix profile-level-id
     sdp = sdp.replaceAllMapped(RegExp(r'profile-level-id=([0-9A-Fa-f]{6})'), (
       m,
     ) {
@@ -386,7 +402,7 @@ class WebRtcCameraSession {
       return 'profile-level-id=$goodId';
     });
 
-    // Ensure level‑asymmetry‑allowed=1
+    // Ensure level-asymmetry-allowed=1
     if (!sdp.toLowerCase().contains('level-asymmetry-allowed')) {
       sdp = sdp.replaceFirst(
         'packetization-mode=1;',
@@ -397,7 +413,9 @@ class WebRtcCameraSession {
     return sdp;
   }
 
-  void startStatusLogging([Duration every = const Duration(seconds: 5)]) {
+  // ---- Status logging (periodic) ----
+
+  void startStatusLogging([Duration every = const Duration(seconds: 1)]) {
     _statusTimer?.cancel();
     if (_peerConnection == null) return;
     _statusTimer = Timer.periodic(every, (_) => logStatus(_peerConnection!));
@@ -452,7 +470,6 @@ class WebRtcCameraSession {
     }
 
     // ---- Transport / DTLS / ICE selection ----
-    // Prefer a 'transport' that references the selected pair
     StatsReport? transport = byType['transport']?.firstWhereOrNull(
       (r) =>
           pick(r.values, ['selectedCandidatePairId'], fallback: '').isNotEmpty,
@@ -480,7 +497,7 @@ class WebRtcCameraSession {
       return;
     }
 
-    // local/remote candidates
+    // Local/remote candidates
     final localId = pick(pair.values, ['localCandidateId']);
     final remoteId = pick(pair.values, ['remoteCandidateId']);
     final local = byId[localId];
@@ -492,7 +509,7 @@ class WebRtcCameraSession {
       return;
     }
 
-    // candidate details
+    // Candidate details
     final lv = local.values, rv = remote.values, pv = pair.values;
     final localType = pick(lv, ['candidateType', 'googCandidateType']);
     final localProto = pick(lv, ['protocol', 'transport']);
@@ -502,11 +519,7 @@ class WebRtcCameraSession {
     final remoteProto = pick(rv, ['protocol', 'transport']);
     final remoteIp = pick(rv, ['ip', 'address', 'ipAddress']);
     final remotePort = pick(rv, ['port', 'portNumber']);
-    final iceState = pick(pv, [
-      'state',
-      'writable',
-      'googWritable',
-    ]); // succeeded / in-progress / failed, etc.
+    final iceState = pick(pv, ['state', 'writable', 'googWritable']);
     final rttSeconds = pickNum(pv, ['currentRoundTripTime', 'googRtt']) ?? 0;
     final rttMs = (rttSeconds > 1 ? rttSeconds : rttSeconds * 1000)
         .toStringAsFixed(1);
@@ -548,7 +561,7 @@ class WebRtcCameraSession {
     num kbps(num bitsPerSecond) =>
         (bitsPerSecond <= 0) ? 0 : (bitsPerSecond / 1000.0);
 
-    // compute simple bitrate deltas since last sample
+    // Compute simple bitrate deltas (kbps) since last sample
     double? deltaKbps(int? nowBytes, int? lastBytes) {
       if (nowBytes == null || lastBytes == null || _lastStatsAt == null) {
         return null;
@@ -559,7 +572,7 @@ class WebRtcCameraSession {
       return (bits / dt) / 1000.0;
     }
 
-    // video RX
+    // Video RX
     final vidRxBytes = pickInt(inV?.values ?? {}, ['bytesReceived']);
     final vidRxFps = pick(inV?.values ?? {}, ['framesPerSecond']);
     final vidW = pick(inV?.values ?? {}, ['frameWidth']);
@@ -567,11 +580,11 @@ class WebRtcCameraSession {
     final vidLost = pick(inV?.values ?? {}, ['packetsLost']);
     final vidJitter = pick(inV?.values ?? {}, ['jitter']); // seconds
 
-    // video TX
+    // Video TX
     final vidTxBytes = pickInt(outV?.values ?? {}, ['bytesSent']);
     final vidTxFps = pick(outV?.values ?? {}, ['framesPerSecond']);
 
-    // audio RX/TX
+    // Audio RX/TX
     final audRxBytes = pickInt(inA?.values ?? {}, ['bytesReceived']);
     final audLost = pick(inA?.values ?? {}, ['packetsLost']);
     final audJitter = pick(inA?.values ?? {}, ['jitter']); // seconds
@@ -615,5 +628,129 @@ class WebRtcCameraSession {
     dev.log(dtlsLine);
     dev.log(videoLine);
     dev.log(audioLine);
+  }
+
+  // ---- Recovery helpers ----
+
+  Future<void> _attemptIceRestartRenegotiation({required String reason}) async {
+    if (!enableIceRestartRenegotiation) {
+      dev.log(
+        '[$cameraId] ICE restart renegotiation disabled (reason=$reason)',
+      );
+      return;
+    }
+    try {
+      await _peerConnection?.restartIce();
+      dev.log('[$cameraId] Requested ICE restart (reason=$reason)');
+
+      // Create an offer with iceRestart so the remote learns the new ICE creds.
+      final offer = await _peerConnection!.createOffer({
+        'iceRestart': true,
+        // keep it minimal; remote already knows our media; but some stacks like explicit flags
+        'offerToReceiveVideo': true,
+        'offerToReceiveAudio': true,
+      });
+      await _peerConnection!.setLocalDescription(offer);
+      dev.log('[$cameraId] Created local ICE-restart offer');
+
+      if (onLocalOffer != null) {
+        await onLocalOffer!(offer);
+        dev.log('[$cameraId] Dispatched ICE-restart offer via onLocalOffer');
+      } else {
+        dev.log(
+          '[$cameraId] No onLocalOffer callback; you must send the new offer to the remote.',
+        );
+      }
+    } catch (e) {
+      dev.log('[$cameraId] ICE restart/renegotiate error: $e');
+    }
+  }
+
+  Future<void> _applyTcpTurnFallbackAndRestart() async {
+    final pc = _peerConnection;
+    if (pc == null) return;
+
+    try {
+      final current = pc.getConfiguration;
+      final newIceServers = _tcpOnlyTurns(current['iceServers'] ?? []);
+      final newConfig = Map<String, dynamic>.from(current);
+      newConfig['iceServers'] = newIceServers;
+      newConfig['iceTransportPolicy'] = 'relay';
+
+      await pc.setConfiguration(newConfig);
+      dev.log('[$cameraId] Applied TCP/TLS-only TURN fallback');
+
+      // Restart ICE and renegotiate with new creds.
+      await _attemptIceRestartRenegotiation(reason: 'tcp-turn-fallback');
+    } catch (e) {
+      dev.log('[$cameraId] TCP/TLS TURN fallback failed: $e');
+    }
+  }
+
+  List<Map<String, dynamic>> _tcpOnlyTurns(dynamic servers) {
+    final List<Map<String, dynamic>> result = [];
+    if (servers is List) {
+      for (final s in servers) {
+        if (s is Map) {
+          final urls = s['urls'];
+          final user = s['username'];
+          final cred = s['credential'];
+
+          Iterable<String> inputUrls;
+          if (urls is String) {
+            inputUrls = [urls];
+          } else if (urls is List) {
+            inputUrls = urls.map((u) => u.toString());
+          } else {
+            inputUrls = const [];
+          }
+
+          final tcpUrls = <String>[];
+          for (var u in inputUrls) {
+            u = u.trim();
+            if (u.startsWith('turn:') || u.startsWith('turns:')) {
+              tcpUrls.add(_forceTurnsTcp(u));
+            } // drop stun: entries in this fallback
+          }
+
+          if (tcpUrls.isNotEmpty) {
+            result.add({
+              'urls': tcpUrls.toList(),
+              if (user != null) 'username': user,
+              if (cred != null) 'credential': cred,
+            });
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  String _forceTurnsTcp(String url) {
+    var s = url.trim();
+
+    // Ensure turns: scheme
+    if (s.startsWith('turn:')) s = s.replaceFirst('turn:', 'turns:');
+
+    // Split query if any
+    final parts = s.split('?');
+    var base = parts[0];
+    var query = parts.length > 1 ? parts.sublist(1).join('?') : '';
+
+    // Ensure :443 on the base (before any ?)
+    if (!RegExp(r':\d+$').hasMatch(base)) {
+      base = '$base:443';
+    }
+
+    // Ensure transport=tcp
+    if (query.isEmpty) {
+      query = 'transport=tcp';
+    } else if (RegExp(r'(^|&)transport=').hasMatch(query)) {
+      query = query.replaceAll(RegExp(r'transport=\w+'), 'transport=tcp');
+    } else {
+      query = '$query&transport=tcp';
+    }
+
+    return '$base?$query';
   }
 }
