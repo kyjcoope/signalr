@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as dev;
 
-import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
@@ -9,41 +8,27 @@ import 'package:universal_io/io.dart';
 
 import '../signalr/signalr_message.dart';
 import '../webrtc/signaling_message.dart';
+import '../webrtc/webrtc_logger.dart';
 
 class WebRtcCameraSession {
   WebRtcCameraSession({
     required this.cameraId,
     required this.sessionHub,
-
-    /// If true, prefer TURN (relay) routes by setting iceTransportPolicy: relay.
     this.preferRelay = false,
-
-    /// If true, use only TURN over TLS/TCP (turns: / ?transport=tcp) and force relay.
     this.turnTcpOnly = false,
-
-    /// If true, wait longer (10s) for local ICE candidates before sending the answer.
-    /// Otherwise waits ~5s.
     this.longAnswerGatherWait = false,
-
-    /// If true, attempt an automatic ICE restart on 'disconnected'.
-    /// Skips if [onLocalOffer] is not provided.
     this.autoRestartOnDisconnect = true,
-
-    /// Callback to deliver a *local* offer (e.g., from ICE restart) so the app can signal it.
-    /// You MUST send this to the remote and later call [handleLocalOfferAnswer] with the answer.
     this.onLocalOffer,
   });
 
   final String cameraId;
   final SignalRSessionHub sessionHub;
 
-  /// Options
   final bool preferRelay;
   final bool turnTcpOnly;
   final bool longAnswerGatherWait;
   final bool autoRestartOnDisconnect;
 
-  /// App-level signaling hook for locally-generated offers (e.g., ICE restarts).
   final void Function(RTCSessionDescription offer)? onLocalOffer;
 
   RTCPeerConnection? _peerConnection;
@@ -60,35 +45,13 @@ class WebRtcCameraSession {
   void Function(Uint8List)? onDataFrame;
   VoidCallback? onLocalIceCandidate;
 
-  bool remoteDescSet = false;
-  List<TrickleMessage> pendingTrickles = [];
-
+  bool _remoteDescSet = false;
+  final List<TrickleMessage> _pendingTrickles = [];
   Map<int, String> _mlineToMid = {};
   final Set<String> _eocSentForMid = {};
-
-  // Track whether an auto-restart is currently in flight to avoid spamming.
+  Completer<void> _iceCandidatesGathering = Completer<void>();
   bool _iceRestartInFlight = false;
-
-  String? _resolveMid(String? sdpMid, int? mline) {
-    final hasMid = sdpMid != null && sdpMid.isNotEmpty;
-    if (hasMid) return sdpMid;
-    if (mline != null) return _mlineToMid[mline];
-    return null;
-  }
-
-  Map<int, String> _buildMLineToMid(String sdp) {
-    final lines = sdp.split(RegExp(r'\r?\n'));
-    final map = <int, String>{};
-    var mIndex = -1;
-    for (final line in lines) {
-      if (line.startsWith('m=')) mIndex++;
-      if (line.startsWith('a=mid:')) {
-        final mid = line.substring('a=mid:'.length).trim();
-        if (mIndex >= 0) map[mIndex] = mid;
-      }
-    }
-    return map;
-  }
+  final WebRtcLogger _logger = WebRtcLogger();
 
   Stream<String> get messageStream => _messageController.stream;
 
@@ -97,11 +60,108 @@ class WebRtcCameraSession {
           ? const Duration(seconds: 10)
           : const Duration(seconds: 5);
 
+  void handleConnectResponse(ConnectResponse msg) {
+    sessionId = msg.session;
+    dev.log('[$cameraId] Session started: $sessionId');
+    _initializeConnection();
+  }
+
+  Future<void> handleInvite(InviteResponse msg) async {
+    if (msg.offer.type == 'offer') {
+      await _negotiate(msg);
+    }
+  }
+
+  Future<void> handleLocalOfferAnswer(SdpWrapper answer) async {
+    final pc = _peerConnection;
+    if (pc == null) return;
+    final desc = RTCSessionDescription(answer.sdp, answer.type);
+    await pc.setRemoteDescription(desc);
+    dev.log(
+      '[$cameraId] Applied remote answer to local offer (ICE restart complete)',
+    );
+    _iceRestartInFlight = false;
+  }
+
+  Future<void> handleTrickle(TrickleMessage msg) async {
+    if ((msg.candidate.candidate ?? '').isEmpty) {
+      dev.log(
+        '[$cameraId] Received end-of-candidates for mid=${msg.candidate.sdpMid}',
+      );
+      return;
+    }
+    if (_peerConnection == null || !_remoteDescSet) {
+      _pendingTrickles.add(msg);
+      return;
+    }
+
+    dev.log('[$cameraId] Received remote ICE candidate');
+    try {
+      final mline = msg.candidate.sdpMLineIndex;
+      final mid = _resolveMid(msg.candidate.sdpMid, mline);
+
+      if (mid == null) {
+        dev.log(
+          '[$cameraId] Could not resolve mid for remote candidate '
+          '(mline=$mline, rawMid="${msg.candidate.sdpMid}") — dropping',
+        );
+        return;
+      }
+
+      final candidate = RTCIceCandidate(msg.candidate.candidate, mid, mline);
+      await _peerConnection!.addCandidate(candidate);
+
+      dev.log('[$cameraId] ✅ Added remote ICE: mid=$mid mline=$mline');
+    } catch (e) {
+      dev.log('[$cameraId] Error adding remote ICE candidate: $e');
+    }
+  }
+
+  void sendDataChannelMessage(String text) {
+    _dataChannel?.send(RTCDataChannelMessage(text));
+  }
+
+  Future<void> close() async {
+    _logger.stop();
+
+    try {
+      await _dataChannel?.close();
+    } catch (_) {}
+    _dataChannel = null;
+
+    final pc = _peerConnection;
+    if (pc != null) {
+      try {
+        final txs = await pc.getTransceivers();
+        for (final t in txs) {
+          try {
+            await t.stop();
+          } catch (_) {}
+        }
+      } catch (_) {}
+      try {
+        await pc.close();
+      } catch (_) {}
+    }
+    _peerConnection = null;
+    _remoteDescSet = false;
+    _pendingTrickles.clear();
+    _mlineToMid.clear();
+    _eocSentForMid.clear();
+    _iceRestartInFlight = false;
+    await _messageController.close();
+
+    dev.log('[$cameraId] Session closed and cleaned up');
+  }
+
+  void dispose() {
+    close();
+  }
+
   List<Map<String, dynamic>> _toJsonServers() =>
       sessionHub.iceServers.map((e) => e.toJson()).toList();
 
   List<Map<String, dynamic>> _filteredIceServers() {
-    // Start with provided servers; optionally add public STUN if not forcing TURN-only.
     final servers = <Map<String, dynamic>>[];
     if (!turnTcpOnly) {
       servers.addAll([
@@ -115,7 +175,6 @@ class WebRtcCameraSession {
     servers.addAll(_toJsonServers());
 
     if (turnTcpOnly) {
-      // Keep only TURN over TLS/TCP.
       bool keepUrl(dynamic url) {
         final u = url.toString().toLowerCase();
         return u.startsWith('turns:') || u.contains('transport=tcp');
@@ -142,7 +201,7 @@ class WebRtcCameraSession {
     return servers;
   }
 
-  Future<void> initializeConnection() async {
+  Future<void> _initializeConnection() async {
     if (_peerConnection != null) return;
 
     final defaultIceServers = _filteredIceServers();
@@ -153,12 +212,10 @@ class WebRtcCameraSession {
       'iceCandidatePoolSize': 2,
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
-      //'bundlePolicy': 'max-bundle',
     };
 
     dev.log('[$cameraId] Initializing WebRTC peer connection');
     final pc = await createPeerConnection(config);
-
     dev.log('cfg: ${(pc.getConfiguration).toString()}');
 
     pc.onTrack = _onTrack;
@@ -196,8 +253,8 @@ class WebRtcCameraSession {
             }
           }
         }
-        if (!iceCandidatesGathering.isCompleted) {
-          iceCandidatesGathering.complete();
+        if (!_iceCandidatesGathering.isCompleted) {
+          _iceCandidatesGathering.complete();
         }
       }
     };
@@ -213,85 +270,13 @@ class WebRtcCameraSession {
     );
   }
 
-  void dispose() {
-    stopStatusLogging();
-    _dataChannel?.close();
-    _peerConnection?.close();
-    _messageController.close();
-  }
-
-  void sendDataChannelMessage(String text) {
-    if (_dataChannel == null) return;
-    _dataChannel!.send(RTCDataChannelMessage(text));
-  }
-
-  void handleConnectResponse(ConnectResponse msg) {
-    sessionId = msg.session;
-    dev.log('[$cameraId] Session started: $sessionId');
-    initializeConnection();
-  }
-
-  /// Apply an *incoming* server-initiated offer (normal path).
-  Future<void> handleInvite(InviteResponse msg) async {
-    if (msg.offer.type == 'offer') {
-      await _negotiate(msg);
-    }
-  }
-
-  /// Apply the *answer* to a locally-created offer (e.g., from ICE restart).
-  /// Call this after you invoked [onLocalOffer] and signaled it to the remote.
-  Future<void> handleLocalOfferAnswer(SdpWrapper answer) async {
-    final pc = _peerConnection;
-    if (pc == null) return;
-    final desc = RTCSessionDescription(answer.sdp, answer.type);
-    await pc.setRemoteDescription(desc);
-    dev.log(
-      '[$cameraId] Applied remote answer to local offer (ICE restart complete)',
-    );
-    _iceRestartInFlight = false;
-  }
-
-  Completer<void> iceCandidatesGathering = Completer<void>();
-
-  Future<void> handleTrickle(TrickleMessage msg) async {
-    if ((msg.candidate.candidate ?? '').isEmpty) {
-      dev.log(
-        '[$cameraId] Received end-of-candidates for mid=${msg.candidate.sdpMid}',
-      );
-      return;
-    }
-    if (_peerConnection == null || !remoteDescSet) {
-      pendingTrickles.add(msg);
-      return;
-    }
-
-    dev.log('[$cameraId] Received remote ICE candidate');
-    try {
-      final mline = msg.candidate.sdpMLineIndex;
-      final mid = _resolveMid(msg.candidate.sdpMid, mline);
-
-      if (mid == null) {
-        dev.log(
-          '[$cameraId] Could not resolve mid for remote candidate '
-          '(mline=$mline, rawMid="${msg.candidate.sdpMid}") — dropping',
-        );
-        return;
-      }
-
-      final candidate = RTCIceCandidate(msg.candidate.candidate, mid, mline);
-      await _peerConnection!.addCandidate(candidate);
-
-      dev.log('[$cameraId] ✅ Added remote ICE: mid=$mid mline=$mline');
-    } catch (e) {
-      dev.log('[$cameraId] Error adding remote ICE candidate: $e');
-    }
-  }
-
   Future<void> _drainQueuedRemoteIce() async {
-    if (pendingTrickles.isEmpty) return;
-    dev.log('[$cameraId] Draining ${pendingTrickles.length} queued remote ICE');
-    while (pendingTrickles.isNotEmpty) {
-      final t = pendingTrickles.removeAt(0);
+    if (_pendingTrickles.isEmpty) return;
+    dev.log(
+      '[$cameraId] Draining ${_pendingTrickles.length} queued remote ICE',
+    );
+    while (_pendingTrickles.isNotEmpty) {
+      final t = _pendingTrickles.removeAt(0);
       try {
         final mline = t.candidate.sdpMLineIndex;
         final mid = _resolveMid(t.candidate.sdpMid, mline);
@@ -315,17 +300,17 @@ class WebRtcCameraSession {
   }
 
   Future<void> _negotiate(InviteResponse msg) async {
-    iceCandidatesGathering = Completer<void>();
+    _iceCandidatesGathering = Completer<void>();
 
     final offerSdp =
-        _isH264(msg.offer.sdp) ? mungeSdp(msg.offer.sdp) : msg.offer.sdp;
+        _isH264(msg.offer.sdp) ? _mungeSdp(msg.offer.sdp) : msg.offer.sdp;
 
     await _peerConnection!.setRemoteDescription(
       RTCSessionDescription(offerSdp, msg.offer.type),
     );
     _mlineToMid = _buildMLineToMid(offerSdp);
 
-    remoteDescSet = true;
+    _remoteDescSet = true;
     await _drainQueuedRemoteIce();
 
     final oaConstraints = <String, dynamic>{
@@ -339,7 +324,7 @@ class WebRtcCameraSession {
     await _peerConnection!.setLocalDescription(answer);
 
     final timeout = Future.delayed(_answerGatherTimeout);
-    await Future.any([iceCandidatesGathering.future, timeout]);
+    await Future.any([_iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
     await sessionHub.signalingHandler.sendInviteAnswer(
       InviteAnswerMessage(
@@ -359,61 +344,38 @@ class WebRtcCameraSession {
 
   void _onIceConnectionState(RTCIceConnectionState state) async {
     dev.log('[$cameraId] ICE connection state: $state');
+
     if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
-      startStatusLogging(const Duration(seconds: 1));
+      final pc = _peerConnection;
+      if (pc != null) _logger.start(pc, interval: const Duration(seconds: 1));
     }
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
         state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-      stopStatusLogging();
       final pc = _peerConnection;
-      if (pc != null) logStatus(pc);
+      if (pc != null) await _logger.logOnce(pc);
+      _logger.stop();
       dev.log('[$cameraId] 🎉 ICE CONNECTION ESTABLISHED!');
       _iceRestartInFlight = false;
     }
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
         state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-      // Keep logging to capture what’s happening.
-      startStatusLogging(const Duration(seconds: 1));
       final pc = _peerConnection;
-      if (pc != null) logStatus(pc);
+      if (pc != null) {
+        _logger.start(pc, interval: const Duration(seconds: 1));
+        await _logger.logOnce(pc);
+      }
       dev.log('[$cameraId] ❌ ICE ISSUE (state=$state)');
     }
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-      // Let consent checks try a few times.
       await Future.delayed(const Duration(seconds: 3));
+      await _attemptIceRestart();
+    }
 
-      if (!autoRestartOnDisconnect) {
-        dev.log('[$cameraId] Auto ICE restart disabled; not restarting.');
-        return;
-      }
-      if (onLocalOffer == null) {
-        dev.log(
-          '[$cameraId] Skipping ICE restart: onLocalOffer callback is not set.',
-        );
-        return;
-      }
-      if (_iceRestartInFlight) {
-        dev.log('[$cameraId] ICE restart already in flight; skipping.');
-        return;
-      }
-
-      try {
-        await _peerConnection
-            ?.restartIce(); // triggers fresh creds on next offer
-        final offer = await _peerConnection!.createOffer({'iceRestart': true});
-        await _peerConnection!.setLocalDescription(offer);
-        _iceRestartInFlight = true;
-
-        dev.log('[$cameraId] Requested ICE restart and created local offer');
-        // APP MUST SIGNAL THIS OFFER AND THEN CALL handleLocalOfferAnswer(...)
-        onLocalOffer?.call(offer);
-      } catch (e) {
-        dev.log('[$cameraId] ICE restart attempt failed: $e');
-        _iceRestartInFlight = false;
-      }
+    if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+      await _attemptIceRestart();
     }
   }
 
@@ -428,8 +390,8 @@ class WebRtcCameraSession {
   void _onIceCandidate(RTCIceCandidate c) {
     if ((c.candidate ?? '').isEmpty) {
       dev.log('[$cameraId] ✅ End of LOCAL candidates.');
-      if (!iceCandidatesGathering.isCompleted) {
-        iceCandidatesGathering.complete();
+      if (!_iceCandidatesGathering.isCompleted) {
+        _iceCandidatesGathering.complete();
       }
     }
 
@@ -462,10 +424,45 @@ class WebRtcCameraSession {
     }
   }
 
+  Future<void> _attemptIceRestart() async {
+    if (!autoRestartOnDisconnect) {
+      dev.log('[$cameraId] Auto ICE restart disabled; not restarting.');
+      return;
+    }
+    if (_peerConnection == null) {
+      dev.log('[$cameraId] No peer connection to restart.');
+      return;
+    }
+    if (onLocalOffer == null) {
+      dev.log(
+        '[$cameraId] Skipping ICE restart: onLocalOffer callback is not set.',
+      );
+      return;
+    }
+    if (_iceRestartInFlight) {
+      dev.log('[$cameraId] ICE restart already in flight; skipping.');
+      return;
+    }
+
+    try {
+      await _peerConnection!.restartIce(); // fresh creds on next offer
+      final offer = await _peerConnection!.createOffer({'iceRestart': true});
+      await _peerConnection!.setLocalDescription(offer);
+      _iceRestartInFlight = true;
+
+      dev.log('[$cameraId] Requested ICE restart and created local offer');
+      // app must signal this offer and later call handleLocalOfferAnswer
+      onLocalOffer!.call(offer);
+    } catch (e) {
+      dev.log('[$cameraId] ICE restart attempt failed: $e');
+      _iceRestartInFlight = false;
+    }
+  }
+
   bool _isH264(String sdp) =>
       RegExp(r'\bH264/90000\b', caseSensitive: false).hasMatch(sdp);
 
-  String mungeSdp(String sdp) {
+  String _mungeSdp(String sdp) {
     const iosAllowed = {'640c2a', '42e02a', '42e01f'};
     final defaultId = Platform.isIOS ? '42e02a' : '42e01f';
 
@@ -488,221 +485,27 @@ class WebRtcCameraSession {
         'level-asymmetry-allowed=1;packetization-mode=1;',
       );
     }
-
     return sdp;
   }
 
-  void startStatusLogging([Duration every = const Duration(seconds: 1)]) {
-    _statusTimer?.cancel();
-    if (_peerConnection == null) return;
-    _statusTimer = Timer.periodic(every, (_) => logStatus(_peerConnection!));
+  String? _resolveMid(String? sdpMid, int? mline) {
+    final hasMid = sdpMid != null && sdpMid.isNotEmpty;
+    if (hasMid) return sdpMid;
+    if (mline != null) return _mlineToMid[mline];
+    return null;
   }
 
-  void stopStatusLogging() {
-    _statusTimer?.cancel();
-    _statusTimer = null;
-  }
-
-  DateTime? _lastStatsAt;
-  int? _lastVidRxBytes, _lastVidTxBytes, _lastAudRxBytes, _lastAudTxBytes;
-  Timer? _statusTimer;
-
-  Future<void> logStatus(RTCPeerConnection pc) async {
-    final reports = await pc.getStats();
-    if (reports.isEmpty) {
-      dev.log('STATUS: no stats yet');
-      return;
-    }
-
-    // Index by id and type
-    final byId = {for (final r in reports) r.id: r};
-    Map<String, List<StatsReport>> byType = {};
-    for (final r in reports) {
-      (byType[r.type] ??= []).add(r);
-    }
-
-    // Helpers
-    String pick(Map v, List<String> keys, {String fallback = '?'}) {
-      for (final k in keys) {
-        final val = v[k];
-        if (val != null && val.toString().isNotEmpty) return val.toString();
+  Map<int, String> _buildMLineToMid(String sdp) {
+    final lines = sdp.split(RegExp(r'\r?\n'));
+    final map = <int, String>{};
+    var mIndex = -1;
+    for (final line in lines) {
+      if (line.startsWith('m=')) mIndex++;
+      if (line.startsWith('a=mid:')) {
+        final mid = line.substring('a=mid:'.length).trim();
+        if (mIndex >= 0) map[mIndex] = mid;
       }
-      return fallback;
     }
-
-    double? pickNum(Map v, List<String> keys) {
-      for (final k in keys) {
-        final val = v[k];
-        if (val == null) continue;
-        final s = val.toString();
-        final d = double.tryParse(s);
-        if (d != null) return d;
-      }
-      return null;
-    }
-
-    int? pickInt(Map v, List<String> keys) {
-      final d = pickNum(v, keys);
-      return d?.round();
-    }
-
-    // ---- Transport / DTLS / ICE selection ----
-    StatsReport? transport = byType['transport']?.firstWhereOrNull(
-      (r) =>
-          pick(r.values, ['selectedCandidatePairId'], fallback: '').isNotEmpty,
-    );
-
-    String? pairId =
-        transport != null
-            ? pick(transport.values, ['selectedCandidatePairId'], fallback: '')
-            : null;
-
-    StatsReport? pair =
-        (pairId != null && pairId.isNotEmpty)
-            ? byId[pairId]
-            : byType['candidate-pair']?.firstWhereOrNull(
-              (r) =>
-                  pick(r.values, ['state']).toLowerCase() == 'succeeded' ||
-                  pick(r.values, ['selected', 'googActiveConnection']) ==
-                      'true' ||
-                  pick(r.values, ['nominated']) == 'true',
-            );
-
-    if (pair == null) {
-      dev.log('STATUS: no selected candidate-pair yet');
-      return;
-    }
-
-    // Local/remote candidates
-    final localId = pick(pair.values, ['localCandidateId']);
-    final remoteId = pick(pair.values, ['remoteCandidateId']);
-    final local = byId[localId];
-    final remote = byId[remoteId];
-    if (local == null || remote == null) {
-      dev.log(
-        'STATUS: candidate reports missing (local=$localId remote=$remoteId)',
-      );
-      return;
-    }
-
-    // Candidate details
-    final lv = local.values, rv = remote.values, pv = pair.values;
-    final localType = pick(lv, ['candidateType', 'googCandidateType']);
-    final localProto = pick(lv, ['protocol', 'transport']);
-    final localIp = pick(lv, ['ip', 'address', 'ipAddress']);
-    final localPort = pick(lv, ['port', 'portNumber']);
-    final remoteType = pick(rv, ['candidateType', 'googCandidateType']);
-    final remoteProto = pick(rv, ['protocol', 'transport']);
-    final remoteIp = pick(rv, ['ip', 'address', 'ipAddress']);
-    final remotePort = pick(rv, ['port', 'portNumber']);
-    final iceState = pick(pv, ['state', 'writable', 'googWritable']);
-    final rttSeconds = pickNum(pv, ['currentRoundTripTime', 'googRtt']) ?? 0;
-    final rttMs = (rttSeconds > 1 ? rttSeconds : rttSeconds * 1000)
-        .toStringAsFixed(1);
-    final outBps = pickNum(pv, ['availableOutgoingBitrate']) ?? 0;
-    final inBps = pickNum(pv, ['availableIncomingBitrate']) ?? 0;
-    final consentSent = pickInt(pv, ['consentRequestsSent']) ?? 0;
-
-    // DTLS/TLS/SRTP (from 'transport' if present)
-    final tv = transport?.values ?? {};
-    final dtlsState = pick(tv, ['dtlsState', 'tlsCipher']);
-    final tlsVersion = pick(tv, ['tlsVersion'], fallback: '?');
-    final dtlsCipher = pick(tv, ['dtlsCipher'], fallback: '?');
-    final srtpCipher = pick(tv, ['srtpCipher'], fallback: '?');
-    final iceRole = pick(tv, ['iceRole'], fallback: '?');
-    final ufrag = pick(tv, [
-      'iceLocalUsernameFragment',
-      'localCertificateId',
-    ], fallback: '?');
-
-    // ---- RTP health (video/audio) ----
-    StatsReport? inV = byType['inbound-rtp']?.firstWhereOrNull(
-      (r) =>
-          (pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video') &&
-          (pick(r.values, ['remoteSource'], fallback: 'false') == 'false'),
-    );
-    StatsReport? outV = byType['outbound-rtp']?.firstWhereOrNull(
-      (r) => pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video',
-    );
-    StatsReport? inA = byType['inbound-rtp']?.firstWhereOrNull(
-      (r) =>
-          (pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'audio') &&
-          (pick(r.values, ['remoteSource'], fallback: 'false') == 'false'),
-    );
-    StatsReport? outA = byType['outbound-rtp']?.firstWhereOrNull(
-      (r) => pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'audio',
-    );
-
-    final now = DateTime.now();
-    num kbps(num bitsPerSecond) =>
-        (bitsPerSecond <= 0) ? 0 : (bitsPerSecond / 1000.0);
-
-    // Compute simple bitrate deltas (kbps) since last sample
-    double? deltaKbps(int? nowBytes, int? lastBytes) {
-      if (nowBytes == null || lastBytes == null || _lastStatsAt == null) {
-        return null;
-      }
-      final dt = now.difference(_lastStatsAt!).inMilliseconds / 1000.0;
-      if (dt <= 0) return null;
-      final bits = (nowBytes - lastBytes) * 8.0;
-      return (bits / dt) / 1000.0;
-    }
-
-    // Video RX
-    final vidRxBytes = pickInt(inV?.values ?? {}, ['bytesReceived']);
-    final vidRxFps = pick(inV?.values ?? {}, ['framesPerSecond']);
-    final vidW = pick(inV?.values ?? {}, ['frameWidth']);
-    final vidH = pick(inV?.values ?? {}, ['frameHeight']);
-    final vidLost = pick(inV?.values ?? {}, ['packetsLost']);
-    final vidJitter = pick(inV?.values ?? {}, ['jitter']); // seconds
-
-    // Video TX
-    final vidTxBytes = pickInt(outV?.values ?? {}, ['bytesSent']);
-    final vidTxFps = pick(outV?.values ?? {}, ['framesPerSecond']);
-
-    // Audio RX/TX
-    final audRxBytes = pickInt(inA?.values ?? {}, ['bytesReceived']);
-    final audLost = pick(inA?.values ?? {}, ['packetsLost']);
-    final audJitter = pick(inA?.values ?? {}, ['jitter']); // seconds
-    final audTxBytes = pickInt(outA?.values ?? {}, ['bytesSent']);
-
-    final vidRxKbps = deltaKbps(vidRxBytes, _lastVidRxBytes);
-    final vidTxKbps = deltaKbps(vidTxBytes, _lastVidTxBytes);
-    final audRxKbps = deltaKbps(audRxBytes, _lastAudRxBytes);
-    final audTxKbps = deltaKbps(audTxBytes, _lastAudTxBytes);
-
-    // Update last-sample
-    _lastStatsAt = now;
-    _lastVidRxBytes = vidRxBytes ?? _lastVidRxBytes;
-    _lastVidTxBytes = vidTxBytes ?? _lastVidTxBytes;
-    _lastAudRxBytes = audRxBytes ?? _lastAudRxBytes;
-    _lastAudTxBytes = audTxBytes ?? _lastAudTxBytes;
-
-    // ---- Compose log ----
-    final iceLine =
-        'ICE sel=$iceState rtt=${rttMs}ms outAvail=${kbps(outBps).toStringAsFixed(0)}kbps '
-        'inAvail=${kbps(inBps).toStringAsFixed(0)}kbps consentSent=$consentSent';
-    final pathLine =
-        'path local=$localType/$localProto $localIp:$localPort  <->  '
-        'remote=$remoteType/$remoteProto $remoteIp:$remotePort';
-    final dtlsLine =
-        'DTLS state=$dtlsState tls=$tlsVersion dtlsCipher=$dtlsCipher srtp=$srtpCipher '
-        'iceRole=$iceRole ufrag=$ufrag';
-    final videoLine =
-        'RTP[video] rx=${vidRxKbps?.toStringAsFixed(0) ?? '?'}kbps ${vidW}x$vidH '
-        '${vidRxFps.isNotEmpty ? "fps=$vidRxFps " : ""}'
-        'lost=$vidLost jit=${vidJitter}s | '
-        'tx=${vidTxKbps?.toStringAsFixed(0) ?? '?'}kbps ${vidTxFps.isNotEmpty ? "fps=$vidTxFps" : ""}';
-    final audioLine =
-        'RTP[audio] rx=${audRxKbps?.toStringAsFixed(0) ?? '?'}kbps '
-        'lost=$audLost jit=${audJitter}s | '
-        'tx=${audTxKbps?.toStringAsFixed(0) ?? '?'}kbps';
-
-    dev.log('— STATUS —');
-    dev.log(iceLine);
-    dev.log(pathLine);
-    dev.log(dtlsLine);
-    dev.log(videoLine);
-    dev.log(audioLine);
+    return map;
   }
 }
