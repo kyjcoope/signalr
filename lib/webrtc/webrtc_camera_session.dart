@@ -14,20 +14,24 @@ class WebRtcCameraSession {
   WebRtcCameraSession({
     required this.cameraId,
     required this.sessionHub,
-    this.preferRelay = false,
     this.turnTcpOnly = false,
-    this.longAnswerGatherWait = false,
-    this.autoRestartOnDisconnect = true,
+    this.restartOnDisconnect = true,
     this.onLocalOffer,
+    this.enableDetailedLogging = true,
   });
 
   final String cameraId;
   final SignalRSessionHub sessionHub;
 
-  final bool preferRelay;
   final bool turnTcpOnly;
-  final bool longAnswerGatherWait;
-  final bool autoRestartOnDisconnect;
+  final bool restartOnDisconnect;
+
+  bool enableDetailedLogging;
+  void setLoggingEnabled(bool v) {
+    enableDetailedLogging = v;
+    _logger.setEnabled(v);
+    if (!v) _logger.stop();
+  }
 
   final void Function(RTCSessionDescription offer)? onLocalOffer;
 
@@ -54,11 +58,6 @@ class WebRtcCameraSession {
   final WebRtcLogger _logger = WebRtcLogger();
 
   Stream<String> get messageStream => _messageController.stream;
-
-  Duration get _answerGatherTimeout =>
-      longAnswerGatherWait
-          ? const Duration(seconds: 10)
-          : const Duration(seconds: 5);
 
   void handleConnectResponse(ConnectResponse msg) {
     sessionId = msg.session;
@@ -208,7 +207,7 @@ class WebRtcCameraSession {
 
     final config = <String, dynamic>{
       'iceServers': defaultIceServers,
-      'iceTransportPolicy': (preferRelay || turnTcpOnly) ? 'relay' : 'all',
+      'iceTransportPolicy': (turnTcpOnly) ? 'relay' : 'all',
       'iceCandidatePoolSize': 2,
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
@@ -226,38 +225,7 @@ class WebRtcCameraSession {
     pc.onSignalingState = (s) => dev.log('[$cameraId] Signaling state: $s');
     pc.onRenegotiationNeeded =
         () => dev.log('[$cameraId] Renegotiation needed');
-    pc.onIceGatheringState = (state) async {
-      dev.log('[$cameraId] ICE gathering state: $state');
-      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
-        if (_mlineToMid.isNotEmpty) {
-          for (final mid in _mlineToMid.values) {
-            if (_eocSentForMid.add(mid)) {
-              _sendEndOfCandidates(mid);
-            }
-          }
-        } else {
-          try {
-            final txs = await pc.getTransceivers();
-            for (final t in txs) {
-              final mid = t.mid;
-              if (mid.isNotEmpty && _eocSentForMid.add(mid)) {
-                _sendEndOfCandidates(mid);
-              }
-            }
-          } catch (_) {
-            dev.log(
-              '[$cameraId] Unable to get transceivers, sending EOC for default mids',
-            );
-            for (final mid in const ['audio0', 'video0', 'application1']) {
-              if (_eocSentForMid.add(mid)) _sendEndOfCandidates(mid);
-            }
-          }
-        }
-        if (!_iceCandidatesGathering.isCompleted) {
-          _iceCandidatesGathering.complete();
-        }
-      }
-    };
+    pc.onIceGatheringState = _onIceGatheringState;
 
     _peerConnection = pc;
   }
@@ -323,7 +291,7 @@ class WebRtcCameraSession {
     final answer = await _peerConnection!.createAnswer(oaConstraints);
     await _peerConnection!.setLocalDescription(answer);
 
-    final timeout = Future.delayed(_answerGatherTimeout);
+    final timeout = Future.delayed(const Duration(seconds: 5));
     await Future.any([_iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
     await sessionHub.signalingHandler.sendInviteAnswer(
@@ -347,14 +315,25 @@ class WebRtcCameraSession {
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
       final pc = _peerConnection;
-      if (pc != null) _logger.start(pc, interval: const Duration(seconds: 1));
+      if (pc != null && enableDetailedLogging) {
+        _logger.setTag('[$cameraId]');
+        _logger.setEnabled(true);
+        _logger.start(
+          pc,
+          interval: const Duration(seconds: 1),
+          tag: '[$cameraId]',
+        );
+      }
     }
 
     if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
         state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
       final pc = _peerConnection;
-      if (pc != null) await _logger.logOnce(pc);
-      _logger.stop();
+      if (pc != null && enableDetailedLogging) {
+        _logger.setTag('[$cameraId]');
+        await _logger.logOnce(pc, tag: '[$cameraId]');
+        _logger.stop();
+      }
       dev.log('[$cameraId] 🎉 ICE CONNECTION ESTABLISHED!');
       _iceRestartInFlight = false;
     }
@@ -362,9 +341,14 @@ class WebRtcCameraSession {
     if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
         state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
       final pc = _peerConnection;
-      if (pc != null) {
-        _logger.start(pc, interval: const Duration(seconds: 1));
-        await _logger.logOnce(pc);
+      if (pc != null && enableDetailedLogging) {
+        _logger.setTag('[$cameraId]');
+        _logger.start(
+          pc,
+          interval: const Duration(seconds: 1),
+          tag: '[$cameraId]',
+        );
+        await _logger.logOnce(pc, tag: '[$cameraId]');
       }
       dev.log('[$cameraId] ❌ ICE ISSUE (state=$state)');
     }
@@ -384,6 +368,44 @@ class WebRtcCameraSession {
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       dev.log('[$cameraId] 🎉 PEER CONNECTION ESTABLISHED!');
       onConnectionComplete?.call();
+    }
+  }
+
+  Future<void> _onIceGatheringState(RTCIceGatheringState state) async {
+    dev.log('[$cameraId] ICE gathering state: $state');
+    if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+      final pc = _peerConnection;
+
+      if (pc != null) {
+        if (_mlineToMid.isNotEmpty) {
+          for (final mid in _mlineToMid.values) {
+            if (_eocSentForMid.add(mid)) {
+              _sendEndOfCandidates(mid);
+            }
+          }
+        } else {
+          try {
+            final txs = await pc.getTransceivers();
+            for (final t in txs) {
+              final mid = t.mid;
+              if (mid.isNotEmpty && _eocSentForMid.add(mid)) {
+                _sendEndOfCandidates(mid);
+              }
+            }
+          } catch (_) {
+            dev.log(
+              '[$cameraId] Unable to get transceivers, sending EOC for default mids',
+            );
+            for (final mid in const ['audio0', 'video0', 'application1']) {
+              if (_eocSentForMid.add(mid)) _sendEndOfCandidates(mid);
+            }
+          }
+        }
+      }
+
+      if (!_iceCandidatesGathering.isCompleted) {
+        _iceCandidatesGathering.complete();
+      }
     }
   }
 
@@ -425,7 +447,7 @@ class WebRtcCameraSession {
   }
 
   Future<void> _attemptIceRestart() async {
-    if (!autoRestartOnDisconnect) {
+    if (!restartOnDisconnect) {
       dev.log('[$cameraId] Auto ICE restart disabled; not restarting.');
       return;
     }
