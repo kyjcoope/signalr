@@ -7,6 +7,8 @@ class FavoritesStore {
   static const _workKey = 'working_cameras';
   static const _workOnlyKey = 'working_cameras_only';
 
+  static const _pendingOnlyKey = 'pending_cameras_only';
+
   Future<Set<String>> loadFavorites() async {
     final prefs = await SharedPreferences.getInstance();
     final list = prefs.getStringList(_favKey) ?? const <String>[];
@@ -47,5 +49,15 @@ class FavoritesStore {
   Future<void> saveWorkingOnly(bool value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_workOnlyKey, value);
+  }
+
+  Future<bool> loadPendingOnly() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_pendingOnlyKey) ?? false;
+  }
+
+  Future<void> savePendingOnly(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_pendingOnlyKey, value);
   }
 }

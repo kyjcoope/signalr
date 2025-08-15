@@ -8,6 +8,8 @@ class FavoritesStore {
   static const _workKey = 'working_cameras';
   static const _workOnlyKey = 'working_cameras_only';
 
+  static const _pendingOnlyKey = 'pending_cameras_only';
+
   static const _maxAge = 31536000;
 
   Future<Set<String>> loadFavorites() async {
@@ -66,6 +68,18 @@ class FavoritesStore {
     final v = value ? '1' : '0';
     _writeCookie(_workOnlyKey, v, maxAge: _maxAge);
     _writeLocal(_workOnlyKey, v);
+  }
+
+  Future<bool> loadPendingOnly() async {
+    final raw = _readCookie(_pendingOnlyKey) ?? _readLocal(_pendingOnlyKey);
+    if (raw == null) return false;
+    return raw == '1' || raw.toLowerCase() == 'true';
+  }
+
+  Future<void> savePendingOnly(bool value) async {
+    final v = value ? '1' : '0';
+    _writeCookie(_pendingOnlyKey, v, maxAge: _maxAge);
+    _writeLocal(_pendingOnlyKey, v);
   }
 
   String? _readCookie(String name) {

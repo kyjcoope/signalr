@@ -5,7 +5,7 @@ import 'package:universal_io/io.dart';
 
 import 'demo/app.dart';
 
-void main() {
+void main() async {
   HttpOverrides.global = DeviceHttpOverrides();
   WidgetsFlutterBinding.ensureInitialized();
   runApp(MaterialApp(home: App()));

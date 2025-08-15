@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:developer' as dev;
 import 'package:flutter/foundation.dart';
+import 'package:signalr/auth/auth.dart';
 import 'package:signalr/signalr/singalr_handler.dart';
 
 import '../webrtc/webrtc_camera_session.dart';
@@ -28,6 +29,18 @@ class SignalRSessionHub {
   Map<String, WebRtcCameraSession> get activeSessions => _activeSessions;
 
   Future<void> initialize() async {
+    await authLogin(
+      UserLogin(
+        username: 'demooperator',
+        password: 'Test@12345',
+        clientName: 'driver',
+        clientID: 'fb2be96f-05a3-4fea-a151-6365feaaf30c',
+        clientVersion: '3.0',
+        grantType: 'password',
+        scopes: '[IdentityServerApi, rabbitmq-jci, api]',
+        clientId_: 'jci-authui-client',
+      ),
+    );
     await signalingHandler.setupSignaling();
   }
 

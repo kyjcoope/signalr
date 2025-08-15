@@ -48,7 +48,20 @@ class WebRtcCameraSession {
   VoidCallback? onDataChannelReady;
   void Function(RTCTrackEvent)? onTrack;
   void Function(Uint8List)? onDataFrame;
+
+  // ICE state callbacks
   VoidCallback? onLocalIceCandidate;
+  VoidCallback? onRemoteIceCandidate;
+
+  // Codec callback
+  void Function(String codec)? onVideoCodecResolved;
+
+  // Negotiated codec (best-effort)
+  String? selectedVideoCodec;
+  String? get negotiatedVideoCodec => selectedVideoCodec;
+
+  bool _firedLocalIce = false;
+  bool _firedRemoteIce = false;
 
   final Queue<TrickleMessage> _pendingTrickles = Queue<TrickleMessage>();
   Map<int, String> _mlineToMid = {};
@@ -56,6 +69,10 @@ class WebRtcCameraSession {
   Completer<void> _iceCandidatesGathering = Completer<void>();
   bool _iceRestartInFlight = false;
   final WebRtcLogger _logger = WebRtcLogger();
+
+  // Codec detection attempts
+  int _codecDetectAttempts = 0;
+  static const int _maxCodecDetectAttempts = 6;
 
   Stream<String> get messageStream => _messageController.stream;
 
@@ -96,6 +113,10 @@ class WebRtcCameraSession {
 
     dev.log('[$cameraId] Received remote ICE candidate');
     try {
+      if (!_firedRemoteIce) {
+        _firedRemoteIce = true;
+        onRemoteIceCandidate?.call();
+      }
       final mline = msg.candidate.sdpMLineIndex;
       final mid = _resolveMid(msg.candidate.sdpMid, mline);
 
@@ -158,6 +179,10 @@ class WebRtcCameraSession {
     _eocSentForMid.clear();
     _iceRestartInFlight = false;
     sessionId = null;
+    _firedLocalIce = false;
+    _firedRemoteIce = false;
+    selectedVideoCodec = null;
+    _codecDetectAttempts = 0;
 
     try {
       await _messageController.close();
@@ -269,6 +294,10 @@ class WebRtcCameraSession {
         }
 
         final c = RTCIceCandidate(t.candidate.candidate, mid, mline);
+        if (!_firedRemoteIce) {
+          _firedRemoteIce = true;
+          onRemoteIceCandidate?.call();
+        }
         await _peerConnection?.addCandidate(c);
 
         dev.log('[$cameraId] ✅ Added queued ICE: mid=$mid mline=$mline');
@@ -295,9 +324,11 @@ class WebRtcCameraSession {
     final answer = await _peerConnection!.createAnswer();
     await _peerConnection!.setLocalDescription(answer);
 
-    final timeout = Future.delayed(const Duration(seconds: 5));
-    await Future.any([_iceCandidatesGathering.future, timeout]);
     final finalAnswer = await _peerConnection!.getLocalDescription();
+    if (finalAnswer != null) {
+      _extractCodecFromSdpOnce(finalAnswer.sdp ?? '');
+    }
+
     await sessionHub.signalingHandler.sendInviteAnswer(
       InviteAnswerMessage(
         session: msg.session,
@@ -351,6 +382,8 @@ class WebRtcCameraSession {
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       dev.log('[$cameraId] 🎉 PEER CONNECTION ESTABLISHED!');
       onConnectionComplete?.call();
+      // Attempt stats-based codec detection (more accurate) asynchronously
+      _scheduleCodecStatsDetection();
     }
   }
 
@@ -397,6 +430,11 @@ class WebRtcCameraSession {
       dev.log('[$cameraId] ✅ End of LOCAL candidates.');
       if (!_iceCandidatesGathering.isCompleted) {
         _iceCandidatesGathering.complete();
+      }
+    } else {
+      if (!_firedLocalIce) {
+        _firedLocalIce = true;
+        onLocalIceCandidate?.call();
       }
     }
 
@@ -472,22 +510,13 @@ class WebRtcCameraSession {
       RegExp(r'\bH264/90000\b', caseSensitive: false).hasMatch(sdp);
 
   String _mungeSdp(String sdp) {
-    const iosAllowed = {'640c2a', '42e02a', '42e01f'};
-    final defaultId = Platform.isIOS ? '42e02a' : '42e01f';
-
-    // Fix profile-level-id
     sdp = sdp.replaceAllMapped(RegExp(r'profile-level-id=([0-9A-Fa-f]{6})'), (
       m,
     ) {
-      final id = m[1]!.toLowerCase();
-      final goodId =
-          Platform.isIOS
-              ? (iosAllowed.contains(id) ? id : defaultId)
-              : defaultId;
+      final goodId = '42e01f';
       return 'profile-level-id=$goodId';
     });
 
-    // Ensure level-asymmetry-allowed=1
     if (!sdp.toLowerCase().contains('level-asymmetry-allowed')) {
       sdp = sdp.replaceFirst(
         'packetization-mode=1;',
@@ -516,6 +545,132 @@ class WebRtcCameraSession {
       }
     }
     return map;
+  }
+
+  // SDP parsing (fallback / initial)
+  void _extractCodecFromSdpOnce(String sdp) {
+    if (selectedVideoCodec != null) return;
+    final codec = _parseSelectedVideoCodec(sdp);
+    if (codec != null) {
+      selectedVideoCodec = codec;
+      dev.log('[$cameraId] Selected video codec (SDP): $codec');
+      onVideoCodecResolved?.call(codec);
+    }
+  }
+
+  String? _parseSelectedVideoCodec(String sdp) {
+    // Find first video media section
+    final sections = sdp.split(RegExp(r'\r?\nm=')); // keep first 'm=' in first
+    String? videoSection;
+    for (final raw in sections) {
+      final sec = raw.startsWith('m=') ? raw : 'm=$raw';
+      if (sec.startsWith(RegExp(r'm=video'))) {
+        videoSection = sec;
+        break;
+      }
+    }
+    if (videoSection == null) return null;
+
+    final mLine = videoSection.split(RegExp(r'\r?\n')).first;
+    final parts = mLine.split(' ');
+    if (parts.length < 4) return null;
+    // payload types are after first 3 tokens: m= video <port> <proto> <pt> ...
+    final pts =
+        parts.skip(3).where((p) => RegExp(r'^\d+$').hasMatch(p)).toList();
+    if (pts.isEmpty) return null;
+
+    final lines = sdp.split(RegExp(r'\r?\n'));
+    for (final pt in pts) {
+      final rtpmapLine = lines.firstWhere(
+        (l) => l.startsWith('a=rtpmap:$pt '),
+        orElse: () => '',
+      );
+      if (rtpmapLine.isEmpty) continue;
+      final codecPart = rtpmapLine.split(' ').skip(1).firstOrNull ?? '';
+      final codecName = codecPart.split('/').first.toUpperCase();
+      // Skip non-codec payload helpers
+      if (['RTX', 'ULPFEC', 'RED', 'FLEXFEC-03'].contains(codecName)) {
+        continue;
+      }
+      return codecName;
+    }
+    return null;
+  }
+
+  void _scheduleCodecStatsDetection() {
+    if (selectedVideoCodec != null) return;
+    Future.delayed(const Duration(milliseconds: 700), _detectCodecFromStats);
+  }
+
+  Future<void> _detectCodecFromStats() async {
+    if (_peerConnection == null) return;
+    if (selectedVideoCodec != null) return;
+    if (_codecDetectAttempts >= _maxCodecDetectAttempts) return;
+
+    _codecDetectAttempts++;
+
+    try {
+      final reports = await _peerConnection!.getStats();
+      if (reports.isEmpty) {
+        _retryCodecDetection();
+        return;
+      }
+
+      // Map reports by id
+      final byId = {for (final r in reports) r.id: r};
+      // Find inbound video
+      final inboundVideo =
+          reports.where((r) {
+            final type = r.type.toLowerCase();
+            if (type != 'inbound-rtp') return false;
+            final kind =
+                (r.values['kind'] ?? r.values['mediaType'] ?? '')
+                    .toString()
+                    .toLowerCase();
+            return kind == 'video';
+          }).toList();
+
+      if (inboundVideo.isEmpty) {
+        _retryCodecDetection();
+        return;
+      }
+
+      for (final inbound in inboundVideo) {
+        final codecId = inbound.values['codecId'] ?? inbound.values['codec_id'];
+        if (codecId != null && byId.containsKey(codecId)) {
+          final codecReport = byId[codecId]!;
+          final mime =
+              (codecReport.values['mimeType'] ??
+                      codecReport.values['codec'] ??
+                      '')
+                  .toString();
+          if (mime.isNotEmpty) {
+            final upper =
+                mime.contains('/')
+                    ? mime.split('/').last.toUpperCase()
+                    : mime.toUpperCase();
+            if (upper.isNotEmpty) {
+              selectedVideoCodec = upper;
+              dev.log('[$cameraId] Selected video codec (Stats): $upper');
+              onVideoCodecResolved?.call(upper);
+              return;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      dev.log('[$cameraId] Codec stats detection error: $e');
+    }
+
+    if (selectedVideoCodec == null) {
+      _retryCodecDetection();
+    }
+  }
+
+  void _retryCodecDetection() {
+    if (selectedVideoCodec != null) return;
+    if (_codecDetectAttempts >= _maxCodecDetectAttempts) return;
+    Future.delayed(const Duration(seconds: 1), _detectCodecFromStats);
   }
 
   void _startLogger() {
