@@ -1,4 +1,4 @@
-final currentEnvironment = Environment.qa2;
+final currentEnvironment = Environment.dev2;
 
 enum Environment {
   dev(
@@ -10,14 +10,14 @@ enum Environment {
   dev2(
     url: 'jci-osp-api-gateway-dev-2.osp-jci.com',
     signalRUrl: 'jci-osp-api-gateway-dev-2.osp-jci.com/SignalingHub',
-    username: 'BASIC',
-    password: r'Pass123$$',
+    username: 'SANDBOX_ADMIN',
+    password: 'Highspan@2026',
   ),
   qa2(
     url: 'jci-osp-api-gateway-dev-2.osp-jci.com',
     signalRUrl: 'jci-osp-api-gateway-qa-2.osp-jci.com/SignalingHub',
-    username: 'BASIC',
-    password: r'Pass123$$',
+    username: 'TESTCITY.JCI.COM',
+    password: 'Highspan@2026',
   ),
   qa(
     url: 'jci-osp-api-gateway-qa.osp-jci.com',
