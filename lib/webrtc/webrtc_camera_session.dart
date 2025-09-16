@@ -4,6 +4,7 @@ import 'dart:developer' as dev;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:signalr/isolate/isolate.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
 import 'package:universal_io/io.dart';
 
@@ -340,8 +341,14 @@ class WebRtcCameraSession {
     await _drainQueuedRemoteIce();
   }
 
-  void _onTrack(RTCTrackEvent event) {
+  void _onTrack(RTCTrackEvent event) async {
     dev.log('[$cameraId] Track received: ${event.track.kind}');
+    final track = event.track;
+    if (track.kind == 'video') {
+      // await track.startFrameCapture();
+      // dev.log('send isolate log for track id=${track.id}');
+      // LogPrinterIsolate.send(track.id ?? '');
+    }
     onTrack?.call(event);
   }
 

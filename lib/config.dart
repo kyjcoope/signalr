@@ -1,4 +1,4 @@
-final currentEnvironment = Environment.dev2;
+final currentEnvironment = Environment.qa2;
 
 enum Environment {
   dev(
