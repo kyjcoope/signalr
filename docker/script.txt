@@ -1,0 +1,23 @@
+# In the directory with your Dockerfile
+# (a) Make sure buildx is ready (first time only):
+docker buildx ls || docker buildx create --use
+docker buildx inspect --bootstrap
+
+# (b) Build and push to your registry (replace with your registry/name:tag)
+REG=YOUR-REGISTRY.example.com
+IMG=$REG/flutter-dev-x64:ubuntu24.04-main
+
+# Login if private registry
+docker login $REG
+
+# Build for amd64 from Apple Silicon and push
+docker buildx build \
+  --platform linux/amd64 \
+  -t $IMG \
+  --push \
+  .
+
+
+
+
+  docker run --rm -it $IMG bash -lc "ldd --version; flutter --version; dart --version"
