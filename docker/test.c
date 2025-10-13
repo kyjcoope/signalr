@@ -1,20 +1,26 @@
-// media_processor_jni.cpp
-#include <jni.h>
-#include <android/native_window_jni.h> // ANativeWindow_fromSurface, _release
+#include "glue.h"
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_jci_mediaprocessor_media_1processor_MediaProcessorPlugin_nativeAcquireNativeWindow(
-    JNIEnv* env, jclass /*clazz*/, jobject surface) {
-  ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
-  // window may be NULL if the Surface is invalid; handle that in Java if needed.
-  return reinterpret_cast<jlong>(window);
+JNIEXPORT jbyteArray JNICALL
+Java_com_jci_mediaprocessor_media_1processor_BaseRenderer_getBuffer(
+    JNIEnv* env, jclass clazz, jlong ptr, jint size) {
+  jbyteArray bytes = (*env)->NewByteArray(env, size);
+  if (bytes == NULL) return NULL;
+  (*env)->SetByteArrayRegion(env, bytes, 0, size, (jbyte*)ptr);
+  return bytes;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jci_mediaprocessor_media_1processor_MediaProcessorPlugin_nativeReleaseNativeWindow(
-    JNIEnv* /*env*/, jclass /*clazz*/, jlong ptr) {
-  ANativeWindow* window = reinterpret_cast<ANativeWindow*>(ptr);
-  if (window) {
-    ANativeWindow_release(window);
+JNIEXPORT jlong JNICALL
+Java_com_jci_mediaprocessor_media_1processor_MediaProcessorPlugin_getANativeWindow(
+    JNIEnv* env, jclass clazz, jobject surface) {
+  // Keep behavior you already had: store a global ref to the Surface jobject.
+  jobject globalRef = (*env)->NewGlobalRef(env, surface);
+  return (jlong)globalRef;
+}
+
+JNIEXPORT void JNICALL
+Java_com_jci_mediaprocessor_media_1processor_MediaProcessorPlugin_releaseNativeWindow(
+    JNIEnv* env, jclass clazz, jlong globalSurfaceRef) {
+  if (globalSurfaceRef != 0) {
+    (*env)->DeleteGlobalRef(env, (jobject)globalSurfaceRef);
   }
 }

@@ -2,10 +2,12 @@ package com.jci.mediaprocessor.media_processor;
 
 import androidx.annotation.NonNull;
 
-import android.view.Surface;
+import android.graphics.SurfaceTexture;
 import android.util.LongSparseArray;
-import java.util.Map;
+import android.view.Surface;
+
 import java.util.HashMap;
+import java.util.Map;
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.plugin.common.MethodCall;
@@ -17,18 +19,19 @@ import io.flutter.view.TextureRegistry;
 public class MediaProcessorPlugin implements FlutterPlugin, MethodCallHandler {
   static { System.loadLibrary("MediaProcessor"); }
 
-  // NDK helpers: acquire/release a real ANativeWindow* for AMediaCodec_configure.
-  private static native long nativeAcquireNativeWindow(Surface surface);
-  private static native void nativeReleaseNativeWindow(long nativeWindowPtr);
+  // JNI — returns a global ref to the Java Surface (you convert to ANativeWindow later in native)
+  public static native long getANativeWindow(Surface surface);
+  // Optional: lets us delete the global ref we created above (see dispose()).
+  public static native void releaseNativeWindow(long globalSurfaceRef);
 
   private MethodChannel channel;
   private TextureRegistry textureRegistry;
 
-  private static final LongSparseArray<BaseRenderer> _renderers = new LongSparseArray<>();
-  // Store SurfaceProducer instead of SurfaceTextureEntry for HW path.
-  private static final LongSparseArray<TextureRegistry.SurfaceProducer> _textures = new LongSparseArray<>();
-  // Track NativeWindow pointers so we can release them.
-  private static final LongSparseArray<Long> _nativeWindows = new LongSparseArray<>();
+  private static final LongSparseArray<BaseRenderer> RENDERERS = new LongSparseArray<>();
+  private static final LongSparseArray<TextureRegistry.SurfaceTextureEntry> TEXTURES = new LongSparseArray<>();
+  private static final LongSparseArray<TextureRegistry.SurfaceProducer> PRODUCERS = new LongSparseArray<>();
+  // If you want to free the global ref in dispose(), track it here:
+  private static final LongSparseArray<Long> NATIVE_SURFACES = new LongSparseArray<>();
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPlugin.FlutterPluginBinding binding) {
@@ -42,74 +45,88 @@ public class MediaProcessorPlugin implements FlutterPlugin, MethodCallHandler {
   public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
     Map<String, Number> arguments = (Map<String, Number>) call.arguments;
 
-    if ("createHW".equals(call.method)) {
-      // Prefer automatic lifecycle so the engine clears/recycles frames
-      // when they’re consumed on the Flutter side.
-      TextureRegistry.SurfaceProducer entry =
-          textureRegistry.createSurfaceProducer(TextureRegistry.SurfaceLifecycle.automatic);
+    if (call.method.equals("createHW")) {
+      // New API: SurfaceProducer (manual lifecycle, since we dispose explicitly)
+      TextureRegistry.SurfaceProducer producer =
+          textureRegistry.createSurfaceProducer(TextureRegistry.SurfaceLifecycle.manual);
 
-      Surface surface = entry.getSurface(); // Producer-owned Surface (not a SurfaceTexture)
-      long nativeWindow = nativeAcquireNativeWindow(surface);
+      // If width/height are supplied, set the size (recommended)
+      if (arguments != null && arguments.containsKey("width") && arguments.containsKey("height")) {
+        producer.setSize(arguments.get("width").intValue(), arguments.get("height").intValue());
+      }
 
-      _textures.put(entry.id(), entry);
-      _nativeWindows.put(entry.id(), nativeWindow);
+      // Get a Surface directly from the producer
+      Surface surface = producer.getSurface();
+      long nativeSurface = getANativeWindow(surface); // returns a global ref (jobject) as jlong
+
+      PRODUCERS.put(producer.id(), producer);
+      NATIVE_SURFACES.put(producer.id(), nativeSurface);
 
       HashMap<String, Long> values = new HashMap<>();
-      values.put("textureId", entry.id());
-      values.put("nativeSurface", nativeWindow);
+      values.put("textureId", producer.id());
+      values.put("nativeSurface", nativeSurface);
       result.success(values);
 
-    } else if ("create".equals(call.method)) {
-      // Your software/GL path can keep using SurfaceTextureEntry if you like,
-      // or you can migrate it later. Keeping it unchanged here:
+    } else if (call.method.equals("create")) {
+      // Keep your existing software GL path that uses SurfaceTextureEntry
       TextureRegistry.SurfaceTextureEntry entry = textureRegistry.createSurfaceTexture();
+      SurfaceTexture surfaceTexture = entry.surfaceTexture();
+
       int width = arguments.get("width").intValue();
       int height = arguments.get("height").intValue();
-      entry.surfaceTexture().setDefaultBufferSize(width, height);
+      surfaceTexture.setDefaultBufferSize(width, height);
 
-      BaseRenderer render = createTexture(entry.surfaceTexture(), width, height, true);
+      BaseRenderer render = createTexture(surfaceTexture, width, height, true);
       render.initGL();
       render.initShaders();
       render.initBuffers();
 
-      _renderers.put(entry.id(), render);
-      // Note: _textures is a SurfaceProducer store; if you keep SW path,
-      // either create a parallel map for SurfaceTexture entries or migrate
-      // SW path to SurfaceProducer too.
+      RENDERERS.put(entry.id(), render);
+      TEXTURES.put(entry.id(), entry);
       result.success(entry.id());
 
-    } else if ("passFramePtr".equals(call.method)) {
+    } else if (call.method.equals("passFramePtr")) {
       long ptr = call.argument("ptr");
       int size = call.argument("size");
       long textureId = arguments.get("textureId").longValue();
-      BaseRenderer render = _renderers.get(textureId);
+      BaseRenderer render = RENDERERS.get(textureId);
       if (render == null) return;
       render.setBufferPtr(ptr, size);
       result.success(textureId);
 
-    } else if ("dispose".equals(call.method)) {
+    } else if (call.method.equals("dispose")) {
       long textureId = arguments.get("textureId").longValue();
 
-      BaseRenderer render = _renderers.get(textureId);
+      // Dispose renderer if present (SW path)
+      BaseRenderer render = RENDERERS.get(textureId);
       if (render != null) {
         render.onDispose();
-        _renderers.delete(textureId);
+        RENDERERS.delete(textureId);
       }
 
-      // Release the ANativeWindow* first so MediaCodec lets go of hardware resources.
-      Long winPtr = _nativeWindows.get(textureId);
-      if (winPtr != null) {
-        nativeReleaseNativeWindow(winPtr);
-        _nativeWindows.delete(textureId);
+      // Dispose SurfaceTextureEntry if present (SW path)
+      TextureRegistry.SurfaceTextureEntry entry = TEXTURES.get(textureId);
+      if (entry != null) {
+        entry.release();
+        TEXTURES.delete(textureId);
       }
 
-      TextureRegistry.SurfaceProducer producer = _textures.get(textureId);
+      // Dispose SurfaceProducer if present (HW path)
+      TextureRegistry.SurfaceProducer producer = PRODUCERS.get(textureId);
       if (producer != null) {
-        producer.release(); // Important: gives the buffer back to Flutter/engine.
-        _textures.delete(textureId);
+        producer.release(); // manual lifecycle: you must call release()
+        PRODUCERS.delete(textureId);
+      }
+
+      // Optional but recommended: free the global Surface ref if you made one
+      Long surfaceRef = NATIVE_SURFACES.get(textureId);
+      if (surfaceRef != null) {
+        releaseNativeWindow(surfaceRef);
+        NATIVE_SURFACES.delete(textureId);
       }
 
       result.success(null);
+
     } else {
       result.notImplemented();
     }
@@ -120,7 +137,8 @@ public class MediaProcessorPlugin implements FlutterPlugin, MethodCallHandler {
     channel.setMethodCallHandler(null);
   }
 
-  BaseRenderer createTexture(android.graphics.SurfaceTexture tex, int w, int h, boolean isRgb) {
-    return isRgb ? new RgbRenderer(tex, w, h) : new YuvRenderer(tex, w, h);
+  BaseRenderer createTexture(SurfaceTexture surfaceTexture, int width, int height, boolean isRgb) {
+    return isRgb ? new RgbRenderer(surfaceTexture, width, height)
+                 : new YuvRenderer(surfaceTexture, width, height);
   }
 }
