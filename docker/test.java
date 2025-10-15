@@ -18,16 +18,16 @@ import io.flutter.view.TextureRegistry;
 public class MediaProcessorPlugin implements FlutterPlugin, MethodCallHandler {
   static { System.loadLibrary("MediaProcessor"); }
 
-  // JNI: Java Surface global-ref helpers for HW path
+  // HW path helper (global ref to a Java Surface; convert to ANativeWindow in C)
   public static native long getANativeWindow(Surface surface);
   public static native void releaseNativeWindow(long globalSurfaceRef);
 
   private MethodChannel channel;
   private TextureRegistry textureRegistry;
 
-  private static final LongSparseArray<BaseRenderer> RENDERERS = new LongSparseArray<>();
+  private static final LongSparseArray<BaseRenderer> RENDERERS   = new LongSparseArray<>();
   private static final LongSparseArray<TextureRegistry.SurfaceProducer> PRODUCERS = new LongSparseArray<>();
-  private static final LongSparseArray<Long> NATIVE_SURFACES = new LongSparseArray<>(); // HW path only
+  private static final LongSparseArray<Long> NATIVE_SURFACES = new LongSparseArray<>(); // HW only
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPlugin.FlutterPluginBinding binding) {
@@ -39,100 +39,122 @@ public class MediaProcessorPlugin implements FlutterPlugin, MethodCallHandler {
   @Override
   @SuppressWarnings("unchecked")
   public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
-    final Map<String, Number> args = (Map<String, Number>) call.arguments;
+    final Map<String, Number> arguments = (Map<String, Number>) call.arguments;
 
-    switch (call.method) {
-      case "createHW": {
-        // One producer == one Flutter texture id (don’t reuse for concurrent streams).
-        TextureRegistry.SurfaceProducer producer =
-            textureRegistry.createSurfaceProducer(TextureRegistry.SurfaceLifecycle.manual); // default is manual too
+    if ("createHW".equals(call.method)) {
+      // ---- Hardware path (MediaCodec) ----
+      TextureRegistry.SurfaceProducer producer =
+          textureRegistry.createSurfaceProducer(TextureRegistry.SurfaceLifecycle.manual);
 
-        if (args != null && args.containsKey("width") && args.containsKey("height")) {
-          producer.setSize(args.get("width").intValue(), args.get("height").intValue());
-        }
-
-        Surface surface = producer.getSurface(); // do not cache long-term; can change on resize
-        long nativeSurface = getANativeWindow(surface); // global ref for native
-
-        PRODUCERS.put(producer.id(), producer);
-        NATIVE_SURFACES.put(producer.id(), nativeSurface);
-
-        HashMap<String, Long> out = new HashMap<>();
-        out.put("textureId", producer.id());
-        out.put("nativeSurface", nativeSurface);
-        result.success(out);
-        return;
+      if (arguments != null && arguments.containsKey("width") && arguments.containsKey("height")) {
+        producer.setSize(arguments.get("width").intValue(), arguments.get("height").intValue());
       }
 
-      case "create": { // SW path now also uses SurfaceProducer
-        int width = args.get("width").intValue();
-        int height = args.get("height").intValue();
+      Surface surface = producer.getSurface(); // per docs: do not cache long-term
+      long nativeSurface = getANativeWindow(surface); // store global ref for C++
 
-        TextureRegistry.SurfaceProducer producer =
-            textureRegistry.createSurfaceProducer(TextureRegistry.SurfaceLifecycle.manual);
-        producer.setSize(width, height);
+      long id = producer.id();
+      PRODUCERS.put(id, producer);
+      NATIVE_SURFACES.put(id, nativeSurface);
 
-        Surface surface = producer.getSurface();
-        BaseRenderer renderer = new RgbRenderer(surface, width, height); // or YuvRenderer if that’s your format
-        renderer.initGL();
-        renderer.initShaders();
-        renderer.initBuffers();
+      // No renderer on HW path, but track callbacks so we can notify native side if needed later.
+      producer.setCallback(new TextureRegistry.SurfaceProducer.Callback() {
+        @Override public void onSurfaceCleanup() {
+          // no-op for HW path here (your decoder should handle EOS / reconfigure)
+        }
+        @Override public void onSurfaceAvailable() {
+          // HW path could re-acquire Surface with producer.getSurface() if needed.
+        }
+      });
 
-        long id = producer.id();
-        PRODUCERS.put(id, producer);
-        RENDERERS.put(id, renderer);
+      HashMap<String, Long> values = new HashMap<>();
+      values.put("textureId", id);
+      values.put("nativeSurface", nativeSurface);
+      result.success(values);
 
-        result.success(id);
-        return;
+    } else if ("create".equals(call.method)) {
+      // ---- Software path (using SurfaceProducer) ----
+      int width  = arguments.get("width").intValue();
+      int height = arguments.get("height").intValue();
+
+      TextureRegistry.SurfaceProducer producer =
+          textureRegistry.createSurfaceProducer(TextureRegistry.SurfaceLifecycle.manual);
+      producer.setSize(width, height);
+
+      Surface surface = producer.getSurface();
+      BaseRenderer renderer = createTexture(surface, width, height, /*isRgb=*/true);
+      renderer.initGL();
+      renderer.initShaders();
+      renderer.initBuffers();
+
+      long id = producer.id();
+      PRODUCERS.put(id, producer);
+      RENDERERS.put(id, renderer);
+
+      // Critically: listen for Surface replacement & cleanup and rebuild EGLSurface on renderer
+      producer.setCallback(new TextureRegistry.SurfaceProducer.Callback() {
+        @Override public void onSurfaceCleanup() {
+          renderer.notifySurfaceCleanup();
+        }
+        @Override public void onSurfaceAvailable() {
+          // Producer promises a new valid Surface now. Don't cache; pass it through.
+          Surface s = producer.getSurface();
+          renderer.notifySurfaceAvailable(s);
+        }
+      });
+
+      result.success(id);
+
+    } else if ("passFramePtr".equals(call.method)) {
+      long ptr = call.argument("ptr");
+      int size = call.argument("size");
+      long textureId = arguments.get("textureId").longValue();
+
+      BaseRenderer renderer = RENDERERS.get(textureId);
+      if (renderer == null) { result.success(null); return; }
+
+      renderer.setBufferPtr(ptr, size);
+      result.success(textureId);
+
+    } else if ("dispose".equals(call.method)) {
+      long textureId = arguments.get("textureId").longValue();
+
+      // SW renderer cleanup
+      BaseRenderer renderer = RENDERERS.get(textureId);
+      if (renderer != null) {
+        renderer.onDispose();
+        RENDERERS.delete(textureId);
       }
 
-      case "passFramePtr": {
-        long ptr = call.argument("ptr");
-        int size = call.argument("size");
-        long textureId = args.get("textureId").longValue();
-
-        BaseRenderer renderer = RENDERERS.get(textureId);
-        if (renderer != null) {
-          renderer.setBufferPtr(ptr, size);
-          result.success(textureId);
-        } else {
-          result.error("NO_RENDERER", "Renderer not found for textureId=" + textureId, null);
-        }
-        return;
+      // Producer cleanup (both HW & SW)
+      TextureRegistry.SurfaceProducer producer = PRODUCERS.get(textureId);
+      if (producer != null) {
+        producer.setCallback(null);
+        producer.release(); // manual lifecycle
+        PRODUCERS.delete(textureId);
       }
 
-      case "dispose": {
-        long textureId = args.get("textureId").longValue();
-
-        BaseRenderer renderer = RENDERERS.get(textureId);
-        if (renderer != null) {
-          renderer.onDispose();
-          RENDERERS.delete(textureId);
-        }
-
-        TextureRegistry.SurfaceProducer producer = PRODUCERS.get(textureId);
-        if (producer != null) {
-          producer.release(); // unregister from Flutter; returns buffers
-          PRODUCERS.delete(textureId);
-        }
-
-        Long surfaceRef = NATIVE_SURFACES.get(textureId);
-        if (surfaceRef != null) {
-          releaseNativeWindow(surfaceRef);
-          NATIVE_SURFACES.delete(textureId);
-        }
-
-        result.success(null);
-        return;
+      // HW global ref cleanup (if any)
+      Long surfaceRef = NATIVE_SURFACES.get(textureId);
+      if (surfaceRef != null) {
+        releaseNativeWindow(surfaceRef);
+        NATIVE_SURFACES.delete(textureId);
       }
 
-      default:
-        result.notImplemented();
+      result.success(null);
+
+    } else {
+      result.notImplemented();
     }
   }
 
   @Override
   public void onDetachedFromEngine(@NonNull FlutterPlugin.FlutterPluginBinding binding) {
     channel.setMethodCallHandler(null);
+  }
+
+  // NOTE: SW path uses Surface from SurfaceProducer. (Legacy SurfaceTexture ctor is still supported.)
+  BaseRenderer createTexture(Surface surface, int width, int height, boolean isRgb) {
+    return isRgb ? new RgbRenderer(surface, width, height) : new YuvRenderer(surface, width, height);
   }
 }

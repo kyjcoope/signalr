@@ -1,15 +1,13 @@
 package com.jci.mediaprocessor.media_processor;
 
+import android.graphics.SurfaceTexture;
 import android.opengl.GLES20;
-import android.opengl.GLES30;
 import android.util.Log;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
 
 public class YuvRenderer extends BaseRenderer {
-  private static final String LOG_TAG = "YuvRenderer";
-
   private ByteBuffer mBufferY;
   private ByteBuffer mBufferU;
   private ByteBuffer mBufferV;
@@ -18,8 +16,11 @@ public class YuvRenderer extends BaseRenderer {
     super(surface, width, height);
   }
 
-  @Override
-  protected String vertexShader() {
+  public YuvRenderer(SurfaceTexture texture, int width, int height) {
+    super(texture, width, height);
+  }
+
+  public String vertexShader() {
     return "attribute vec4 a_Position;\n"
          + "attribute vec2 a_TexCoordinate;\n"
          + "varying vec2 v_TexCoordinate;\n"
@@ -29,8 +30,7 @@ public class YuvRenderer extends BaseRenderer {
          + "}";
   }
 
-  @Override
-  protected String fragmentShader() {
+  public String fragmentShader() {
     return "precision mediump float;\n"
          + "uniform sampler2D samplerY;\n"
          + "uniform sampler2D samplerU;\n"
@@ -48,14 +48,12 @@ public class YuvRenderer extends BaseRenderer {
          + "}";
   }
 
-  @Override
   protected void connectTexturesToProgram() {
     mYUVTextureHandle[0] = GLES20.glGetUniformLocation(mProgramHandle, "samplerY");
     mYUVTextureHandle[1] = GLES20.glGetUniformLocation(mProgramHandle, "samplerU");
     mYUVTextureHandle[2] = GLES20.glGetUniformLocation(mProgramHandle, "samplerV");
   }
 
-  @Override
   public void setBuffer(byte[] inY, byte[] inU, byte[] inV) {
     mBufferY = ByteBuffer.wrap(inY);
     mBufferU = ByteBuffer.wrap(inU);
@@ -63,18 +61,15 @@ public class YuvRenderer extends BaseRenderer {
     drawTexture();
   }
 
-  @Override
   public void setBufferPtr(long ptr, int size) {
-    // Not used for planar uploads in your pipeline (NO-OP),
-    // but you could split the native memory and wrap three direct buffers if desired.
+    // current YUV path doesn’t use ptr
   }
 
-  @Override
   protected void loadTexture(ByteBuffer[] buffers) {
-    int[] widths  = { width,  width / 2, width  / 2 };
+    int[] widths  = { width, width / 2, width / 2 };
     int[] heights = { height, height / 2, height / 2 };
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 3; i++) {
       GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + i);
       GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTextures[i]);
       GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
@@ -90,21 +85,21 @@ public class YuvRenderer extends BaseRenderer {
     }
   }
 
-  @Override
-  protected void drawTexture() {
-    if (mBufferY == null || mBufferU == null || mBufferV == null) return;
+  public synchronized void drawTexture() {
+    ensureSurfaceIfNeeded();
+    if (surfaceLost) return;
 
     GLES20.glClearColor(0f, 0f, 0f, 1f);
-    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
 
-    loadTexture(new ByteBuffer[]{ mBufferY, mBufferU, mBufferV });
+    ByteBuffer[] yuv = new ByteBuffer[] { mBufferY, mBufferU, mBufferV };
+    loadTexture(yuv);
 
     GLES20.glUseProgram(mProgramHandle);
-    GLES30.glBindVertexArray(vao[0]);
     GLES20.glDrawElements(GLES20.GL_TRIANGLES, 6, GLES20.GL_UNSIGNED_INT, 0);
 
-    if (!egl.eglSwapBuffers(eglDisplay, eglSurface)) {
-      Log.d(LOG_TAG, "eglSwapBuffers error: " + egl.eglGetError());
+    if (!swapBuffers()) {
+      Log.w("YuvRenderer", "eglSwapBuffers reported an error; frame not presented");
     }
   }
 }

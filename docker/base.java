@@ -1,8 +1,9 @@
 package com.jci.mediaprocessor.media_processor;
 
+import android.graphics.SurfaceTexture;
 import android.opengl.GLES20;
-import android.opengl.GLES30;
 import android.opengl.GLUtils;
+import android.util.Log;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
@@ -16,16 +17,20 @@ import javax.microedition.khronos.egl.EGLContext;
 import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.egl.EGLSurface;
 
-/**
- * Base GLES2/3 renderer that targets a Flutter SurfaceProducer Surface.
- */
 public abstract class BaseRenderer {
   static { System.loadLibrary("MediaProcessor"); }
 
-  // Direct buffer (no Java copy) for pointer uploads
-  public static native ByteBuffer getBufferDirect(long ptr, int size);
+  public static native byte[] getBuffer(long ptr, int size);
 
-  protected final Surface surface;  // target from SurfaceProducer
+  protected static final String LOG_TAG = "OpenGL.Worker";
+
+  // Either texture OR surface will be set, not both
+  protected final SurfaceTexture texture;
+  protected volatile Surface surface;      // may be replaced by SurfaceProducer
+  private volatile Surface pendingSurface; // set by SurfaceProducer.Callback
+
+  protected volatile boolean surfaceLost = false;
+
   protected int width;
   protected int height;
 
@@ -33,191 +38,262 @@ public abstract class BaseRenderer {
   protected EGLDisplay eglDisplay;
   protected EGLContext eglContext;
   protected EGLSurface eglSurface;
-
-  protected final int[] vbo = new int[1];
-  protected final int[] vao = new int[1];
-  protected final int[] ebo = new int[1];
+  protected EGLConfig eglConfig;
 
   protected int mProgramHandle;
+
   protected final int[] mTextures = new int[3];
-
-  /** Attributes */
   protected int mPositionHandle;
-  protected int mTexCoordHandle;
-
-  /** Uniform sampler handles (RGB: [0] only; YUV: [0..2]) */
   protected final int[] mYUVTextureHandle = new int[3];
 
+  // simple VBO/EBO handles (ES2-safe; no VAOs)
+  private final int[] vbo = new int[1];
+  private final int[] ebo = new int[1];
+
+  // ---- NEW: SW path via SurfaceProducer ----
   public BaseRenderer(Surface surface, int width, int height) {
     this.surface = surface;
+    this.texture = null;
     this.width = width;
     this.height = height;
   }
 
-  // ----- subclass hooks -----
+  // ---- Legacy: SW path via SurfaceTextureEntry ----
+  public BaseRenderer(SurfaceTexture texture, int width, int height) {
+    this.texture = texture;
+    this.surface = null;
+    this.width = width;
+    this.height = height;
+  }
+
+  // abstract bits unchanged
   protected abstract String vertexShader();
   protected abstract String fragmentShader();
-  protected abstract void connectTexturesToProgram();         // bind uniforms
-  protected abstract void loadTexture(ByteBuffer[] buffers);   // RGB: [0]; YUV: [0..2]
-  protected abstract void drawTexture();                       // issues draw + swap
+  protected abstract void connectTexturesToProgram();
+  protected abstract void loadTexture(ByteBuffer[] buffers);
+  protected abstract void drawTexture();
+
   public abstract void setBuffer(byte[] inY, byte[] inU, byte[] inV);
   public abstract void setBufferPtr(long ptr, int size);
 
-  // ----- GL setup -----
-  public void initGL() {
+  // ---------- GL / EGL init ----------
+  public synchronized void initGL() {
     egl = (EGL10) EGLContext.getEGL();
     eglDisplay = egl.eglGetDisplay(EGL10.EGL_DEFAULT_DISPLAY);
-    if (eglDisplay == EGL10.EGL_NO_DISPLAY) {
+    if (eglDisplay == EGL10.EGL_NO_DISPLAY)
       throw new RuntimeException("eglGetDisplay failed");
-    }
 
     int[] version = new int[2];
-    if (!egl.eglInitialize(eglDisplay, version)) {
+    if (!egl.eglInitialize(eglDisplay, version))
       throw new RuntimeException("eglInitialize failed");
-    }
 
-    EGLConfig eglConfig = chooseEglConfig();
+    eglConfig = chooseEglConfig();
     eglContext = createContext(egl, eglDisplay, eglConfig);
 
-    // Create EGL window surface from the Flutter-managed android.view.Surface
-    eglSurface = egl.eglCreateWindowSurface(eglDisplay, eglConfig, surface, null);
-    if (eglSurface == null || eglSurface == EGL10.EGL_NO_SURFACE) {
-      throw new RuntimeException("eglCreateWindowSurface: " + GLUtils.getEGLErrorString(egl.eglGetError()));
-    }
-    if (!egl.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
-      throw new RuntimeException("eglMakeCurrent: " + GLUtils.getEGLErrorString(egl.eglGetError()));
-    }
+    // Create initial window surface from either Surface OR SurfaceTexture
+    final Object win = (surface != null) ? surface : texture;
+    createOrRecreateWindowSurface(win);
 
     GLES20.glGenTextures(3, mTextures, 0);
   }
 
-  public void initShaders() {
-    int vsh = compile(GLES20.GL_VERTEX_SHADER, vertexShader());
-    int fsh = compile(GLES20.GL_FRAGMENT_SHADER, fragmentShader());
+  public synchronized void initShaders() {
+    int vertexShaderHandle = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER);
+    if (vertexShaderHandle != 0) {
+      GLES20.glShaderSource(vertexShaderHandle, vertexShader());
+      GLES20.glCompileShader(vertexShaderHandle);
+      int[] status = new int[1];
+      GLES20.glGetShaderiv(vertexShaderHandle, GLES20.GL_COMPILE_STATUS, status, 0);
+      if (status[0] == 0) {
+        Log.e(LOG_TAG, "Vertex shader compile error");
+        GLES20.glDeleteShader(vertexShaderHandle);
+        vertexShaderHandle = 0;
+      }
+    }
+    if (vertexShaderHandle == 0)
+      throw new RuntimeException("Error creating vertex shader.");
+
+    int fragmentShaderHandle = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER);
+    if (fragmentShaderHandle != 0) {
+      GLES20.glShaderSource(fragmentShaderHandle, fragmentShader());
+      GLES20.glCompileShader(fragmentShaderHandle);
+      int[] status = new int[1];
+      GLES20.glGetShaderiv(fragmentShaderHandle, GLES20.GL_COMPILE_STATUS, status, 0);
+      if (status[0] == 0) {
+        Log.e(LOG_TAG, "Fragment shader compile error");
+        GLES20.glDeleteShader(fragmentShaderHandle);
+        fragmentShaderHandle = 0;
+      }
+    }
+    if (fragmentShaderHandle == 0)
+      throw new RuntimeException("Error creating fragment shader.");
 
     mProgramHandle = GLES20.glCreateProgram();
-    GLES20.glAttachShader(mProgramHandle, vsh);
-    GLES20.glAttachShader(mProgramHandle, fsh);
-    // Bind attribute locations before linking
-    GLES20.glBindAttribLocation(mProgramHandle, 0, "a_Position");
-    GLES20.glBindAttribLocation(mProgramHandle, 1, "a_TexCoordinate");
-    GLES20.glLinkProgram(mProgramHandle);
-
-    int[] link = new int[1];
-    GLES20.glGetProgramiv(mProgramHandle, GLES20.GL_LINK_STATUS, link, 0);
-    if (link[0] == 0) {
-      String log = GLES20.glGetProgramInfoLog(mProgramHandle);
-      GLES20.glDeleteProgram(mProgramHandle);
-      throw new RuntimeException("Program link failed: " + log);
+    if (mProgramHandle != 0) {
+      GLES20.glAttachShader(mProgramHandle, vertexShaderHandle);
+      GLES20.glAttachShader(mProgramHandle, fragmentShaderHandle);
+      GLES20.glBindAttribLocation(mProgramHandle, 0, "a_Position");
+      GLES20.glBindAttribLocation(mProgramHandle, 1, "a_TexCoordinate");
+      GLES20.glLinkProgram(mProgramHandle);
+      int[] link = new int[1];
+      GLES20.glGetProgramiv(mProgramHandle, GLES20.GL_LINK_STATUS, link, 0);
+      if (link[0] == 0) {
+        GLES20.glDeleteProgram(mProgramHandle);
+        mProgramHandle = 0;
+      }
+    } else {
+      throw new RuntimeException("Error creating program.");
     }
 
     mPositionHandle = GLES20.glGetAttribLocation(mProgramHandle, "a_Position");
-    mTexCoordHandle = GLES20.glGetAttribLocation(mProgramHandle, "a_TexCoordinate");
     connectTexturesToProgram();
     GLES20.glUseProgram(mProgramHandle);
   }
 
-  public void initBuffers() {
-    // Interleaved: pos(x,y,z) + tex(s,t)
-    final float[] vertices = new float[] {
-        //  x,    y,   z,   s,   t
-         1f,  1f,  0f, 1f, 0f,  // top-right
-         1f, -1f,  0f, 1f, 1f,  // bottom-right
-        -1f, -1f,  0f, 0f, 1f,  // bottom-left
-        -1f,  1f,  0f, 0f, 0f,  // top-left
+  public synchronized void initBuffers() {
+    // Corrected: 4 floats/vertex (x,y,u,v); stride = 4 * sizeof(float). ES2-only (no VAOs).
+    float[] vertices = {
+      // x,   y,   u,   v
+       1f,  1f,  1f,  1f,
+       1f, -1f,  1f,  0f,
+      -1f, -1f,  0f,  0f,
+      -1f,  1f,  0f,  1f
     };
-    final int[] indices = new int[] { 0, 1, 2, 0, 2, 3 };
+    int[] indices = { 0, 1, 2, 0, 2, 3 };
 
-    FloatBuffer vBuffer = ByteBuffer.allocateDirect(vertices.length * Float.BYTES)
-        .order(ByteOrder.nativeOrder()).asFloatBuffer();
-    vBuffer.put(vertices).position(0);
+    FloatBuffer vBuf = ByteBuffer.allocateDirect(vertices.length * Float.BYTES)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer().put(vertices);
+    vBuf.position(0);
+    IntBuffer iBuf = ByteBuffer.allocateDirect(indices.length * Integer.BYTES)
+        .order(ByteOrder.nativeOrder()).asIntBuffer().put(indices);
+    iBuf.position(0);
 
-    IntBuffer iBuffer = ByteBuffer.allocateDirect(indices.length * Integer.BYTES)
-        .order(ByteOrder.nativeOrder()).asIntBuffer();
-    iBuffer.put(indices).position(0);
-
-    GLES30.glGenVertexArrays(1, vao, 0);
     GLES20.glGenBuffers(1, vbo, 0);
     GLES20.glGenBuffers(1, ebo, 0);
 
-    GLES30.glBindVertexArray(vao[0]);
-
     GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo[0]);
-    GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, vertices.length * Float.BYTES, vBuffer, GLES20.GL_STATIC_DRAW);
+    GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, vertices.length * Float.BYTES, vBuf, GLES20.GL_STATIC_DRAW);
 
     GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, ebo[0]);
-    GLES20.glBufferData(GLES20.GL_ELEMENT_ARRAY_BUFFER, indices.length * Integer.BYTES, iBuffer, GLES20.GL_STATIC_DRAW);
+    GLES20.glBufferData(GLES20.GL_ELEMENT_ARRAY_BUFFER, indices.length * Integer.BYTES, iBuf, GLES20.GL_STATIC_DRAW);
 
-    // a_Position @ location 0 : vec3
-    GLES20.glVertexAttribPointer(0, 3, GLES20.GL_FLOAT, false, 5 * Float.BYTES, 0);
+    final int stride = 4 * Float.BYTES;
+    GLES20.glVertexAttribPointer(0, 2, GLES20.GL_FLOAT, false, stride, 0);
     GLES20.glEnableVertexAttribArray(0);
-
-    // a_TexCoordinate @ location 1 : vec2 (offset 3 floats)
-    GLES20.glVertexAttribPointer(1, 2, GLES20.GL_FLOAT, false, 5 * Float.BYTES, 3 * Float.BYTES);
+    GLES20.glVertexAttribPointer(1, 2, GLES20.GL_FLOAT, false, stride, 2 * Float.BYTES);
     GLES20.glEnableVertexAttribArray(1);
 
-    GLES30.glBindVertexArray(0);
+    // leave buffers bound (fine for this simple quad)
   }
 
-  protected void deinitGL() {
+  // ---------- SurfaceProducer callbacks bridge ----------
+  public synchronized void notifySurfaceCleanup() {
+    surfaceLost = true;
+    // unbind old surface from context to avoid swapping to it
+    if (egl != null && eglDisplay != null && eglContext != null) {
+      egl.eglMakeCurrent(eglDisplay, EGL10.EGL_NO_SURFACE, EGL10.EGL_NO_SURFACE, eglContext);
+    }
+  }
+
+  public synchronized void notifySurfaceAvailable(Surface newSurface) {
+    // Don't recreate here (callback thread may differ from GL thread). Just store.
+    this.pendingSurface = newSurface;
+    this.surfaceLost = false;
+  }
+
+  // ---------- Draw helpers ----------
+  protected synchronized void ensureSurfaceIfNeeded() {
+    if (surfaceLost) return; // wait until onSurfaceAvailable delivers a new one
+    if (pendingSurface != null) {
+      // (Re)create against the new Surface
+      createOrRecreateWindowSurface(pendingSurface);
+      pendingSurface = null;
+    } else if (eglSurface == null || eglSurface == EGL10.EGL_NO_SURFACE) {
+      // First-time creation path (may happen if SurfaceTexture ctor was used)
+      final Object win = (surface != null) ? surface : texture;
+      createOrRecreateWindowSurface(win);
+    }
+  }
+
+  protected synchronized boolean swapBuffers() {
+    if (eglDisplay == null || eglSurface == null || eglSurface == EGL10.EGL_NO_SURFACE) return false;
+    if (!egl.eglSwapBuffers(eglDisplay, eglSurface)) {
+      int err = egl.eglGetError();
+      if (err == EGL10.EGL_BAD_SURFACE) { // 0x300D = 12301
+        Log.w(LOG_TAG, "eglSwapBuffers: EGL_BAD_SURFACE (12301) — waiting for new Surface");
+        surfaceLost = true;
+        return false;
+      }
+      Log.e(LOG_TAG, "eglSwapBuffers error: " + err);
+      return false;
+    }
+    return true;
+  }
+
+  private void createOrRecreateWindowSurface(Object nativeWindow) {
+    if (eglSurface != null && eglSurface != EGL10.EGL_NO_SURFACE) {
+      egl.eglDestroySurface(eglDisplay, eglSurface);
+      eglSurface = null;
+    }
+    eglSurface = egl.eglCreateWindowSurface(eglDisplay, eglConfig, nativeWindow, null);
+    if (eglSurface == null || eglSurface == EGL10.EGL_NO_SURFACE) {
+      throw new RuntimeException("eglCreateWindowSurface failed: " + GLUtils.getEGLErrorString(egl.eglGetError()));
+    }
+    if (!egl.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+      throw new RuntimeException("eglMakeCurrent error: " + GLUtils.getEGLErrorString(egl.eglGetError()));
+    }
+  }
+
+  protected synchronized void deinitGL() {
+    if (egl == null) return;
     egl.eglMakeCurrent(eglDisplay, EGL10.EGL_NO_SURFACE, EGL10.EGL_NO_SURFACE, EGL10.EGL_NO_CONTEXT);
     if (eglSurface != null && eglSurface != EGL10.EGL_NO_SURFACE) {
       egl.eglDestroySurface(eglDisplay, eglSurface);
-      eglSurface = EGL10.EGL_NO_SURFACE;
+      eglSurface = null;
     }
-    if (eglContext != null) {
+    if (eglContext != null && eglContext != EGL10.EGL_NO_CONTEXT) {
       egl.eglDestroyContext(eglDisplay, eglContext);
-      eglContext = EGL10.EGL_NO_CONTEXT;
+      eglContext = null;
+    }
+    if (eglDisplay != null && eglDisplay != EGL10.EGL_NO_DISPLAY) {
+      egl.eglTerminate(eglDisplay);
+      eglDisplay = null;
     }
   }
 
   protected EGLContext createContext(EGL10 egl, EGLDisplay display, EGLConfig cfg) {
-    final int EGL_CONTEXT_CLIENT_VERSION = 0x3098;
-    int[] attrib = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL10.EGL_NONE };
+    // ES2 context (VAOs are not core here; keep ES2-safe rendering) 
+    int[] attrib = { 0x3098 /*EGL_CONTEXT_CLIENT_VERSION*/, 2, EGL10.EGL_NONE };
     return egl.eglCreateContext(display, cfg, EGL10.EGL_NO_CONTEXT, attrib);
   }
 
   protected EGLConfig chooseEglConfig() {
-    int[] spec = {
-        0x3040 /*EGL_RENDERABLE_TYPE*/, 4, // EGL_OPENGL_ES2_BIT
-        0x3024 /*EGL_RED_SIZE*/, 8,
-        0x3023 /*EGL_GREEN_SIZE*/, 8,
-        0x3022 /*EGL_BLUE_SIZE*/, 8,
-        0x3021 /*EGL_ALPHA_SIZE*/, 8,
-        0x3025 /*EGL_DEPTH_SIZE*/, 0,
-        0x3026 /*EGL_STENCIL_SIZE*/, 0,
-        EGL10.EGL_NONE
+    int[] spec = new int[] {
+      0x3040/*EGL_RENDERABLE_TYPE*/, 4, // EGL_OPENGL_ES2_BIT
+      0x3024/*EGL_RED_SIZE*/,      8,
+      0x3023/*EGL_GREEN_SIZE*/,    8,
+      0x3022/*EGL_BLUE_SIZE*/,     8,
+      0x3021/*EGL_ALPHA_SIZE*/,    8,
+      0x3025/*EGL_DEPTH_SIZE*/,    0,
+      0x3026/*EGL_STENCIL_SIZE*/,  0,
+      EGL10.EGL_NONE
     };
     int[] count = new int[1];
     EGLConfig[] cfg = new EGLConfig[1];
     if (!egl.eglChooseConfig(eglDisplay, spec, cfg, 1, count) || count[0] == 0) {
-      throw new IllegalArgumentException("eglChooseConfig failed: " + GLUtils.getEGLErrorString(egl.eglGetError()));
+      throw new IllegalArgumentException("Failed to choose config: " + GLUtils.getEGLErrorString(egl.eglGetError()));
     }
     return cfg[0];
   }
 
-  public void onDispose() {
-    // Make current to delete GL resources deterministically
-    egl.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext);
-    GLES20.glDeleteTextures(3, mTextures, 0);
-    GLES20.glDeleteBuffers(1, ebo, 0);
-    GLES20.glDeleteBuffers(1, vbo, 0);
-    GLES30.glDeleteVertexArrays(1, vao, 0);
-    deinitGL();
-  }
-
-  // ---- helpers ----
-  private static int compile(int type, String src) {
-    int sh = GLES20.glCreateShader(type);
-    GLES20.glShaderSource(sh, src);
-    GLES20.glCompileShader(sh);
-    int[] ok = new int[1];
-    GLES20.glGetShaderiv(sh, GLES20.GL_COMPILE_STATUS, ok, 0);
-    if (ok[0] == 0) {
-      String log = GLES20.glGetShaderInfoLog(sh);
-      GLES20.glDeleteShader(sh);
-      throw new RuntimeException("Shader compile failed: " + log + "\n" + src);
+  public synchronized void onDispose() {
+    // Make context current so deletes are valid
+    if (egl != null && eglDisplay != null && eglContext != null && eglSurface != null) {
+      egl.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext);
     }
-    return sh;
+    GLES20.glDeleteTextures(3, mTextures, 0);
+    if (vbo[0] != 0) GLES20.glDeleteBuffers(1, vbo, 0);
+    if (ebo[0] != 0) GLES20.glDeleteBuffers(1, ebo, 0);
+    deinitGL();
   }
 }
