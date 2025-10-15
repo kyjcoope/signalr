@@ -2,7 +2,7 @@ package com.jci.mediaprocessor.media_processor;
 
 import android.graphics.SurfaceTexture;
 import android.opengl.GLES20;
-import android.util.Log;
+import android.opengl.GLES30;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
@@ -10,33 +10,22 @@ import java.nio.ByteBuffer;
 public class RgbRenderer extends BaseRenderer {
   private ByteBuffer mBufferRGB;
   private byte[] mBytes;
-  private long mPtr = 0;
 
-  public RgbRenderer(Surface surface, int width, int height) {
-    super(surface, width, height);
-  }
-
-  public RgbRenderer(SurfaceTexture texture, int width, int height) {
-    super(texture, width, height);
-  }
+  public RgbRenderer(Surface surface, int width, int height) { super(surface, width, height); }
+  public RgbRenderer(SurfaceTexture texture, int width, int height) { super(texture, width, height); }
 
   public String vertexShader() {
     return "attribute vec4 a_Position;\n"
          + "attribute vec2 a_TexCoordinate;\n"
          + "varying vec2 v_TexCoordinate;\n"
-         + "void main(){\n"
-         + "  v_TexCoordinate = a_TexCoordinate;\n"
-         + "  gl_Position = a_Position;\n"
-         + "}";
+         + "void main(){ v_TexCoordinate = a_TexCoordinate; gl_Position = a_Position; }";
   }
 
   public String fragmentShader() {
     return "precision mediump float;\n"
          + "uniform sampler2D sampler;\n"
          + "varying vec2 v_TexCoordinate;\n"
-         + "void main(){\n"
-         + "  gl_FragColor = vec4(texture2D(sampler, v_TexCoordinate).rgb, 1.0);\n"
-         + "}";
+         + "void main(){ gl_FragColor = vec4(texture2D(sampler, v_TexCoordinate).rgb, 1.0); }";
   }
 
   protected void connectTexturesToProgram() {
@@ -49,29 +38,23 @@ public class RgbRenderer extends BaseRenderer {
   }
 
   public void setBufferPtr(long ptr, int size) {
-    mPtr = ptr;
+    // Using the JNI copy for now (stable/low-risk). Later we can switch to a direct ByteBuffer.
     mBytes = getBuffer(ptr, size);
     mBufferRGB = ByteBuffer.wrap(mBytes);
     drawTexture();
   }
 
-  public synchronized void drawTexture() {
-    // Ensure we are bound to a valid (possibly new) surface before drawing.
-    ensureSurfaceIfNeeded();
-    if (surfaceLost) return; // wait for onSurfaceAvailable
-
+  public void drawTexture() {
     GLES20.glClearColor(0f, 0f, 0f, 1f);
     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
 
-    ByteBuffer[] rgbBuffers = new ByteBuffer[] { mBufferRGB };
-    loadTexture(rgbBuffers);
+    loadTexture(new ByteBuffer[]{ mBufferRGB });
 
     GLES20.glUseProgram(mProgramHandle);
+    GLES30.glBindVertexArray(0);
     GLES20.glDrawElements(GLES20.GL_TRIANGLES, 6, GLES20.GL_UNSIGNED_INT, 0);
 
-    if (!swapBuffers()) {
-      Log.w("RgbRenderer", "eglSwapBuffers reported an error; frame not presented");
-    }
+    present();
   }
 
   protected void loadTexture(ByteBuffer[] buffers) {
