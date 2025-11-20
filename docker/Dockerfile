@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -L "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
     | tar -xJ -C /opt \
  && mv /opt/flutter /opt/flutter \
+ && git config --system --add safe.directory /opt/flutter \
  && flutter --version \
  && flutter config --no-analytics \
  && flutter precache --linux \
