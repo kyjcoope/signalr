@@ -178,7 +178,7 @@ class WebRtcCameraSession {
         ? mungeSdp(msg.offer.sdp)
         : msg.offer.sdp;
 
-    final remoteDesc = RTCSessionDescription(msg.offer.sdp, msg.offer.type);
+    final remoteDesc = RTCSessionDescription(offerSdp, msg.offer.type);
     await _peerConnection!.setRemoteDescription(remoteDesc);
     remoteDescSet = true;
 
