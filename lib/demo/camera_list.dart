@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:signalr/auth/auth.dart';
+import 'package:signalr/demo/camera_list_item.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
 import 'dart:developer' as dev;
 
@@ -32,8 +32,6 @@ class CameraListState extends State<CameraList> {
   final TextEditingController _filterCtrl = TextEditingController();
   String _filter = '';
 
-  static const double _videoWidth = 320;
-  static const double _videoHeight = 180;
   static const double _compactBreakpoint = 600;
 
   final FavoritesStore _store = FavoritesStore();
@@ -111,7 +109,9 @@ class CameraListState extends State<CameraList> {
       final f = _filter.toLowerCase();
       base =
           base.where((id) {
-            final name = devices[id]?.name.toLowerCase() ?? '';
+            final name =
+                widget.sessionHub.authService.devices[id]?.name.toLowerCase() ??
+                '';
             return id.toLowerCase().contains(f) || name.contains(f);
           }).toList();
     }
@@ -199,214 +199,6 @@ class CameraListState extends State<CameraList> {
     await _store.saveFavorites(_favorites);
   }
 
-  Widget _statusChip(String cameraId) {
-    final connected = _sessions.containsKey(cameraId);
-    final isWorking = _working.contains(cameraId) && connected;
-    if (isWorking) {
-      return _chip('Working', Colors.green, Icons.check_circle);
-    }
-    if (_pending.contains(cameraId)) {
-      return _chip('Pending', Colors.blue, Icons.hourglass_top);
-    }
-    return const SizedBox.shrink();
-  }
-
-  Widget _chip(String label, Color color, IconData icon) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withOpacity(.12),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: color, size: 14),
-          const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 11, color: color)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildWideLayout({
-    required String cameraId,
-    required bool connected,
-    required bool isFav,
-    required String name,
-    required String type,
-    required String codec,
-    required RTCVideoRenderer? renderer,
-  }) {
-    final showStop = connected || _pending.contains(cameraId);
-    return Row(
-      children: [
-        IconButton(
-          tooltip: isFav ? 'Unfavorite' : 'Favorite',
-          icon: Icon(
-            isFav ? Icons.star : Icons.star_border,
-            color: isFav ? Colors.amber : null,
-          ),
-          onPressed: () => _toggleFavorite(cameraId),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          flex: 3,
-          child: Text(
-            cameraId,
-            style: const TextStyle(fontSize: 13),
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          flex: 3,
-          child: Text(
-            name,
-            style: const TextStyle(fontSize: 13),
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          flex: 2,
-          child: Text(
-            type,
-            style: const TextStyle(fontSize: 13),
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          flex: 1,
-          child: Text(
-            codec,
-            style: TextStyle(
-              fontSize: 12,
-              fontFamily: 'monospace',
-              color: codec == '—' ? Colors.grey : Colors.deepPurple,
-            ),
-            textAlign: TextAlign.center,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        const SizedBox(width: 8),
-        _statusChip(cameraId),
-        const SizedBox(width: 8),
-        showStop
-            ? OutlinedButton.icon(
-              onPressed: () => _disconnect(cameraId),
-              icon: const Icon(Icons.stop, color: Colors.red),
-              label: const Text('Stop'),
-            )
-            : ElevatedButton.icon(
-              onPressed: () => _connect(cameraId),
-              icon: const Icon(Icons.play_arrow),
-              label: const Text('Start'),
-            ),
-      ],
-    );
-  }
-
-  Widget _buildCompactLayout({
-    required String cameraId,
-    required bool connected,
-    required bool isFav,
-    required String name,
-    required String type,
-    required String codec,
-    required RTCVideoRenderer? renderer,
-  }) {
-    final showStop = connected || _pending.contains(cameraId);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Top control row
-        Row(
-          children: [
-            IconButton(
-              tooltip: isFav ? 'Unfavorite' : 'Favorite',
-              icon: Icon(
-                isFav ? Icons.star : Icons.star_border,
-                color: isFav ? Colors.amber : null,
-              ),
-              onPressed: () => _toggleFavorite(cameraId),
-            ),
-            const SizedBox(width: 4),
-            _statusChip(cameraId),
-            const Spacer(),
-            showStop
-                ? OutlinedButton(
-                  onPressed: () => _disconnect(cameraId),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                  ),
-                  child: const Text('Stop'),
-                )
-                : ElevatedButton(
-                  onPressed: () => _connect(cameraId),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                  ),
-                  child: const Text('Start'),
-                ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        _kv('ID', cameraId, mono: true),
-        _kv('Name', name),
-        _kv('Type', type),
-        _kv(
-          'Codec',
-          codec,
-          mono: true,
-          valueColor: codec == '—' ? Colors.grey : Colors.deepPurple,
-        ),
-      ],
-    );
-  }
-
-  Widget _kv(
-    String label,
-    String value, {
-    bool mono = false,
-    Color? valueColor,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
-      child: RichText(
-        text: TextSpan(
-          style: const TextStyle(fontSize: 12, color: Colors.black87),
-          children: [
-            TextSpan(
-              text: '$label: ',
-              style: const TextStyle(
-                fontWeight: FontWeight.w600,
-                color: Colors.black54,
-              ),
-            ),
-            TextSpan(
-              text: value,
-              style: TextStyle(
-                fontFamily: mono ? 'monospace' : null,
-                color: valueColor,
-              ),
-            ),
-          ],
-        ),
-        overflow: TextOverflow.ellipsis,
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final all = widget.sessionHub.availableProducers.toList()..sort();
@@ -460,63 +252,28 @@ class CameraListState extends State<CameraList> {
               final connected = _sessions.containsKey(cameraId);
               final renderer = _renderers[cameraId];
               final isFav = _favorites.contains(cameraId);
-              final name = devices[cameraId]?.name ?? 'Unknown Camera';
-              final type = devices[cameraId]?.sourceType ?? 'Unknown Type';
+              final device = widget.sessionHub.authService.devices[cameraId];
+              final name = device?.name ?? 'Unknown Camera';
+              final type = device?.sourceType ?? 'Unknown Type';
               final codec =
                   _codec[cameraId] ??
                   _sessions[cameraId]?.negotiatedVideoCodec ??
                   '—';
 
-              return Card(
-                margin: const EdgeInsets.symmetric(vertical: 6),
-                child: Padding(
-                  padding: const EdgeInsets.all(12.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      compact
-                          ? _buildCompactLayout(
-                            cameraId: cameraId,
-                            connected: connected,
-                            isFav: isFav,
-                            name: name,
-                            type: type,
-                            codec: codec,
-                            renderer: renderer,
-                          )
-                          : _buildWideLayout(
-                            cameraId: cameraId,
-                            connected: connected,
-                            isFav: isFav,
-                            name: name,
-                            type: type,
-                            codec: codec,
-                            renderer: renderer,
-                          ),
-                      if (connected && renderer != null) ...[
-                        const SizedBox(height: 8),
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: SizedBox(
-                            width: compact ? double.infinity : _videoWidth,
-                            height:
-                                compact ? (_videoHeight * 0.75) : _videoHeight,
-                            child: Container(
-                              color: Colors.black,
-                              child: RTCVideoView(
-                                renderer,
-                                mirror: false,
-                                objectFit:
-                                    RTCVideoViewObjectFit
-                                        .RTCVideoViewObjectFitContain,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
+              return CameraListItem(
+                cameraId: cameraId,
+                name: name,
+                type: type,
+                codec: codec,
+                connected: connected,
+                isFav: isFav,
+                isPending: _pending.contains(cameraId),
+                isWorking: _working.contains(cameraId) && connected,
+                renderer: renderer,
+                onConnect: () => _connect(cameraId),
+                onDisconnect: () => _disconnect(cameraId),
+                onToggleFavorite: () => _toggleFavorite(cameraId),
+                compact: compact,
               );
             },
           ),

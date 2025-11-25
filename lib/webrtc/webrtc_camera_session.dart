@@ -192,56 +192,34 @@ class WebRtcCameraSession {
 
   Future<void> dispose() => close();
 
-  List<Map<String, dynamic>> _toJsonServers() =>
-      sessionHub.iceServers.map((e) => e.toJson()).toList();
+  List<Map<String, dynamic>> _getIceServers() {
+    final servers = sessionHub.iceServers.map((e) => e.toJson()).toList();
 
-  List<Map<String, dynamic>> _filteredIceServers() {
-    final servers = <Map<String, dynamic>>[];
     if (!turnTcpOnly) {
-      servers.addAll([
-        {'urls': 'stun:stun.l.google.com:19302'},
-        {'urls': 'stun:stun1.l.google.com:19302'},
-        {'urls': 'stun:stun2.l.google.com:19302'},
-        {'urls': 'stun:stun3.l.google.com:19302'},
-        {'urls': 'stun:stun4.l.google.com:19302'},
-      ]);
-    }
-    servers.addAll(_toJsonServers());
-
-    if (turnTcpOnly) {
-      bool keepUrl(dynamic url) {
-        final u = url.toString().toLowerCase();
-        return u.startsWith('turns:') || u.contains('transport=tcp');
-      }
-
-      List<dynamic> normalizeUrls(dynamic v) =>
-          v is List
-              ? v
-              : v != null
-              ? [v]
-              : const [];
-
-      final tcpOnly = <Map<String, dynamic>>[];
-      for (final s in servers) {
-        final list = normalizeUrls(s['urls']).where(keepUrl).toList();
-        if (list.isEmpty) continue;
-        final copy = Map<String, dynamic>.from(s);
-        copy['urls'] = list;
-        tcpOnly.add(copy);
-      }
-      return tcpOnly;
+      servers.insert(0, {'urls': 'stun:stun.l.google.com:19302'});
+      return servers;
     }
 
-    return servers;
+    return servers
+        .map((s) {
+          final urls = (s['urls'] is List ? s['urls'] : [s['urls']]) as List;
+          final tcpUrls =
+              urls.where((u) {
+                final str = u.toString().toLowerCase();
+                return str.startsWith('turns:') ||
+                    str.contains('transport=tcp');
+              }).toList();
+          return {...s, 'urls': tcpUrls};
+        })
+        .where((s) => (s['urls'] as List).isNotEmpty)
+        .toList();
   }
 
   Future<void> _initializeConnection() async {
     if (_peerConnection != null) return;
 
-    final defaultIceServers = _filteredIceServers();
-
     final config = <String, dynamic>{
-      'iceServers': defaultIceServers,
+      'iceServers': _getIceServers(),
       'iceTransportPolicy': (turnTcpOnly) ? 'relay' : 'all',
       'iceCandidatePoolSize': 0,
       'rtcpMuxPolicy': 'require',
@@ -268,7 +246,7 @@ class WebRtcCameraSession {
   void _sendEndOfCandidates(String mid) {
     if (sessionId == null) return;
     final eoc = RTCIceCandidate('', mid, null);
-    sessionHub.signalingHandler.sendTrickle(
+    sessionHub.signalingHandler.send(
       TrickleMessage(session: sessionId!, candidate: eoc, id: 'eoc'),
     );
   }
@@ -328,7 +306,7 @@ class WebRtcCameraSession {
       _extractCodecFromSdpOnce(finalAnswer.sdp ?? '');
     }
 
-    await sessionHub.signalingHandler.sendInviteAnswer(
+    await sessionHub.signalingHandler.send(
       InviteAnswerMessage(
         session: msg.session,
         answerSdp: SdpWrapper(type: finalAnswer!.type!, sdp: finalAnswer.sdp!),
@@ -438,7 +416,7 @@ class WebRtcCameraSession {
     }
 
     if (sessionId != null) {
-      sessionHub.signalingHandler.sendTrickle(
+      sessionHub.signalingHandler.send(
         TrickleMessage(session: sessionId!, candidate: c, id: '4'),
       );
     }

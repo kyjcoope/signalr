@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:signalr/config.dart';
 import 'dart:developer' as dev;
 
+import 'package:signalr/models/models.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
 import 'package:signalr/store/favorites_store.dart';
 import 'camera_list.dart';
@@ -40,7 +41,18 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   }
 
   Future<void> _initialize() async {
-    await sessionHub.initialize();
+    await sessionHub.initialize(
+      UserLogin(
+        username: username,
+        password: password,
+        clientName: 'driver',
+        clientID: 'fb2be96f-05a3-4fea-a151-6365feaaf30c',
+        clientVersion: '3.0',
+        grantType: 'password',
+        scopes: '[IdentityServerApi, rabbitmq-jci, api]',
+        clientId_: 'jci-authui-client',
+      ),
+    );
     if (!mounted) return;
     setState(() {
       _devicesRegistered = true;
