@@ -9,7 +9,6 @@ import 'signalr_message.dart';
 class SignalRHandler {
   SignalRHandler({
     required this.onConnect,
-    required this.onRegister,
     required this.onInvite,
     required this.onTrickle,
     required this.signalServiceUrl,
@@ -20,7 +19,6 @@ class SignalRHandler {
                .build();
 
   void Function(ConnectResponse) onConnect;
-  void Function(RegisterResponse) onRegister;
   void Function(InviteResponse) onInvite;
   void Function(TrickleMessage) onTrickle;
   final String signalServiceUrl;
@@ -62,7 +60,6 @@ class SignalRHandler {
     );
     _connection.onclose(({error}) => dev.log('Connection closed. $error'));
     _connection.on('ReceivedSignalingMessage', _receivedSignalingMessage);
-    _connection.on('register', _onRegister);
     _connection.on('connect', _onConnect);
     _connection.on('invite', _onInvite);
     _connection.on('trickle', _onTrickle);
@@ -86,7 +83,6 @@ class SignalRHandler {
     final json = jsonDecode(arguments[0].toString());
     final method = json['method'];
     final result = json['result'];
-    final data = json['data'];
 
     if (method == 'invite') {
       _onInvite(arguments);
@@ -94,16 +90,7 @@ class SignalRHandler {
       _onTrickle(arguments);
     } else if (result != null) {
       _onConnect(arguments);
-    } else if (data != null) {
-      onRegister(RegisterResponse.fromJson(data));
     }
-  }
-
-  void _onRegister(List<Object?>? arguments) {
-    dev.log('Received register message: $arguments');
-    if (arguments == null || arguments.isEmpty) return;
-    final data = jsonDecode(arguments[0].toString());
-    onRegister(RegisterResponse.fromJson(data));
   }
 
   void _onConnect(arguments) {

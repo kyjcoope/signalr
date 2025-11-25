@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:developer' as dev;
-import 'package:flutter/foundation.dart';
 import 'package:signalr/auth/auth.dart';
 import 'package:signalr/config.dart';
 import 'package:signalr/signalr/singalr_handler.dart';
@@ -9,11 +8,10 @@ import '../webrtc/webrtc_camera_session.dart';
 import 'signalr_message.dart';
 
 class SignalRSessionHub {
-  SignalRSessionHub({required String signalRUrl, this.onRegister}) {
+  SignalRSessionHub({required String signalRUrl}) {
     signalingHandler = SignalRHandler(
       signalServiceUrl: signalRUrl,
       onConnect: _onConnectResponse,
-      onRegister: _onRegister,
       onInvite: _onInvite,
       onTrickle: _onTrickleMessage,
     );
@@ -23,8 +21,6 @@ class SignalRSessionHub {
   final Set<String> _availableProducers = {};
   final Map<String, WebRtcCameraSession> _activeSessions = {};
   List<IceServer> iceServers = [];
-
-  VoidCallback? onRegister;
 
   Set<String> get availableProducers => _availableProducers;
   Map<String, WebRtcCameraSession> get activeSessions => _activeSessions;
@@ -42,6 +38,7 @@ class SignalRSessionHub {
         clientId_: 'jci-authui-client',
       ),
     );
+    _availableProducers.addAll(devices.keys);
     await signalingHandler.setupSignaling();
   }
 
@@ -104,12 +101,6 @@ class SignalRSessionHub {
         await signalingHandler.leaveSession(sessionId);
       }
     }
-  }
-
-  void _onRegister(RegisterResponse msg) {
-    dev.log('onRegister: ${msg.deviceIds.length} devices');
-    _availableProducers.addAll(msg.deviceIds);
-    onRegister?.call();
   }
 
   void _onConnectResponse(ConnectResponse msg) {

@@ -5,7 +5,6 @@ import 'dart:developer' as dev;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
-import 'package:universal_io/io.dart';
 
 import '../signalr/signalr_message.dart';
 import '../webrtc/signaling_message.dart';

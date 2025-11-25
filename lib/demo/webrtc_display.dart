@@ -14,7 +14,7 @@ class WebRtcDisplay extends StatefulWidget {
 }
 
 class _WebRtcDisplay extends State<WebRtcDisplay> {
-  final sessionHub = SignalRSessionHub(signalRUrl: 'https://$signalRUrl');
+  final sessionHub = SignalRSessionHub(signalRUrl: 'https://$url/SignalingHub');
 
   bool _devicesRegistered = false;
 
@@ -40,21 +40,12 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
   }
 
   Future<void> _initialize() async {
-    sessionHub.onRegister = _onDevicesRegistered;
     await sessionHub.initialize();
-    if (!mounted) return;
-    setState(() {});
-    dev.log('SignalR session initialized');
-  }
-
-  void _onDevicesRegistered() {
-    dev.log(
-      'Devices registered: ${sessionHub.availableProducers.length} devices available',
-    );
     if (!mounted) return;
     setState(() {
       _devicesRegistered = true;
     });
+    dev.log('SignalR session initialized');
   }
 
   Future<void> _loadToggles() async {

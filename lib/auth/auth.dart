@@ -8,12 +8,15 @@ import 'package:signalr/config.dart';
 Map<String, Device> devices = {};
 
 Future<void> authLogin(UserLogin login) async {
+  var endpoint = '/api/Authenticate/LoginSSO';
   late StreamedResponse response;
-
+  print('Auth Login Endpoint -> https://$url$endpoint');
+  print('Logging in user: ${login.username}');
+  print('login: ${login.toJson()}');
   try {
     final request = MultipartRequest(
       'POST',
-      Uri.parse('https://$url/api/Authenticate/LoginSSO'),
+      Uri.parse('https://$url$endpoint'),
     );
 
     for (final f in login.toJson().entries) {
@@ -23,9 +26,10 @@ Future<void> authLogin(UserLogin login) async {
     response = await request.send();
 
     dev.log('response: ${await response.stream.bytesToString()}');
-    if (response.statusCode != 200) {}
+    if (response.statusCode != 200) {
+      throw Exception('Failed to login user: ${login.username}');
+    }
   } catch (e) {
-    // Handle exceptions
     print('Error during login: $e');
   }
   final sessionId = response.headers['session-id'];
