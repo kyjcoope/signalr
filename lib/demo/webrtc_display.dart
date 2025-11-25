@@ -1,272 +1,266 @@
-// lib\demo\webrtc_display.dart
-
 import 'package:flutter/material.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:signalr/signalr/signalr_session_hub.dart';
-
+import 'package:signalr/config.dart';
 import 'dart:developer' as dev;
 
-import '../webrtc/webrtc_camera_session.dart';
+import 'package:signalr/models/models.dart';
+import 'package:signalr/signalr/signalr_session_hub.dart';
+import 'package:signalr/store/favorites_store.dart';
+import 'camera_list.dart';
 
 class WebRtcDisplay extends StatefulWidget {
   const WebRtcDisplay({super.key});
+
   @override
   State<WebRtcDisplay> createState() => _WebRtcDisplay();
 }
 
 class _WebRtcDisplay extends State<WebRtcDisplay> {
-  final sessionHub = SignalRSessionHub(
-    signalRUrl: 'https://jci-osp-api-gateway-dev.osp-jci.com/SignalingHub',
-  );
+  final sessionHub = SignalRSessionHub(signalRUrl: 'https://$url/SignalingHub');
 
-  final Map<String, RTCVideoRenderer> renderers = {};
-  final Map<String, WebRtcCameraSession> cameraSessions = {};
-
-  final List<String> desiredCameras = [
-    //'ed25cd2f-a3da-4fd8-a32d-69382565baf7',
-    'dde5d23811fc4224bc3f47ad2eeda6b0',
-  ];
-
-  bool _isInitialized = false;
   bool _devicesRegistered = false;
-  bool _camerasConnected = false;
-  bool _streamReceived = false;
+
+  final _store = FavoritesStore();
+  bool _favoritesOnly = false;
+  bool _workingOnly = false;
+  bool _pendingOnly = false;
+
+  final GlobalKey<CameraListState> _cameraListKey =
+      GlobalKey<CameraListState>();
 
   @override
   void initState() {
     super.initState();
     _initialize();
+    _loadToggles();
   }
 
   @override
   void dispose() {
-    for (var renderer in renderers.values) {
-      renderer.dispose();
-    }
-    for (var session in cameraSessions.values) {
-      session.dispose();
-    }
     sessionHub.shutdown();
     super.dispose();
   }
 
-  void _initialize() async {
-    sessionHub.onRegister = _onDevicesRegistered;
-    await sessionHub.initialize();
-    if (!mounted) return;
-    setState(() {
-      _isInitialized = true;
-    });
-    dev.log('SignalR session initialized');
-  }
-
-  void _onDevicesRegistered() {
-    dev.log(
-      'Devices registered: ${sessionHub.availableProducers.length} devices available',
+  Future<void> _initialize() async {
+    await sessionHub.initialize(
+      UserLogin(
+        username: username,
+        password: password,
+        clientName: 'driver',
+        clientID: 'fb2be96f-05a3-4fea-a151-6365feaaf30c',
+        clientVersion: '3.0',
+        grantType: 'password',
+        scopes: '[IdentityServerApi, rabbitmq-jci, api]',
+        clientId_: 'jci-authui-client',
+      ),
     );
     if (!mounted) return;
     setState(() {
       _devicesRegistered = true;
     });
+    dev.log('SignalR session initialized');
   }
 
-  Future<void> _connectToCameras() async {
-    if (!_devicesRegistered) {
-      dev.log('Cannot connect - devices not yet registered');
-      return;
-    }
-
-    dev.log('Connecting to cameras...');
-    _streamReceived = false;
+  Future<void> _loadToggles() async {
+    final favOnly = await _store.loadFavoritesOnly();
+    final workOnly = await _store.loadWorkingOnly();
+    final pendingOnly = await _store.loadPendingOnly();
+    if (!mounted) return;
     setState(() {
-      _camerasConnected = true;
+      _favoritesOnly = favOnly;
+      _workingOnly = workOnly;
+      _pendingOnly = pendingOnly;
     });
-
-    for (String cameraId in desiredCameras) {
-      final cameraSession = await sessionHub.connectToCamera(cameraId);
-      if (cameraSession != null) {
-        final renderer = RTCVideoRenderer();
-        await renderer.initialize();
-
-        renderers[cameraId] = renderer;
-        cameraSessions[cameraId] = cameraSession;
-
-        cameraSession.onTrack = (RTCTrackEvent event) {
-          dev.log(
-            '[$cameraId] Handling track event in UI layer: ${event.track.kind}',
-          );
-          if (event.streams.isEmpty) return;
-
-          final stream = event.streams[0];
-          final videoRenderer = renderers[cameraId];
-
-          if (videoRenderer != null) {
-            setState(() {
-              videoRenderer.srcObject = stream;
-              _streamReceived = true;
-            });
-          }
-        };
-      }
-    }
   }
 
-  void _disconnectCameras() {
-    dev.log('Disconnecting all cameras...');
-    _streamReceived = false;
+  Future<void> _setFavoritesOnly(bool v) async {
+    setState(() => _favoritesOnly = v);
+    await _store.saveFavoritesOnly(v);
+  }
 
-    for (var renderer in renderers.values) {
-      renderer.srcObject = null;
-      renderer.dispose();
+  Future<void> _setWorkingOnly(bool v) async {
+    setState(() => _workingOnly = v);
+    await _store.saveWorkingOnly(v);
+  }
+
+  Future<void> _setPendingOnly(bool v) async {
+    setState(() => _pendingOnly = v);
+    await _store.savePendingOnly(v);
+  }
+
+  Widget _buildStatusControls(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
+    final isCompact = width < 600; // breakpoint for vertical layout
+
+    final toggles = [
+      _StatusToggle(
+        icon: const Icon(Icons.star, color: Colors.amber, size: 18),
+        label: 'Favorites',
+        value: _favoritesOnly,
+        onChanged: _setFavoritesOnly,
+      ),
+      _StatusToggle(
+        icon: const Icon(Icons.hourglass_top, color: Colors.blue, size: 18),
+        label: 'Pending',
+        value: _pendingOnly,
+        onChanged: _setPendingOnly,
+      ),
+      _StatusToggle(
+        icon: const Icon(Icons.check_circle, color: Colors.green, size: 18),
+        label: 'Working',
+        value: _workingOnly,
+        onChanged: _setWorkingOnly,
+      ),
+    ];
+
+    if (!isCompact) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Status', style: Theme.of(context).textTheme.headlineSmall),
+          const Spacer(),
+          Wrap(
+            alignment: WrapAlignment.end,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 18,
+            runSpacing: 8,
+            children: toggles,
+          ),
+        ],
+      );
     }
 
-    for (var session in cameraSessions.values) {
-      session.dispose();
+    // Compact (mobile) layout: vertical
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Status', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 12),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final t in toggles)
+              Padding(padding: const EdgeInsets.only(bottom: 8), child: t),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildActionsRow(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
+    final isCompact = width < 600;
+    final buttons = [
+      ElevatedButton.icon(
+        onPressed: () => _cameraListKey.currentState?.connectAll(),
+        icon: const Icon(Icons.play_circle_fill),
+        label: const Text('Connect all'),
+      ),
+      OutlinedButton.icon(
+        onPressed: () => _cameraListKey.currentState?.stopAll(),
+        icon: const Icon(Icons.stop_circle, color: Colors.red),
+        label: const Text('Stop all'),
+      ),
+      TextButton.icon(
+        onPressed:
+            () => _cameraListKey.currentState?.resetFavoritesAndWorking(),
+        icon: const Icon(Icons.refresh),
+        label: const Text('Reset'),
+      ),
+    ];
+
+    if (!isCompact) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [Wrap(spacing: 12, runSpacing: 8, children: buttons)],
+      );
     }
 
-    renderers.clear();
-    cameraSessions.clear();
-
-    if (mounted) {
-      setState(() {
-        _camerasConnected = false;
-      });
-    }
+    // Vertical stack on compact
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final b in buttons)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Align(alignment: Alignment.centerLeft, child: b),
+          ),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Status',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Icon(
-                        _isInitialized ? Icons.check_circle : Icons.pending,
-                        color: _isInitialized ? Colors.green : Colors.orange,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'SignalR: ${_isInitialized ? "Connected" : "Connecting..."}',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(
-                        _devicesRegistered ? Icons.check_circle : Icons.pending,
-                        color: _devicesRegistered
-                            ? Colors.green
-                            : Colors.orange,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Devices: ${_devicesRegistered ? "${sessionHub.availableProducers.length} registered" : "Registering..."}',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(
-                        _streamReceived
-                            ? Icons.check_circle
-                            : Icons.radio_button_unchecked,
-                        color: _streamReceived ? Colors.green : Colors.grey,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Cameras: ${_streamReceived ? cameraSessions.length : 0} connected',
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              ElevatedButton.icon(
-                onPressed:
-                    _isInitialized && _devicesRegistered && !_camerasConnected
-                    ? _connectToCameras
-                    : null,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('Connect Cameras'),
-              ),
-              const SizedBox(width: 16),
-              ElevatedButton.icon(
-                onPressed: _camerasConnected ? _disconnectCameras : null,
-                icon: const Icon(Icons.stop),
-                label: const Text('Disconnect'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red[100],
-                  foregroundColor: Colors.red[800],
+              Card(
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    children: [
+                      _buildStatusControls(context),
+                      const SizedBox(height: 12),
+                      _buildActionsRow(context),
+                    ],
+                  ),
                 ),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child:
+                    !_devicesRegistered
+                        ? const Center(
+                          child: Text('Waiting for device registration...'),
+                        )
+                        : CameraList(
+                          key: _cameraListKey,
+                          sessionHub: sessionHub,
+                          favoritesOnly: _favoritesOnly,
+                          workingOnly: _workingOnly,
+                          pendingOnly: _pendingOnly,
+                        ),
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: _camerasConnected && renderers.isNotEmpty
-                ? GridView.builder(
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          childAspectRatio: 16 / 9,
-                          crossAxisSpacing: 8,
-                          mainAxisSpacing: 8,
-                        ),
-                    itemCount: renderers.length,
-                    itemBuilder: (context, index) {
-                      final cameraId = renderers.keys.elementAt(index);
-                      final renderer = renderers[cameraId]!;
-                      return Card(
-                        child: Column(
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.all(8.0),
-                              child: Text(
-                                cameraId,
-                                style: const TextStyle(fontSize: 12),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            Expanded(
-                              child: Container(
-                                color: Colors.black,
-                                child: RTCVideoView(
-                                  renderer,
-                                  mirror: false,
-                                  objectFit: RTCVideoViewObjectFit
-                                      .RTCVideoViewObjectFitContain,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  )
-                : Center(),
-          ),
-        ],
-      ),
+        );
+      },
+    );
+  }
+}
+
+class _StatusToggle extends StatelessWidget {
+  const _StatusToggle({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final Widget icon;
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        icon,
+        const SizedBox(width: 6),
+        Text(label),
+        const SizedBox(width: 6),
+        Switch(
+          value: value,
+          onChanged: onChanged,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+      ],
     );
   }
 }

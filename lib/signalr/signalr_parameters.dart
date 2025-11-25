@@ -90,7 +90,10 @@ class CandidateParam implements SignalRParam {
   String? _extractUsernameFragment() {
     final candidateStr = candidate.candidate;
     if (candidateStr == null) return null;
-    final ufragMatch = RegExp(r'ufrag\s+(\S+)').firstMatch(candidateStr);
+    final ufragMatch = RegExp(
+      r'ufrag[:\s]+(\S+)',
+      caseSensitive: false,
+    ).firstMatch(candidateStr);
     return ufragMatch?.group(1);
   }
 }

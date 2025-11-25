@@ -13,7 +13,7 @@ class _AppState extends State<App> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('SignalR WebRTC Demo')),
-      body: const WebRtcDisplay(), // Always show the display
+      body: const WebRtcDisplay(),
     );
   }
 }

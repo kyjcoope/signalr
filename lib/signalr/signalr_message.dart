@@ -69,8 +69,8 @@ class RegisterRequest implements SignalRMessage {
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
     'method': method.json,
-    'params': {'authorization': ''},
-    'id': '1',
+    'params': {'authorization': authorization},
+    'id': id,
   };
 }
 
@@ -115,7 +115,7 @@ class ConnectRequest implements SignalRMessage {
     DeviceIdParam(deviceId),
     if (profile != null) ProfileParam(profile!),
     if (session != null) SessionParam(session!),
-    if (iceServers != null) IceServersParam(iceServers!),
+    //if (iceServers != null) IceServersParam(iceServers!),
   ]);
 
   @override
@@ -187,7 +187,7 @@ class InviteAnswerMessage implements SignalRMessage {
   @override
   Map<String, Object> toJson() => {
     'jsonrpc': jsonRPC,
-    'method': method.json,
+    //'method': method.json,
     'result': {'session': session, 'answer': answerSdp.toJson()},
     'id': id,
   };
@@ -302,7 +302,7 @@ class TrickleMessage implements SignalRMessage {
     'jsonrpc': jsonRPC,
     'method': method.json,
     'params': params.toJson(),
-    'id': id,
+    //'id': id,
   };
 
   @override

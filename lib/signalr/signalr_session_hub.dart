@@ -1,131 +1,102 @@
 import 'dart:async';
 import 'dart:developer' as dev;
-import 'package:flutter/foundation.dart';
+import 'package:signalr/auth/auth.dart';
+import 'package:signalr/models/models.dart';
 import 'package:signalr/signalr/singalr_handler.dart';
-
 import '../webrtc/webrtc_camera_session.dart';
 import 'signalr_message.dart';
 
 class SignalRSessionHub {
-  SignalRSessionHub({required String signalRUrl, this.onRegister}) {
+  SignalRSessionHub({required String signalRUrl}) {
     signalingHandler = SignalRHandler(
       signalServiceUrl: signalRUrl,
-      onConnect: _onConnectResponse,
-      onRegister: _onRegister,
-      onInvite: _onInvite,
-      onTrickle: _onTrickleMessage,
+      onMessage: _handleSignalRMessage,
     );
   }
 
   late final SignalRHandler signalingHandler;
-  final Set<String> _availableProducers = {};
-  final Map<String, WebRtcCameraSession> _activeSessions = {};
+  final AuthService authService = AuthService();
+  final Map<String, WebRtcCameraSession> activeSessions = {};
   List<IceServer> iceServers = [];
 
-  VoidCallback? onRegister;
+  Iterable<String> get availableProducers => authService.devices.keys;
 
-  Set<String> get availableProducers => _availableProducers;
-  Map<String, WebRtcCameraSession> get activeSessions => _activeSessions;
-
-  Future<void> initialize() async {
-    await signalingHandler.setupSignaling();
+  Future<void> initialize(UserLogin loginCredentials) async {
+    await authService.login(loginCredentials);
+    await signalingHandler.connect();
   }
 
-  void shutdown() {
-    // Close all active camera sessions
-    for (var session in _activeSessions.values) {
-      session.dispose();
+  Future<void> shutdown() async {
+    for (final s in activeSessions.values) {
+      if (s.sessionId != null) {
+        await signalingHandler.leaveSession(s.sessionId!);
+      }
+      s.dispose();
     }
-    _activeSessions.clear();
-    signalingHandler.shutdown(_activeSessions.keys.toList());
-    _availableProducers.clear();
+    activeSessions.clear();
+    await signalingHandler.shutdown();
   }
 
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
-    // Find the full producer ID that starts with cameraId
-    final fullProducerId = _availableProducers
-        .where((p) => p.startsWith(cameraId))
-        .firstOrNull;
-
-    if (fullProducerId == null) {
-      dev.log('Camera $cameraId not found in available producers');
+    if (!authService.devices.containsKey(cameraId)) {
+      dev.log('Camera $cameraId not found');
       return null;
     }
 
-    // Check if already connected
-    if (_activeSessions.containsKey(fullProducerId)) {
-      dev.log('Camera $cameraId already connected');
-      return _activeSessions[fullProducerId];
-    }
+    if (activeSessions.containsKey(cameraId)) return activeSessions[cameraId];
 
-    // Create new camera session
-    final cameraSession = WebRtcCameraSession(
-      cameraId: fullProducerId,
-      sessionHub: this,
-    );
+    final session = WebRtcCameraSession(cameraId: cameraId, sessionHub: this);
+    activeSessions[cameraId] = session;
 
-    _activeSessions[fullProducerId] = cameraSession;
-
-    // Send connect request
-    signalingHandler.sendConnect(
+    await signalingHandler.send(
       ConnectRequest(
         signalingHandler.connectionId,
         authorization: '',
-        deviceId: fullProducerId,
-        iceServers: iceServers,
+        deviceId: cameraId,
+        profile: '',
       ),
     );
 
-    return cameraSession;
+    return session;
   }
 
-  void disconnectCamera(String cameraId) {
-    final session = _activeSessions.remove(cameraId);
+  Future<void> disconnectCamera(String cameraId) async {
+    final session = activeSessions.remove(cameraId);
     if (session != null) {
-      session.dispose();
-      //signalingHandler.endSession(session.sessionId);
-    }
-  }
-
-  void _onRegister(RegisterResponse msg) {
-    dev.log('onRegister: ${msg.deviceIds.length} devices');
-    _availableProducers.addAll(msg.deviceIds);
-    onRegister?.call();
-  }
-
-  void _onConnectResponse(ConnectResponse msg) {
-    dev.log('Session started: ${msg.session}');
-    iceServers = msg.iceServers;
-
-    for (var session in _activeSessions.values) {
-      if (session.sessionId == null) {
-        session.handleConnectResponse(msg);
-        break;
+      if (session.sessionId != null) {
+        await signalingHandler.leaveSession(session.sessionId!);
       }
+      session.dispose();
     }
   }
 
-  void _onInvite(InviteResponse msg) {
-    final session = _activeSessions.values
-        .where((s) => s.sessionId == msg.session)
-        .firstOrNull;
-
-    if (session != null) {
-      session.handleInvite(msg);
-    } else {
-      dev.log('Received invite for unknown session: ${msg.session}');
+  void _handleSignalRMessage(String method, dynamic data) {
+    switch (method) {
+      case 'connect':
+        final msg = ConnectResponse.fromJson(data);
+        iceServers = msg.iceServers;
+        activeSessions.values
+            .firstWhere(
+              (s) => s.sessionId == null,
+              orElse: () => activeSessions.values.first,
+            )
+            .handleConnectResponse(msg);
+        break;
+      case 'invite':
+        final msg = InviteResponse.fromJson(data);
+        _findSession(msg.session)?.handleInvite(msg);
+        break;
+      case 'trickle':
+        final msg = TrickleMessage.fromJson(data);
+        _findSession(msg.session)?.handleTrickle(msg);
+        break;
     }
   }
 
-  void _onTrickleMessage(TrickleMessage msg) {
-    final session = _activeSessions.values
-        .where((s) => s.sessionId == msg.session)
+  WebRtcCameraSession? _findSession(String? sessionId) {
+    if (sessionId == null) return null;
+    return activeSessions.values
+        .where((s) => s.sessionId == sessionId)
         .firstOrNull;
-
-    if (session != null) {
-      session.handleTrickle(msg);
-    } else {
-      dev.log('Received trickle for unknown session: ${msg.session}');
-    }
   }
 }
