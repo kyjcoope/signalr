@@ -4,7 +4,7 @@ class EventMonitoringProfilesListPage extends StatefulWidget {
   final SortTypes sortType;
 
   const EventMonitoringProfilesListPage({
-    super.key, // Ensure this key is receiving the PageStorageKey from the parent!
+    super.key, // This receives the PageStorageKey from the parent
     required this.tab,
     required this.searchFilter,
     this.sortType = SortTypes.alpha,
@@ -22,20 +22,17 @@ class _EventMonitoringProfilesListPage
   // Local cache of what is currently shown in the AnimatedList
   List<EvEventMonitoringProfile> _filteredProfiles = [];
 
-  // Initialize Key ONCE. Do not regenerate this unless absolutely necessary.
-  final GlobalKey<AnimatedListState> _listKey = GlobalKey<AnimatedListState>();
+  // Initialize Key ONCE. We only recreate this if the list needs a hard reset (like a new search).
+  GlobalKey<AnimatedListState> _listKey = GlobalKey<AnimatedListState>();
 
-  @override
-  void initState() {
-    super.initState();
-    // No explicit scroll controller or animationTo(0) here.
-    // We rely on PageStorageKey for scroll position.
-  }
-
+  // FIXED: Changed logic to direct assignment to avoid setState error
   void _storeInit(Store<AppState> store) {
     _model = EventMonitorListModel(store);
-    // Initial calculation
-    _recalculateFilteredProfiles(forceReset: true);
+
+    // We calculate the initial list and assign it directly.
+    // We do NOT call setState() here because the widget is currently building.
+    // The 'builder' method below will see this value immediately.
+    _filteredProfiles = _getComputedList();
   }
 
   // Helper to calculate what the list *should* be based on Redux
@@ -55,31 +52,32 @@ class _EventMonitoringProfilesListPage
         : profiles;
   }
 
+  // Smart update logic to prevent Scroll Reset
   void _recalculateFilteredProfiles({bool forceReset = false}) {
     final newList = _getComputedList();
 
-    // If we are forcing a reset (e.g. search filter changed),
-    // or if the list length differs and it wasn't our manual toggle,
-    // we rebuild the list.
     if (forceReset) {
+      // If search/tab changed, we must reset the entire list view
+      // This WILL reset scroll position, which is expected for a new search.
       setState(() {
         _filteredProfiles = newList;
-        // We do NOT create a new GlobalKey here.
-        // That would kill the scroll position.
+        _listKey = GlobalKey<AnimatedListState>();
       });
     } else {
       // SMART UPDATE:
-      // If the Redux update just confirms what we already did locally
-      // (length matches), we just update the model reference and do nothing to the UI.
+      // If the Redux update confirms what we already did locally (lengths match),
+      // we update the data without destroying the list.
       if (_filteredProfiles.length == newList.length) {
-        // The lists match in count, just update the backing data
-        // so pure updates (like name changes) are reflected
-        _filteredProfiles = newList;
-      } else {
-        // External update (e.g. another user added a profile),
-        // or a sync issue. We have to hard reset.
+        // Just update the data (names/descriptions might have changed)
         setState(() {
           _filteredProfiles = newList;
+        });
+      } else {
+        // Length mismatch! This means an external update occurred (not our toggle).
+        // We have to hard reset to prevent crashes.
+        setState(() {
+          _filteredProfiles = newList;
+          _listKey = GlobalKey<AnimatedListState>();
         });
       }
     }
@@ -100,8 +98,7 @@ class _EventMonitoringProfilesListPage
       return;
     }
 
-    // Logic: Only force a visual reset if the parameters governing the list changed
-    // (like search text). If just the data changed, let _recalculate handle the "Smart Update"
+    // Pass false to attempt a "Soft Update" that preserves scroll position
     _recalculateFilteredProfiles(forceReset: false);
   }
 
@@ -109,7 +106,7 @@ class _EventMonitoringProfilesListPage
   void didUpdateWidget(EventMonitoringProfilesListPage oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    // If the tab, search, or sort changed, we MUST force a reset of the list content.
+    // If the parameters defining the list change, we must force a hard reset
     if (widget.tab != oldWidget.tab ||
         widget.searchFilter != oldWidget.searchFilter ||
         widget.sortType != oldWidget.sortType) {
@@ -142,22 +139,21 @@ class _EventMonitoringProfilesListPage
       _filteredProfiles.removeAt(index);
     });
 
-    // 2. Animate it out
+    // 2. Animate it out visually
     _listKey.currentState?.removeItem(
       index,
       (ctx, anim) => _staticEventProfileTile(
         profile,
         anim,
-        // Keep the switch state visually consistent as it animates out
-        state: value,
+        state: value, // Keep switch state consistent during animation
       ),
       duration: const Duration(milliseconds: 300),
     );
 
-    // 3. Perform the Action
-    // Because we updated the UI *before* the action,
-    // when Redux returns with the new list, it will match our new _filteredProfiles length
-    // and _recalculateFilteredProfiles will skip the hard reset.
+    // 3. Perform the Redux Action
+    // Because we updated the UI *before* the action, when Redux returns with
+    // the new list, it will match our new _filteredProfiles length,
+    // and _recalculateFilteredProfiles will skip the hard reset (preserving scroll).
     if (value) {
       _model.subscribeAll(profile);
     } else {
@@ -181,6 +177,7 @@ class _EventMonitoringProfilesListPage
     int index,
     Animation<double> animation,
   ) {
+    // Safety check for animation timing issues
     if (index >= _filteredProfiles.length) {
       return const SizedBox.shrink();
     }
@@ -189,8 +186,7 @@ class _EventMonitoringProfilesListPage
       SizeTransition(
         sizeFactor: animation,
         child: AnimatedEventProfileListItem(
-          // Important: Pass a Key based on ID so Flutter can track this widget
-          // if the list order shifts slightly
+          // Use ID Key to help Flutter track items if order shifts
           key: ValueKey(_filteredProfiles[index].id),
           profile: _filteredProfiles[index],
           showIcon: false,
@@ -214,8 +210,6 @@ class _EventMonitoringProfilesListPage
           Expanded(
             child: AnimatedList(
               key: _listKey,
-              // REMOVED: controller: _listController
-              // The PageStorageKey from parent will handle scroll preservation now.
               initialItemCount: _filteredProfiles.length,
               itemBuilder:
                   (
