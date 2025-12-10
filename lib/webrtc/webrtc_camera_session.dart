@@ -7,22 +7,27 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../signalr/signalr_service.dart';
 import 'codec_detector.dart';
 import 'ice_candidate_manager.dart';
+import 'session_state.dart';
 import 'webrtc_player.dart';
 import 'sdp_utils.dart';
 import 'signaling_message.dart';
 import 'webrtc_logger.dart';
 
+/// Default timeout for negotiation operations.
+const Duration _negotiationTimeout = Duration(seconds: 30);
+
 /// WebRTC camera session implementing the VideoWebRTCPlayer interface.
 ///
 /// Uses composition with [IceCandidateManager] and [CodecDetector] for cleaner code.
+/// Tracks connection state via [SessionConnectionState] for reliable operation.
 class WebRtcCameraSession implements VideoWebRTCPlayer {
   WebRtcCameraSession({
     required this.cameraId,
     SignalRService? signalRService,
     this.turnTcpOnly = false,
     this.restartOnDisconnect = true,
-    this.onLocalOffer,
     this.enableDetailedLogging = true,
+    this.negotiationTimeout = _negotiationTimeout,
   }) : _signalRService = signalRService ?? SignalRService.instance,
        _playerId = 'player_${DateTime.now().millisecondsSinceEpoch}_$cameraId' {
     _initManagers();
@@ -37,10 +42,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   final bool turnTcpOnly;
   final bool restartOnDisconnect;
   final String _playerId;
+  final Duration negotiationTimeout;
   bool enableDetailedLogging;
-
-  /// Callback for ICE restart offers.
-  final void Function(RTCSessionDescription offer)? onLocalOffer;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Callbacks
@@ -53,6 +56,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   VoidCallback? onLocalIceCandidate;
   VoidCallback? onRemoteIceCandidate;
   void Function(String codec)? onVideoCodecResolved;
+  void Function(SessionConnectionState state)? onStateChanged;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Player Interface
@@ -82,13 +86,20 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
   String? _lastInviteId;
-  bool _iceRestartInFlight = false;
+  Timer? _negotiationTimer;
+  int _iceRestartAttempts = 0;
 
   late final IceCandidateManager _iceManager;
   late final CodecDetector _codecDetector;
   final WebRtcLogger _logger = WebRtcLogger();
   final StreamController<String> _messageController =
       StreamController<String>.broadcast();
+
+  /// Current connection state.
+  SessionConnectionState _state = SessionConnectionState.idle;
+
+  /// Get the current connection state.
+  SessionConnectionState get state => _state;
 
   String get _tag => '[$cameraId]';
 
@@ -100,6 +111,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// Stream of data channel text messages.
   Stream<String> get messageStream => _messageController.stream;
+
+  /// Maximum ICE restart attempts before giving up.
+  static const int _maxIceRestartAttempts = 3;
+
+  void _setState(SessionConnectionState newState) {
+    if (_state == newState) return;
+    final oldState = _state;
+    _state = newState;
+    dev.log('$_tag State: $oldState -> $newState');
+    onStateChanged?.call(newState);
+  }
 
   void _initManagers() {
     _iceManager = IceCandidateManager(
@@ -141,8 +163,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         _handleIceServers(message.detail);
       case SignalRMessageType.onSignalClosed:
         dev.log('$_tag SignalR connection closed');
+        _setState(SessionConnectionState.closed);
       case SignalRMessageType.onSignalTimeout:
         dev.log('$_tag SignalR connection timeout');
+        _setState(SessionConnectionState.failed);
       case SignalRMessageType.onSignalError:
         dev.log('$_tag SignalR error: ${message.detail}');
     }
@@ -153,11 +177,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     if (session != null) {
       _sessionId = session;
       dev.log('$_tag Session started: $_sessionId');
+      _setState(SessionConnectionState.initializingPeer);
       _initializePeerConnection();
     }
   }
 
   void _handleInvite(dynamic detail) {
+    if (_state.isTerminal) {
+      dev.log('$_tag Ignoring invite in terminal state');
+      return;
+    }
+
     try {
       final params = detail['params'] as Map<String, dynamic>?;
       final offer = params?['offer'] as Map<String, dynamic>?;
@@ -171,6 +201,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       }
     } catch (e) {
       dev.log('$_tag Error handling invite: $e');
+      _setState(SessionConnectionState.failed);
     }
   }
 
@@ -203,7 +234,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// Start connecting to the camera.
   Future<void> connect() async {
+    if (_state != SessionConnectionState.idle) {
+      dev.log('$_tag Cannot connect: state is $_state');
+      return;
+    }
+
     dev.log('$_tag Connecting...');
+    _setState(SessionConnectionState.waitingForSession);
     _signalRService.registerPlayer(this);
     await _signalRService.connectConsumerSession(cameraId);
   }
@@ -219,6 +256,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// Close the session.
   Future<void> close() async {
+    _cancelNegotiationTimer();
     _logger.stop();
     _signalRService.unregisterPlayer(this);
     _codecDetector.dispose();
@@ -227,6 +265,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     await _cleanupDataChannel();
     await _cleanupPeerConnection();
     _resetState();
+    _setState(SessionConnectionState.closed);
 
     try {
       await _messageController.close();
@@ -315,34 +354,60 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   // ═══════════════════════════════════════════════════════════════════════════
 
   Future<void> _negotiate(SdpWrapper offer) async {
-    _iceManager.createGatheringCompleter();
+    _startNegotiationTimer();
+    _setState(SessionConnectionState.settingRemoteDescription);
 
-    // Apply compatibility fixes
-    final offerSdp = offer.sdp.withCompatibilityFixes;
+    try {
+      _iceManager.createGatheringCompleter();
 
-    await _peerConnection!.setRemoteDescription(
-      RTCSessionDescription(offerSdp, offer.type),
-    );
+      // Apply compatibility fixes
+      final offerSdp = offer.sdp.withCompatibilityFixes;
 
-    _iceManager.setMlineMapping(offerSdp.mlineToMidMapping);
-    _iceManager.markRemoteDescSet();
-    await _iceManager.drainQueuedCandidates(_peerConnection!);
+      await _peerConnection!.setRemoteDescription(
+        RTCSessionDescription(offerSdp, offer.type),
+      );
 
-    final answer = await _peerConnection!.createAnswer();
-    await _peerConnection!.setLocalDescription(answer);
+      _iceManager.setMlineMapping(offerSdp.mlineToMidMapping);
+      _iceManager.markRemoteDescSet();
+      await _iceManager.drainQueuedCandidates(_peerConnection!);
 
-    final finalAnswer = await _peerConnection!.getLocalDescription();
-    if (finalAnswer?.sdp != null) {
-      _codecDetector.extractFromSdp(finalAnswer!.sdp!);
+      _setState(SessionConnectionState.creatingAnswer);
+      final answer = await _peerConnection!.createAnswer();
+      await _peerConnection!.setLocalDescription(answer);
+
+      final finalAnswer = await _peerConnection!.getLocalDescription();
+      if (finalAnswer?.sdp != null) {
+        _codecDetector.extractFromSdp(finalAnswer!.sdp!);
+      }
+
+      _setState(SessionConnectionState.sendingAnswer);
+      await _signalRService.sendSignalInviteMessage(
+        _sessionId!,
+        SdpWrapper(type: finalAnswer!.type!, sdp: finalAnswer.sdp!),
+        _lastInviteId ?? '',
+      );
+
+      _setState(SessionConnectionState.exchangingIce);
+      await _iceManager.drainQueuedCandidates(_peerConnection!);
+      _cancelNegotiationTimer();
+    } catch (e) {
+      dev.log('$_tag Negotiation failed: $e');
+      _cancelNegotiationTimer();
+      _setState(SessionConnectionState.failed);
     }
+  }
 
-    await _signalRService.sendSignalInviteMessage(
-      _sessionId!,
-      SdpWrapper(type: finalAnswer!.type!, sdp: finalAnswer.sdp!),
-      _lastInviteId ?? '',
-    );
+  void _startNegotiationTimer() {
+    _cancelNegotiationTimer();
+    _negotiationTimer = Timer(negotiationTimeout, () {
+      dev.log('$_tag ❌ Negotiation timeout');
+      _setState(SessionConnectionState.failed);
+    });
+  }
 
-    await _iceManager.drainQueuedCandidates(_peerConnection!);
+  void _cancelNegotiationTimer() {
+    _negotiationTimer?.cancel();
+    _negotiationTimer = null;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -360,7 +425,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         await _logOnce();
         _logger.stop();
         dev.log('$_tag 🎉 ICE CONNECTION ESTABLISHED!');
-        _iceRestartInFlight = false;
+        _setState(SessionConnectionState.connected);
+        _iceRestartAttempts = 0;
       case RTCIceConnectionState.RTCIceConnectionStateFailed:
         await _logOnce();
         dev.log('$_tag ❌ ICE FAILED');
@@ -369,8 +435,12 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         _startLogger();
         await _logOnce();
         dev.log('$_tag ❌ ICE DISCONNECTED');
+        _setState(SessionConnectionState.disconnected);
+        // Give it a few seconds to self-recover before attempting restart
         await Future.delayed(const Duration(seconds: 3));
-        await _attemptIceRestart();
+        if (_state == SessionConnectionState.disconnected) {
+          await _attemptIceRestart();
+        }
       default:
         break;
     }
@@ -416,27 +486,57 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   Future<void> _attemptIceRestart() async {
     if (!restartOnDisconnect) {
+      dev.log('$_tag ICE restart disabled');
+      _setState(SessionConnectionState.failed);
       return;
     }
-    if (_peerConnection == null) return;
+
+    if (_peerConnection == null) {
+      _setState(SessionConnectionState.failed);
+      return;
+    }
+
     if (_peerConnection!.signalingState ==
         RTCSignalingState.RTCSignalingStateClosed) {
+      _setState(SessionConnectionState.failed);
       return;
     }
-    if (onLocalOffer == null) return;
-    if (_iceRestartInFlight) return;
+
+    if (!_state.canRestartIce) {
+      dev.log('$_tag Cannot restart ICE in state: $_state');
+      return;
+    }
+
+    if (_iceRestartAttempts >= _maxIceRestartAttempts) {
+      dev.log('$_tag Max ICE restart attempts reached');
+      _setState(SessionConnectionState.failed);
+      return;
+    }
+
+    _iceRestartAttempts++;
+    _setState(SessionConnectionState.restarting);
 
     try {
+      dev.log(
+        '$_tag Attempting ICE restart (attempt $_iceRestartAttempts/$_maxIceRestartAttempts)',
+      );
+
       await _peerConnection!.restartIce();
       final offer = await _peerConnection!.createOffer({'iceRestart': true});
       await _peerConnection!.setLocalDescription(offer);
-      _iceRestartInFlight = true;
 
-      dev.log('$_tag Requested ICE restart');
-      onLocalOffer!.call(offer);
+      // Send the restart offer to the signaling server
+      final localDesc = await _peerConnection!.getLocalDescription();
+      if (localDesc != null && _sessionId != null) {
+        await _signalRService.sendIceRestartOffer(
+          _sessionId!,
+          SdpWrapper(type: localDesc.type!, sdp: localDesc.sdp!),
+        );
+        dev.log('$_tag ICE restart offer sent');
+      }
     } catch (e) {
       dev.log('$_tag ICE restart failed: $e');
-      _iceRestartInFlight = false;
+      _setState(SessionConnectionState.failed);
     }
   }
 
@@ -476,7 +576,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void _resetState() {
     _sessionId = null;
     _lastInviteId = null;
-    _iceRestartInFlight = false;
+    _iceRestartAttempts = 0;
+    _cancelNegotiationTimer();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

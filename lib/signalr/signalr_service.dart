@@ -415,6 +415,29 @@ class SignalRService {
     }
   }
 
+  /// Send an ICE restart offer.
+  ///
+  /// This is used when the ICE connection fails and needs to be re-established.
+  Future<bool> sendIceRestartOffer(String sessionId, SdpWrapper offer) async {
+    dev.log(
+      'SignalRService: Sending ICE restart offer for session: $sessionId',
+    );
+
+    if (!isPeerReady) return false;
+
+    try {
+      final message = JsonRpc.notification(
+        method: 'restart',
+        params: {'session': sessionId, 'offer': offer.toJson()},
+      );
+      await _connectionManager?.invoke('SendMessage', args: [message]);
+      return true;
+    } catch (e) {
+      dev.log('SignalRService: Send ICE restart error: $e');
+      return false;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Player Management
   // ═══════════════════════════════════════════════════════════════════════════
