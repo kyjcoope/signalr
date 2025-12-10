@@ -22,7 +22,7 @@ android {
     defaultConfig {
         applicationId = "com.example.signalr"
         // flutter-webrtc requires minSdk 23+
-        minSdk = 23
+        minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
