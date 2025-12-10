@@ -4,26 +4,26 @@ import 'dart:developer' as dev;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import '../signalr/osp_signalr_service.dart';
+import '../signalr/signalr_service.dart';
 import 'codec_detector.dart';
 import 'ice_candidate_manager.dart';
-import 'osp_webrtc_player.dart';
+import 'webrtc_player.dart';
 import 'sdp_utils.dart';
 import 'signaling_message.dart';
 import 'webrtc_logger.dart';
 
-/// WebRTC camera session implementing the OSPVideoWebRTCPlayer interface.
+/// WebRTC camera session implementing the VideoWebRTCPlayer interface.
 ///
 /// Uses composition with [IceCandidateManager] and [CodecDetector] for cleaner code.
-class WebRtcCameraSession implements OSPVideoWebRTCPlayer {
+class WebRtcCameraSession implements VideoWebRTCPlayer {
   WebRtcCameraSession({
     required this.cameraId,
-    OSPSignalRService? signalRService,
+    SignalRService? signalRService,
     this.turnTcpOnly = false,
     this.restartOnDisconnect = true,
     this.onLocalOffer,
     this.enableDetailedLogging = true,
-  }) : _signalRService = signalRService ?? OSPSignalRService.instance,
+  }) : _signalRService = signalRService ?? SignalRService.instance,
        _playerId = 'player_${DateTime.now().millisecondsSinceEpoch}_$cameraId' {
     _initManagers();
   }
@@ -33,7 +33,7 @@ class WebRtcCameraSession implements OSPVideoWebRTCPlayer {
   // ═══════════════════════════════════════════════════════════════════════════
 
   final String cameraId;
-  final OSPSignalRService _signalRService;
+  final SignalRService _signalRService;
   final bool turnTcpOnly;
   final bool restartOnDisconnect;
   final String _playerId;
@@ -73,7 +73,7 @@ class WebRtcCameraSession implements OSPVideoWebRTCPlayer {
   set sessionId(String? value) => _sessionId = value;
 
   @override
-  StreamSubscription<OSPSignalRMessage>? subscription;
+  StreamSubscription<SignalRMessage>? subscription;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Internal State
@@ -93,7 +93,7 @@ class WebRtcCameraSession implements OSPVideoWebRTCPlayer {
   String get _tag => '[$cameraId]';
 
   /// Get the SignalR service.
-  OSPSignalRService get signalRService => _signalRService;
+  SignalRService get signalRService => _signalRService;
 
   /// Get negotiated video codec.
   String? get negotiatedVideoCodec => _codecDetector.codec;
@@ -126,24 +126,24 @@ class WebRtcCameraSession implements OSPVideoWebRTCPlayer {
   // ═══════════════════════════════════════════════════════════════════════════
 
   @override
-  void onSignalRMessage(OSPSignalRMessage message) {
+  void onSignalRMessage(SignalRMessage message) {
     dev.log('$_tag onSignalRMessage: ${message.method}');
 
     switch (message.method) {
-      case OSPSignalRMessageType.onSignalReady:
+      case SignalRMessageType.onSignalReady:
         dev.log('$_tag SignalR is ready');
         break;
-      case OSPSignalRMessageType.onSignalInvite:
+      case SignalRMessageType.onSignalInvite:
         _handleInvite(message.detail);
-      case OSPSignalRMessageType.onSignalTrickle:
+      case SignalRMessageType.onSignalTrickle:
         _handleTrickle(message.detail);
-      case OSPSignalRMessageType.onSignalIceServers:
+      case SignalRMessageType.onSignalIceServers:
         _handleIceServers(message.detail);
-      case OSPSignalRMessageType.onSignalClosed:
+      case SignalRMessageType.onSignalClosed:
         dev.log('$_tag SignalR connection closed');
-      case OSPSignalRMessageType.onSignalTimeout:
+      case SignalRMessageType.onSignalTimeout:
         dev.log('$_tag SignalR connection timeout');
-      case OSPSignalRMessageType.onSignalError:
+      case SignalRMessageType.onSignalError:
         dev.log('$_tag SignalR error: ${message.detail}');
     }
   }

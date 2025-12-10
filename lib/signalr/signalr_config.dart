@@ -1,8 +1,6 @@
-/// Configuration for the OSP SignalR service.
-///
-/// Matches the web's `OSPVideoWebRTCSignalRConfig` pattern.
-class OSPSignalRConfig {
-  OSPSignalRConfig({
+/// Configuration for the SignalR service.
+class SignalRConfig {
+  SignalRConfig({
     required this.signalRServerUrl,
     String? clientId,
     this.reconnectionTimeout = 5000,

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/demo/camera_list_item.dart';
-import 'package:signalr/signalr/osp_signalr_service.dart';
+import 'package:signalr/signalr/signalr_service.dart';
 import 'package:signalr/auth/auth.dart';
 import 'dart:developer' as dev;
 
@@ -18,7 +18,7 @@ class CameraList extends StatefulWidget {
     required this.pendingOnly,
   });
 
-  final OSPSignalRService signalRService;
+  final SignalRService signalRService;
   final AuthService authService;
   final bool favoritesOnly;
   final bool workingOnly;

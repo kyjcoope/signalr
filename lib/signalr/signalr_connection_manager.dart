@@ -6,7 +6,7 @@ import 'package:signalr_netcore/http_connection_options.dart';
 import 'package:signalr_netcore/hub_connection.dart';
 import 'package:signalr_netcore/hub_connection_builder.dart';
 
-import 'osp_signalr_config.dart';
+import 'signalr_config.dart';
 
 /// Callback for when a SignalR message is received.
 typedef SignalRMessageCallback = void Function(List<Object?>? args);
@@ -17,14 +17,14 @@ typedef SignalRMessageCallback = void Function(List<Object?>? args);
 /// and event handler binding. Separated from message handling for clarity.
 class SignalRConnectionManager {
   SignalRConnectionManager({
-    required OSPSignalRConfig config,
+    required SignalRConfig config,
     this.onConnected,
     this.onDisconnected,
     this.onReconnecting,
     this.onReconnected,
   }) : _config = config;
 
-  final OSPSignalRConfig _config;
+  final SignalRConfig _config;
 
   /// Callback when connection is established.
   final VoidCallback? onConnected;

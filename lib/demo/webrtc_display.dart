@@ -4,7 +4,7 @@ import 'dart:developer' as dev;
 
 import 'package:signalr/models/models.dart';
 import 'package:signalr/auth/auth.dart';
-import 'package:signalr/signalr/osp_signalr_service.dart';
+import 'package:signalr/signalr/signalr_service.dart';
 import 'package:signalr/store/favorites_store.dart';
 import 'camera_list.dart';
 
@@ -16,7 +16,7 @@ class WebRtcDisplay extends StatefulWidget {
 }
 
 class _WebRtcDisplay extends State<WebRtcDisplay> {
-  final signalRService = OSPSignalRService.instance;
+  final signalRService = SignalRService.instance;
   final authService = AuthService();
 
   bool _devicesRegistered = false;
