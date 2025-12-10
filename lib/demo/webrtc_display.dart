@@ -3,7 +3,8 @@ import 'package:signalr/config.dart';
 import 'dart:developer' as dev;
 
 import 'package:signalr/models/models.dart';
-import 'package:signalr/signalr/signalr_session_hub.dart';
+import 'package:signalr/auth/auth.dart';
+import 'package:signalr/signalr/osp_signalr_service.dart';
 import 'package:signalr/store/favorites_store.dart';
 import 'camera_list.dart';
 
@@ -15,7 +16,8 @@ class WebRtcDisplay extends StatefulWidget {
 }
 
 class _WebRtcDisplay extends State<WebRtcDisplay> {
-  final sessionHub = SignalRSessionHub(signalRUrl: 'https://$url/SignalingHub');
+  final signalRService = OSPSignalRService.instance;
+  final authService = AuthService();
 
   bool _devicesRegistered = false;
 
@@ -36,12 +38,13 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
 
   @override
   void dispose() {
-    sessionHub.shutdown();
+    signalRService.closeConnection(closeAllSessions: true);
     super.dispose();
   }
 
   Future<void> _initialize() async {
-    await sessionHub.initialize(
+    // Login to get device list
+    await authService.login(
       UserLogin(
         username: username,
         password: password,
@@ -53,6 +56,10 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
         clientId_: 'jci-authui-client',
       ),
     );
+
+    // Initialize SignalR service
+    await signalRService.initService('https://$url/SignalingHub');
+
     if (!mounted) return;
     setState(() {
       _devicesRegistered = true;
@@ -161,8 +168,8 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
         label: const Text('Stop all'),
       ),
       TextButton.icon(
-        onPressed:
-            () => _cameraListKey.currentState?.resetFavoritesAndWorking(),
+        onPressed: () =>
+            _cameraListKey.currentState?.resetFavoritesAndWorking(),
         icon: const Icon(Icons.refresh),
         label: const Text('Reset'),
       ),
@@ -212,18 +219,18 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
               ),
               const SizedBox(height: 16),
               Expanded(
-                child:
-                    !_devicesRegistered
-                        ? const Center(
-                          child: Text('Waiting for device registration...'),
-                        )
-                        : CameraList(
-                          key: _cameraListKey,
-                          sessionHub: sessionHub,
-                          favoritesOnly: _favoritesOnly,
-                          workingOnly: _workingOnly,
-                          pendingOnly: _pendingOnly,
-                        ),
+                child: !_devicesRegistered
+                    ? const Center(
+                        child: Text('Waiting for device registration...'),
+                      )
+                    : CameraList(
+                        key: _cameraListKey,
+                        signalRService: signalRService,
+                        authService: authService,
+                        favoritesOnly: _favoritesOnly,
+                        workingOnly: _workingOnly,
+                        pendingOnly: _pendingOnly,
+                      ),
               ),
             ],
           ),

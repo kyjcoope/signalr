@@ -4,29 +4,37 @@ import 'dart:developer' as dev;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:signalr/signalr/signalr_session_hub.dart';
 
+import '../signalr/osp_signalr_service.dart';
 import '../signalr/signalr_message.dart';
-import '../webrtc/signaling_message.dart';
-import '../webrtc/webrtc_logger.dart';
+import 'osp_webrtc_player.dart';
+import 'signaling_message.dart';
+import 'webrtc_logger.dart';
 
-class WebRtcCameraSession {
+/// WebRTC camera session that implements the OSPVideoWebRTCPlayer interface.
+///
+/// This class handles WebRTC peer connection management for a single camera,
+/// matching the web's player/renderer pattern.
+class WebRtcCameraSession implements OSPVideoWebRTCPlayer {
   WebRtcCameraSession({
     required this.cameraId,
-    required this.sessionHub,
+    OSPSignalRService? signalRService,
     this.turnTcpOnly = false,
     this.restartOnDisconnect = true,
     this.onLocalOffer,
     this.enableDetailedLogging = true,
-  });
+  }) : _signalRService = signalRService ?? OSPSignalRService.instance,
+       _playerId = 'player_${DateTime.now().millisecondsSinceEpoch}_$cameraId';
 
   final String cameraId;
-  final SignalRSessionHub sessionHub;
+  final OSPSignalRService _signalRService;
   final bool turnTcpOnly;
   final bool restartOnDisconnect;
+  final String _playerId;
 
   bool _remoteDescSet = false;
   bool enableDetailedLogging;
+
   void setLoggingEnabled(bool v) {
     enableDetailedLogging = v;
     _logger.setEnabled(v);
@@ -37,7 +45,24 @@ class WebRtcCameraSession {
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
-  String? sessionId;
+
+  // Player interface implementation
+  @override
+  String get playerId => _playerId;
+
+  @override
+  String get deviceId => cameraId;
+
+  String? _sessionId;
+
+  @override
+  String? get sessionId => _sessionId;
+
+  @override
+  set sessionId(String? value) => _sessionId = value;
+
+  @override
+  StreamSubscription<OSPSignalRMessage>? subscription;
 
   final StreamController<String> _messageController =
       StreamController<String>.broadcast();
@@ -62,7 +87,7 @@ class WebRtcCameraSession {
   bool _firedLocalIce = false;
   bool _firedRemoteIce = false;
 
-  final Queue<TrickleMessage> _pendingTrickles = Queue<TrickleMessage>();
+  final Queue<_PendingTrickle> _pendingTrickles = Queue<_PendingTrickle>();
   Map<int, String> _mlineToMid = {};
   final Set<String> _eocSentForMid = {};
   Completer<void> _iceCandidatesGathering = Completer<void>();
@@ -73,40 +98,121 @@ class WebRtcCameraSession {
   int _codecDetectAttempts = 0;
   static const int _maxCodecDetectAttempts = 6;
 
+  // Message ID for invite response
+  String? _lastInviteId;
+
   Stream<String> get messageStream => _messageController.stream;
 
-  void handleConnectResponse(ConnectResponse msg) {
-    sessionId = msg.session;
-    dev.log('[$cameraId] Session started: $sessionId');
-    _initializeConnection();
-  }
+  /// Get the SignalR service.
+  OSPSignalRService get signalRService => _signalRService;
 
-  Future<void> handleInvite(InviteResponse msg) async {
-    if (msg.offer.type == 'offer') {
-      await _negotiate(msg);
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Player Interface - Message Handling
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @override
+  void onSignalRMessage(OSPSignalRMessage message) {
+    dev.log('[$cameraId] onSignalRMessage: ${message.method}');
+
+    switch (message.method) {
+      case OSPSignalRMessageType.onSignalReady:
+        _onSignalReady();
+        break;
+      case OSPSignalRMessageType.onSignalInvite:
+        _handleInviteMessage(message.detail);
+        break;
+      case OSPSignalRMessageType.onSignalTrickle:
+        _handleTrickleMessage(message.detail);
+        break;
+      case OSPSignalRMessageType.onSignalIceServers:
+        _handleIceServersMessage(message.detail);
+        break;
+      case OSPSignalRMessageType.onSignalClosed:
+        _onSignalClosed();
+        break;
+      case OSPSignalRMessageType.onSignalTimeout:
+        _onSignalTimeout();
+        break;
+      case OSPSignalRMessageType.onSignalError:
+        _onSignalError(message.detail);
+        break;
     }
   }
 
-  Future<void> handleLocalOfferAnswer(SdpWrapper answer) async {
-    final pc = _peerConnection;
-    if (pc == null) return;
-    final desc = RTCSessionDescription(answer.sdp, answer.type);
-    await pc.setRemoteDescription(desc);
-    dev.log(
-      '[$cameraId] Applied remote answer to local offer (ICE restart complete)',
-    );
-    _iceRestartInFlight = false;
+  void _onSignalReady() {
+    dev.log('[$cameraId] SignalR is ready');
+    // Connection is ready, can now initiate camera connection
   }
 
-  Future<void> handleTrickle(TrickleMessage msg) async {
-    if ((msg.candidate.candidate ?? '').isEmpty) {
-      dev.log(
-        '[$cameraId] Received end-of-candidates for mid=${msg.candidate.sdpMid}',
-      );
-      return;
+  void _onSignalClosed() {
+    dev.log('[$cameraId] SignalR connection closed');
+  }
+
+  void _onSignalTimeout() {
+    dev.log('[$cameraId] SignalR connection timeout');
+  }
+
+  void _onSignalError(dynamic detail) {
+    dev.log('[$cameraId] SignalR error: $detail');
+  }
+
+  void _handleIceServersMessage(dynamic detail) {
+    dev.log('[$cameraId] Received ICE servers');
+    final session = detail['session'] as String?;
+    if (session != null) {
+      _sessionId = session;
+      dev.log('[$cameraId] Session started: $_sessionId');
+      _initializeConnection();
     }
+  }
+
+  void _handleInviteMessage(dynamic detail) {
+    dev.log('[$cameraId] Received invite');
+    try {
+      final params = detail['params'] as Map<String, dynamic>?;
+      if (params == null) return;
+
+      final offer = params['offer'] as Map<String, dynamic>?;
+      if (offer == null) return;
+
+      final sdpWrapper = SdpWrapper.fromJson(offer);
+      _lastInviteId = detail['id']?.toString();
+
+      if (sdpWrapper.type == 'offer') {
+        _negotiate(sdpWrapper);
+      }
+    } catch (e) {
+      dev.log('[$cameraId] Error handling invite: $e');
+    }
+  }
+
+  void _handleTrickleMessage(dynamic detail) {
+    dev.log('[$cameraId] Received trickle');
+    try {
+      final session = detail['session'] as String?;
+      final candidateData = detail['candidate'] as Map<String, dynamic>?;
+
+      if (session != _sessionId || candidateData == null) return;
+
+      final candidateStr = candidateData['candidate'] as String? ?? '';
+      final sdpMid = candidateData['sdpMid'] as String?;
+      final sdpMLineIndex = candidateData['sdpMLineIndex'] as int?;
+
+      if (candidateStr.isEmpty) {
+        dev.log('[$cameraId] Received end-of-candidates for mid=$sdpMid');
+        return;
+      }
+
+      final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
+      _handleRemoteTrickle(candidate);
+    } catch (e) {
+      dev.log('[$cameraId] Error handling trickle: $e');
+    }
+  }
+
+  Future<void> _handleRemoteTrickle(RTCIceCandidate candidate) async {
     if (_peerConnection == null || !_remoteDescSet) {
-      _pendingTrickles.addLast(msg);
+      _pendingTrickles.addLast(_PendingTrickle(candidate));
       return;
     }
 
@@ -116,24 +222,44 @@ class WebRtcCameraSession {
         _firedRemoteIce = true;
         onRemoteIceCandidate?.call();
       }
-      final mline = msg.candidate.sdpMLineIndex;
-      final mid = _resolveMid(msg.candidate.sdpMid, mline);
+
+      final mline = candidate.sdpMLineIndex;
+      final mid = _resolveMid(candidate.sdpMid, mline);
 
       if (mid == null) {
         dev.log(
           '[$cameraId] Could not resolve mid for remote candidate '
-          '(mline=$mline, rawMid="${msg.candidate.sdpMid}") — dropping',
+          '(mline=$mline, rawMid="${candidate.sdpMid}") — dropping',
         );
         return;
       }
 
-      final candidate = RTCIceCandidate(msg.candidate.candidate, mid, mline);
-      await _peerConnection!.addCandidate(candidate);
+      final resolvedCandidate = RTCIceCandidate(
+        candidate.candidate,
+        mid,
+        mline,
+      );
+      await _peerConnection!.addCandidate(resolvedCandidate);
 
       dev.log('[$cameraId] ✅ Added remote ICE: mid=$mid mline=$mline');
     } catch (e) {
       dev.log('[$cameraId] Error adding remote ICE candidate: $e');
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Public API
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Start connecting to the camera.
+  Future<void> connect() async {
+    dev.log('[$cameraId] Connecting...');
+
+    // Register with SignalR service
+    _signalRService.registerPlayer(this);
+
+    // Request connection to the camera
+    await _signalRService.connectConsumerSession(cameraId);
   }
 
   void sendDataChannelMessage(String text) {
@@ -148,6 +274,9 @@ class WebRtcCameraSession {
 
   Future<void> close() async {
     _logger.stop();
+
+    // Unregister from SignalR service
+    _signalRService.unregisterPlayer(this);
 
     try {
       _dataChannel?.onMessage = null;
@@ -177,7 +306,7 @@ class WebRtcCameraSession {
     _mlineToMid.clear();
     _eocSentForMid.clear();
     _iceRestartInFlight = false;
-    sessionId = null;
+    _sessionId = null;
     _firedLocalIce = false;
     _firedRemoteIce = false;
     selectedVideoCodec = null;
@@ -192,8 +321,12 @@ class WebRtcCameraSession {
 
   Future<void> dispose() => close();
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Connection Setup
+  // ═══════════════════════════════════════════════════════════════════════════
+
   List<Map<String, dynamic>> _getIceServers() {
-    final servers = sessionHub.iceServers.map((e) => e.toJson()).toList();
+    final servers = _signalRService.iceServers.map((e) => e.toJson()).toList();
 
     if (!turnTcpOnly) {
       servers.insert(0, {'urls': 'stun:stun.l.google.com:19302'});
@@ -203,12 +336,10 @@ class WebRtcCameraSession {
     return servers
         .map((s) {
           final urls = (s['urls'] is List ? s['urls'] : [s['urls']]) as List;
-          final tcpUrls =
-              urls.where((u) {
-                final str = u.toString().toLowerCase();
-                return str.startsWith('turns:') ||
-                    str.contains('transport=tcp');
-              }).toList();
+          final tcpUrls = urls.where((u) {
+            final str = u.toString().toLowerCase();
+            return str.startsWith('turns:') || str.contains('transport=tcp');
+          }).toList();
           return {...s, 'urls': tcpUrls};
         })
         .where((s) => (s['urls'] as List).isNotEmpty)
@@ -236,19 +367,17 @@ class WebRtcCameraSession {
     pc.onIceCandidate = _onIceCandidate;
     pc.onDataChannel = _onDataChannel;
     pc.onSignalingState = (s) => dev.log('[$cameraId] Signaling state: $s');
-    pc.onRenegotiationNeeded =
-        () => dev.log('[$cameraId] Renegotiation needed');
+    pc.onRenegotiationNeeded = () =>
+        dev.log('[$cameraId] Renegotiation needed');
     pc.onIceGatheringState = _onIceGatheringState;
 
     _peerConnection = pc;
   }
 
   void _sendEndOfCandidates(String mid) {
-    if (sessionId == null) return;
+    if (_sessionId == null) return;
     final eoc = RTCIceCandidate('', mid, null);
-    sessionHub.signalingHandler.send(
-      TrickleMessage(session: sessionId!, candidate: eoc, id: 'eoc'),
-    );
+    _signalRService.sendSignalTrickleMessage(_sessionId!, eoc);
   }
 
   Future<void> _drainQueuedRemoteIce() async {
@@ -256,6 +385,7 @@ class WebRtcCameraSession {
     dev.log(
       '[$cameraId] Draining ${_pendingTrickles.length} queued remote ICE',
     );
+
     while (_pendingTrickles.isNotEmpty) {
       final t = _pendingTrickles.removeFirst();
       try {
@@ -284,14 +414,13 @@ class WebRtcCameraSession {
     }
   }
 
-  Future<void> _negotiate(InviteResponse msg) async {
+  Future<void> _negotiate(SdpWrapper offer) async {
     _iceCandidatesGathering = Completer<void>();
 
-    final offerSdp =
-        _isH264(msg.offer.sdp) ? _mungeSdp(msg.offer.sdp) : msg.offer.sdp;
+    final offerSdp = _isH264(offer.sdp) ? _mungeSdp(offer.sdp) : offer.sdp;
 
     await _peerConnection!.setRemoteDescription(
-      RTCSessionDescription(offerSdp, msg.offer.type),
+      RTCSessionDescription(offerSdp, offer.type),
     );
     _mlineToMid = _buildMLineToMid(offerSdp);
 
@@ -306,16 +435,19 @@ class WebRtcCameraSession {
       _extractCodecFromSdpOnce(finalAnswer.sdp ?? '');
     }
 
-    await sessionHub.signalingHandler.send(
-      InviteAnswerMessage(
-        session: msg.session,
-        answerSdp: SdpWrapper(type: finalAnswer!.type!, sdp: finalAnswer.sdp!),
-        id: msg.id,
-      ),
+    // Send answer via SignalR service
+    await _signalRService.sendSignalInviteMessage(
+      _sessionId!,
+      SdpWrapper(type: finalAnswer!.type!, sdp: finalAnswer.sdp!),
+      _lastInviteId ?? '',
     );
 
     await _drainQueuedRemoteIce();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WebRTC Event Handlers
+  // ═══════════════════════════════════════════════════════════════════════════
 
   void _onTrack(RTCTrackEvent event) {
     dev.log('[$cameraId] Track received: ${event.track.kind}');
@@ -359,7 +491,6 @@ class WebRtcCameraSession {
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       dev.log('[$cameraId] 🎉 PEER CONNECTION ESTABLISHED!');
       onConnectionComplete?.call();
-      // Attempt stats-based codec detection (more accurate) asynchronously
       _scheduleCodecStatsDetection();
     }
   }
@@ -415,10 +546,8 @@ class WebRtcCameraSession {
       }
     }
 
-    if (sessionId != null) {
-      sessionHub.signalingHandler.send(
-        TrickleMessage(session: sessionId!, candidate: c, id: '4'),
-      );
+    if (_sessionId != null) {
+      _signalRService.sendSignalTrickleMessage(_sessionId!, c);
     }
   }
 
@@ -443,6 +572,10 @@ class WebRtcCameraSession {
       _messageController.add(msg.text);
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ICE Restart
+  // ═══════════════════════════════════════════════════════════════════════════
 
   Future<void> _attemptIceRestart() async {
     if (!restartOnDisconnect) {
@@ -483,6 +616,10 @@ class WebRtcCameraSession {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SDP Helpers
+  // ═══════════════════════════════════════════════════════════════════════════
+
   bool _isH264(String sdp) =>
       RegExp(r'\bH264/90000\b', caseSensitive: false).hasMatch(sdp);
 
@@ -490,7 +627,7 @@ class WebRtcCameraSession {
     sdp = sdp.replaceAllMapped(RegExp(r'profile-level-id=([0-9A-Fa-f]{6})'), (
       m,
     ) {
-      final goodId = '42e01f';
+      const goodId = '42e01f';
       return 'profile-level-id=$goodId';
     });
 
@@ -524,7 +661,10 @@ class WebRtcCameraSession {
     return map;
   }
 
-  // SDP parsing (fallback / initial)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Codec Detection
+  // ═══════════════════════════════════════════════════════════════════════════
+
   void _extractCodecFromSdpOnce(String sdp) {
     if (selectedVideoCodec != null) return;
     final codec = _parseSelectedVideoCodec(sdp);
@@ -536,8 +676,7 @@ class WebRtcCameraSession {
   }
 
   String? _parseSelectedVideoCodec(String sdp) {
-    // Find first video media section
-    final sections = sdp.split(RegExp(r'\r?\nm=')); // keep first 'm=' in first
+    final sections = sdp.split(RegExp(r'\r?\nm='));
     String? videoSection;
     for (final raw in sections) {
       final sec = raw.startsWith('m=') ? raw : 'm=$raw';
@@ -551,9 +690,10 @@ class WebRtcCameraSession {
     final mLine = videoSection.split(RegExp(r'\r?\n')).first;
     final parts = mLine.split(' ');
     if (parts.length < 4) return null;
-    // payload types are after first 3 tokens: m= video <port> <proto> <pt> ...
-    final pts =
-        parts.skip(3).where((p) => RegExp(r'^\d+$').hasMatch(p)).toList();
+    final pts = parts
+        .skip(3)
+        .where((p) => RegExp(r'^\d+$').hasMatch(p))
+        .toList();
     if (pts.isEmpty) return null;
 
     final lines = sdp.split(RegExp(r'\r?\n'));
@@ -565,7 +705,6 @@ class WebRtcCameraSession {
       if (rtpmapLine.isEmpty) continue;
       final codecPart = rtpmapLine.split(' ').skip(1).firstOrNull ?? '';
       final codecName = codecPart.split('/').first.toUpperCase();
-      // Skip non-codec payload helpers
       if (['RTX', 'ULPFEC', 'RED', 'FLEXFEC-03'].contains(codecName)) {
         continue;
       }
@@ -593,19 +732,15 @@ class WebRtcCameraSession {
         return;
       }
 
-      // Map reports by id
       final byId = {for (final r in reports) r.id: r};
-      // Find inbound video
-      final inboundVideo =
-          reports.where((r) {
-            final type = r.type.toLowerCase();
-            if (type != 'inbound-rtp') return false;
-            final kind =
-                (r.values['kind'] ?? r.values['mediaType'] ?? '')
-                    .toString()
-                    .toLowerCase();
-            return kind == 'video';
-          }).toList();
+      final inboundVideo = reports.where((r) {
+        final type = r.type.toLowerCase();
+        if (type != 'inbound-rtp') return false;
+        final kind = (r.values['kind'] ?? r.values['mediaType'] ?? '')
+            .toString()
+            .toLowerCase();
+        return kind == 'video';
+      }).toList();
 
       if (inboundVideo.isEmpty) {
         _retryCodecDetection();
@@ -622,10 +757,9 @@ class WebRtcCameraSession {
                       '')
                   .toString();
           if (mime.isNotEmpty) {
-            final upper =
-                mime.contains('/')
-                    ? mime.split('/').last.toUpperCase()
-                    : mime.toUpperCase();
+            final upper = mime.contains('/')
+                ? mime.split('/').last.toUpperCase()
+                : mime.toUpperCase();
             if (upper.isNotEmpty) {
               selectedVideoCodec = upper;
               dev.log('[$cameraId] Selected video codec (Stats): $upper');
@@ -650,6 +784,10 @@ class WebRtcCameraSession {
     Future.delayed(const Duration(seconds: 1), _detectCodecFromStats);
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Logging
+  // ═══════════════════════════════════════════════════════════════════════════
+
   void _startLogger() {
     if (!enableDetailedLogging) return;
     final pc = _peerConnection;
@@ -666,4 +804,10 @@ class WebRtcCameraSession {
     _logger.setTag('[$cameraId]');
     await _logger.logOnce(pc, tag: '[$cameraId]');
   }
+}
+
+/// Helper class for queued trickle candidates.
+class _PendingTrickle {
+  _PendingTrickle(this.candidate);
+  final RTCIceCandidate candidate;
 }

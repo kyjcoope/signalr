@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/demo/camera_list_item.dart';
-import 'package:signalr/signalr/signalr_session_hub.dart';
+import 'package:signalr/signalr/osp_signalr_service.dart';
+import 'package:signalr/auth/auth.dart';
 import 'dart:developer' as dev;
 
 import '../webrtc/webrtc_camera_session.dart';
@@ -10,13 +11,15 @@ import '../store/favorites_store.dart';
 class CameraList extends StatefulWidget {
   const CameraList({
     super.key,
-    required this.sessionHub,
+    required this.signalRService,
+    required this.authService,
     required this.favoritesOnly,
     required this.workingOnly,
     required this.pendingOnly,
   });
 
-  final SignalRSessionHub sessionHub;
+  final OSPSignalRService signalRService;
+  final AuthService authService;
   final bool favoritesOnly;
   final bool workingOnly;
   final bool pendingOnly;
@@ -83,8 +86,10 @@ class CameraListState extends State<CameraList> {
     super.dispose();
   }
 
+  Iterable<String> get _availableProducers => widget.authService.devices.keys;
+
   List<String> _visibleCameras() {
-    final all = widget.sessionHub.availableProducers.toList()..sort();
+    final all = _availableProducers.toList()..sort();
     List<String> base = all;
 
     if (widget.favoritesOnly) {
@@ -95,10 +100,9 @@ class CameraListState extends State<CameraList> {
         _working.contains(id) && _sessions.containsKey(id);
 
     if (widget.workingOnly && widget.pendingOnly) {
-      base =
-          base
-              .where((id) => isWorkingNow(id) || _pending.contains(id))
-              .toList();
+      base = base
+          .where((id) => isWorkingNow(id) || _pending.contains(id))
+          .toList();
     } else if (widget.workingOnly) {
       base = base.where(isWorkingNow).toList();
     } else if (widget.pendingOnly) {
@@ -107,13 +111,10 @@ class CameraListState extends State<CameraList> {
 
     if (_filter.isNotEmpty) {
       final f = _filter.toLowerCase();
-      base =
-          base.where((id) {
-            final name =
-                widget.sessionHub.authService.devices[id]?.name.toLowerCase() ??
-                '';
-            return id.toLowerCase().contains(f) || name.contains(f);
-          }).toList();
+      base = base.where((id) {
+        final name = widget.authService.devices[id]?.name.toLowerCase() ?? '';
+        return id.toLowerCase().contains(f) || name.contains(f);
+      }).toList();
     }
 
     return base;
@@ -137,8 +138,12 @@ class CameraListState extends State<CameraList> {
 
   Future<void> _connect(String cameraId) async {
     dev.log('Connecting $cameraId...');
-    final session = await widget.sessionHub.connectToCamera(cameraId);
-    if (session == null) return;
+
+    // Create session with new pattern
+    final session = WebRtcCameraSession(
+      cameraId: cameraId,
+      signalRService: widget.signalRService,
+    );
 
     final renderer = RTCVideoRenderer();
     await renderer.initialize();
@@ -173,14 +178,19 @@ class CameraListState extends State<CameraList> {
       _sessions[cameraId] = session;
       _renderers[cameraId] = renderer;
     });
+
+    // Start connection via session's connect method
+    await session.connect();
   }
 
   Future<void> _disconnect(String cameraId) async {
-    await widget.sessionHub.disconnectCamera(cameraId);
+    final session = _sessions.remove(cameraId);
+    if (session != null) {
+      await session.close();
+    }
     final renderer = _renderers.remove(cameraId);
     renderer?.srcObject = null;
     renderer?.dispose();
-    _sessions.remove(cameraId);
     setState(() {
       _pending.remove(cameraId);
       _working.remove(cameraId);
@@ -201,7 +211,7 @@ class CameraListState extends State<CameraList> {
 
   @override
   Widget build(BuildContext context) {
-    final all = widget.sessionHub.availableProducers.toList()..sort();
+    final all = _availableProducers.toList()..sort();
     final cameras = _visibleCameras();
 
     if (all.isEmpty) {
@@ -225,14 +235,13 @@ class CameraListState extends State<CameraList> {
                     prefixIcon: const Icon(Icons.search),
                     isDense: true,
                     border: const OutlineInputBorder(),
-                    suffixIcon:
-                        _filter.isEmpty
-                            ? null
-                            : IconButton(
-                              tooltip: 'Clear',
-                              icon: const Icon(Icons.clear),
-                              onPressed: () => _filterCtrl.clear(),
-                            ),
+                    suffixIcon: _filter.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear',
+                            icon: const Icon(Icons.clear),
+                            onPressed: () => _filterCtrl.clear(),
+                          ),
                   ),
                 ),
               ),
@@ -252,7 +261,7 @@ class CameraListState extends State<CameraList> {
               final connected = _sessions.containsKey(cameraId);
               final renderer = _renderers[cameraId];
               final isFav = _favorites.contains(cameraId);
-              final device = widget.sessionHub.authService.devices[cameraId];
+              final device = widget.authService.devices[cameraId];
               final name = device?.name ?? 'Unknown Camera';
               final type = device?.sourceType ?? 'Unknown Type';
               final codec =
