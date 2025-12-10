@@ -211,8 +211,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   /// Send a message on the data channel.
   void sendDataChannelMessage(String text) {
     if (_dataChannel?.state != RTCDataChannelState.RTCDataChannelOpen ||
-        text.isEmpty)
+        text.isEmpty) {
       return;
+    }
     _dataChannel!.send(RTCDataChannelMessage(text));
   }
 
@@ -419,8 +420,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     }
     if (_peerConnection == null) return;
     if (_peerConnection!.signalingState ==
-        RTCSignalingState.RTCSignalingStateClosed)
+        RTCSignalingState.RTCSignalingStateClosed) {
       return;
+    }
     if (onLocalOffer == null) return;
     if (_iceRestartInFlight) return;
 

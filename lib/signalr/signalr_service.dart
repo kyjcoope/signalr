@@ -9,7 +9,27 @@ import '../webrtc/signaling_message.dart';
 import 'json_rpc.dart';
 import 'signalr_config.dart';
 import 'signalr_connection_manager.dart';
-import 'signalr_message.dart' hide SignalRMessage;
+
+/// ICE server configuration from the signaling server.
+class IceServer {
+  IceServer({required this.urls, this.credential, this.username});
+
+  factory IceServer.fromJson(dynamic json) => IceServer(
+    urls: (json['urls'] as List?)?.map((r) => r.toString()).toList() ?? [],
+    credential: json['credential'] as String?,
+    username: json['username'] as String?,
+  );
+
+  final List<String> urls;
+  final String? credential;
+  final String? username;
+
+  Map<String, Object?> toJson() => {
+    'urls': urls,
+    if (credential != null) 'credential': credential,
+    if (username != null) 'username': username,
+  };
+}
 
 /// Singleton SignalR service for WebRTC signaling.
 ///
