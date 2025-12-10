@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:developer' as dev;
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:signalr_netcore/http_connection_options.dart';
 import 'package:signalr_netcore/hub_connection.dart';
 import 'package:signalr_netcore/hub_connection_builder.dart';
@@ -243,6 +244,3 @@ class SignalRConnectionManager {
     _retryTimer = null;
   }
 }
-
-/// Simple void callback type.
-typedef VoidCallback = void Function();
