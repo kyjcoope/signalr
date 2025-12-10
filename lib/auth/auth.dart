@@ -29,7 +29,7 @@ class AuthService {
     try {
       final request = MultipartRequest(
         'POST',
-        Uri.parse('https://$url/api/Authenticate/Login'),
+        Uri.parse('https://$url/api/Authenticate/LoginSSO'),
       );
 
       request.fields.addAll(
