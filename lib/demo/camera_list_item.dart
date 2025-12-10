@@ -129,15 +129,15 @@ class CameraListItem extends StatelessWidget {
         const SizedBox(width: 8),
         showStop
             ? OutlinedButton.icon(
-              onPressed: onDisconnect,
-              icon: const Icon(Icons.stop, color: Colors.red),
-              label: const Text('Stop'),
-            )
+                onPressed: onDisconnect,
+                icon: const Icon(Icons.stop, color: Colors.red),
+                label: const Text('Stop'),
+              )
             : ElevatedButton.icon(
-              onPressed: onConnect,
-              icon: const Icon(Icons.play_arrow),
-              label: const Text('Start'),
-            ),
+                onPressed: onConnect,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Start'),
+              ),
       ],
     );
   }
@@ -163,26 +163,26 @@ class CameraListItem extends StatelessWidget {
             const Spacer(),
             showStop
                 ? OutlinedButton(
-                  onPressed: onDisconnect,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
+                    onPressed: onDisconnect,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                     ),
-                  ),
-                  child: const Text('Stop'),
-                )
+                    child: const Text('Stop'),
+                  )
                 : ElevatedButton(
-                  onPressed: onConnect,
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
+                    onPressed: onConnect,
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                     ),
+                    child: const Text('Start'),
                   ),
-                  child: const Text('Start'),
-                ),
           ],
         ),
         const SizedBox(height: 4),
@@ -213,7 +213,7 @@ class CameraListItem extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(.12),
+        color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color),
       ),

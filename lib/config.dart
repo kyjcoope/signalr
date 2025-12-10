@@ -1,5 +1,4 @@
-final currentEnvironment = Environment.qa;
-
+/// Application environment configuration.
 enum Environment {
   dev(
     url: 'jci-osp-api-gateway-dev.nonprod.highspansecurity.com',
@@ -23,6 +22,10 @@ enum Environment {
   });
 }
 
-String url = currentEnvironment.url;
-String username = currentEnvironment.username;
-String password = currentEnvironment.password;
+/// Current active environment.
+const currentEnvironment = Environment.qa;
+
+/// Convenience accessors for current environment values.
+String get url => currentEnvironment.url;
+String get username => currentEnvironment.username;
+String get password => currentEnvironment.password;

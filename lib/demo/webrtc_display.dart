@@ -197,45 +197,41 @@ class _WebRtcDisplay extends State<WebRtcDisplay> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (ctx, constraints) {
-        return Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Card(
-                clipBehavior: Clip.antiAlias,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: [
-                      _buildStatusControls(context),
-                      const SizedBox(height: 12),
-                      _buildActionsRow(context),
-                    ],
-                  ),
-                ),
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Card(
+            clipBehavior: Clip.antiAlias,
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  _buildStatusControls(context),
+                  const SizedBox(height: 12),
+                  _buildActionsRow(context),
+                ],
               ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: !_devicesRegistered
-                    ? const Center(
-                        child: Text('Waiting for device registration...'),
-                      )
-                    : CameraList(
-                        key: _cameraListKey,
-                        signalRService: signalRService,
-                        authService: authService,
-                        favoritesOnly: _favoritesOnly,
-                        workingOnly: _workingOnly,
-                        pendingOnly: _pendingOnly,
-                      ),
-              ),
-            ],
+            ),
           ),
-        );
-      },
+          const SizedBox(height: 16),
+          Expanded(
+            child: !_devicesRegistered
+                ? const Center(
+                    child: Text('Waiting for device registration...'),
+                  )
+                : CameraList(
+                    key: _cameraListKey,
+                    signalRService: signalRService,
+                    authService: authService,
+                    favoritesOnly: _favoritesOnly,
+                    workingOnly: _workingOnly,
+                    pendingOnly: _pendingOnly,
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
