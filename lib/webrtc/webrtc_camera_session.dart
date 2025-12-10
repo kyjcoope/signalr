@@ -388,7 +388,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       );
 
       _setState(SessionConnectionState.exchangingIce);
-      await _iceManager.drainQueuedCandidates(_peerConnection!);
+      // await _iceManager.drainQueuedCandidates(_peerConnection!);
       _cancelNegotiationTimer();
     } catch (e) {
       dev.log('$_tag Negotiation failed: $e');
