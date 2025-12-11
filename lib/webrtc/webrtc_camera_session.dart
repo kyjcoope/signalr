@@ -87,7 +87,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   RTCDataChannel? _dataChannel;
   String? _lastInviteId;
   Timer? _negotiationTimer;
+  Timer? _connectTimeout;
   int _iceRestartAttempts = 0;
+
+  /// Timeout for the connect phase (waiting for session/ICE servers).
+  static const Duration _connectPhaseTimeout = Duration(seconds: 15);
 
   late final IceCandidateManager _iceManager;
   late final CodecDetector _codecDetector;
@@ -173,6 +177,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   void _handleIceServers(dynamic detail) {
+    // Clear the connect timeout - we received a response
+    _cancelConnectTimeout();
+
     final session = detail['session'] as String?;
     if (session != null) {
       _sessionId = session;
@@ -242,6 +249,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     dev.log('$_tag Connecting...');
     _setState(SessionConnectionState.waitingForSession);
     _signalRService.registerPlayer(this);
+
+    // Start timeout for connect phase - if no session received, fail
+    _startConnectTimeout();
+
     await _signalRService.connectConsumerSession(cameraId);
   }
 
@@ -257,7 +268,14 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   /// Close the session.
   Future<void> close() async {
     _cancelNegotiationTimer();
+    _cancelConnectTimeout();
     _logger.stop();
+
+    // Send close message to signaling server before cleanup
+    if (_sessionId != null) {
+      await _signalRService.sendCloseMessage(_sessionId!, cameraId);
+    }
+
     _signalRService.unregisterPlayer(this);
     _codecDetector.dispose();
     _iceManager.reset();
@@ -408,6 +426,24 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void _cancelNegotiationTimer() {
     _negotiationTimer?.cancel();
     _negotiationTimer = null;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Connect Phase Timeout
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  void _startConnectTimeout() {
+    _cancelConnectTimeout();
+    _connectTimeout = Timer(_connectPhaseTimeout, () {
+      dev.log('$_tag ⏰ Connect phase timeout - no session received');
+      _signalRService.unregisterPlayer(this);
+      _setState(SessionConnectionState.failed);
+    });
+  }
+
+  void _cancelConnectTimeout() {
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

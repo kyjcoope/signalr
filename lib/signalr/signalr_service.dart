@@ -308,18 +308,36 @@ class SignalRService {
 
   void _handleDeviceDisconnected(List<Object?>? args) {
     dev.log('SignalRService: Device disconnected: $args');
+    // Notify all players that a device has disconnected
+    // The device ID is typically passed as the first argument
+    final deviceId = args?.firstOrNull?.toString();
+    if (deviceId != null) {
+      final player = findPlayerByDevice(deviceId);
+      if (player != null) {
+        player.onSignalRMessage(
+          SignalRMessage(
+            method: SignalRMessageType.onSignalClosed,
+            detail: {'device': deviceId, 'reason': 'device_disconnected'},
+          ),
+        );
+      }
+    }
   }
 
   void _handlePeerDisconnected(List<Object?>? args) {
     dev.log('SignalRService: Peer disconnected: $args');
     final session = args?.firstOrNull?.toString();
     if (session != null) {
-      findPlayerBySession(session)?.onSignalRMessage(
-        SignalRMessage(
-          method: SignalRMessageType.onSignalClosed,
-          detail: {'session': session},
-        ),
-      );
+      final player = findPlayerBySession(session);
+      if (player != null) {
+        dev.log('SignalRService: Notifying player of peer disconnection');
+        player.onSignalRMessage(
+          SignalRMessage(
+            method: SignalRMessageType.onSignalClosed,
+            detail: {'session': session, 'reason': 'peer_disconnected'},
+          ),
+        );
+      }
     }
   }
 
@@ -435,6 +453,31 @@ class SignalRService {
     } catch (e) {
       dev.log('SignalRService: Send ICE restart error: $e');
       return false;
+    }
+  }
+
+  /// Send a close message to the signaling server.
+  ///
+  /// Notifies the server that the client is intentionally closing the session.
+  /// This matches the web UI behavior for clean disconnection.
+  Future<void> sendCloseMessage(String sessionId, String deviceId) async {
+    dev.log('SignalRService: Sending close message for session: $sessionId');
+
+    if (!isPeerReady) return;
+
+    try {
+      final message = JsonRpc.notification(
+        method: 'error',
+        params: {
+          'code': 1002,
+          'message':
+              'Client $deviceId has closed its connection with the Signaling Server.',
+          'session': sessionId,
+        },
+      );
+      await _connectionManager?.invoke('SendMessage', args: [message]);
+    } catch (e) {
+      dev.log('SignalRService: Send close message error: $e');
     }
   }
 
