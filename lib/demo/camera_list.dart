@@ -1,18 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:signalr/demo/camera_list_item.dart';
-import 'package:signalr/signalr/signalr_service.dart';
 import 'package:signalr/auth/auth.dart';
 import 'dart:developer' as dev;
 
-import '../webrtc/webrtc_camera_session.dart';
+import '../signalr/signalr_session_hub.dart';
 import '../store/favorites_store.dart';
 
 /// Camera list widget for fixed toolbar layout.
 class CameraList extends StatefulWidget {
   const CameraList({
     super.key,
-    required this.signalRService,
+    required this.hub,
     required this.authService,
     required this.favoritesOnly,
     required this.workingOnly,
@@ -20,7 +19,7 @@ class CameraList extends StatefulWidget {
     this.scrollController,
   });
 
-  final SignalRService signalRService;
+  final SignalRSessionHub hub;
   final AuthService authService;
   final bool favoritesOnly;
   final bool workingOnly;
@@ -35,14 +34,14 @@ class CameraList extends StatefulWidget {
 class CameraListSliver extends StatefulWidget {
   const CameraListSliver({
     super.key,
-    required this.signalRService,
+    required this.hub,
     required this.authService,
     required this.favoritesOnly,
     required this.workingOnly,
     required this.pendingOnly,
   });
 
-  final SignalRService signalRService;
+  final SignalRSessionHub hub;
   final AuthService authService;
   final bool favoritesOnly;
   final bool workingOnly;
@@ -54,8 +53,8 @@ class CameraListSliver extends StatefulWidget {
 
 /// Shared state for both CameraList and CameraListSliver.
 class CameraListState extends State<StatefulWidget> {
+  // Renderers are kept local - they're a UI concern
   final Map<String, RTCVideoRenderer> _renderers = {};
-  final Map<String, WebRtcCameraSession> _sessions = {};
 
   final TextEditingController _filterCtrl = TextEditingController();
   String _filter = '';
@@ -69,10 +68,10 @@ class CameraListState extends State<StatefulWidget> {
   final Map<String, String> _codec = {};
 
   // Access widget properties dynamically
-  SignalRService get _service {
+  SignalRSessionHub get _hub {
     final w = widget;
-    if (w is CameraList) return w.signalRService;
-    if (w is CameraListSliver) return w.signalRService;
+    if (w is CameraList) return w.hub;
+    if (w is CameraListSliver) return w.hub;
     throw StateError('Invalid widget type');
   }
 
@@ -118,6 +117,41 @@ class CameraListState extends State<StatefulWidget> {
       if (q != _filter) setState(() => _filter = q);
     });
     _loadFavorites();
+    _syncExistingSessions();
+  }
+
+  /// Sync UI state with any existing sessions in the hub.
+  /// This enables session persistence across page navigation.
+  void _syncExistingSessions() {
+    for (final entry in _hub.activeSessions.entries) {
+      final cameraId = entry.key;
+      final session = entry.value;
+
+      // Create renderer for existing session
+      if (!_renderers.containsKey(cameraId)) {
+        _initRendererForSession(cameraId, session.remoteStream);
+      }
+
+      // Mark as working if connected
+      if (session.remoteStream != null) {
+        _working.add(cameraId);
+      }
+    }
+  }
+
+  Future<void> _initRendererForSession(
+    String cameraId,
+    MediaStream? stream,
+  ) async {
+    if (_renderers.containsKey(cameraId)) return;
+
+    final renderer = RTCVideoRenderer();
+    await renderer.initialize();
+    renderer.srcObject = stream;
+
+    if (mounted) {
+      setState(() => _renderers[cameraId] = renderer);
+    }
   }
 
   Future<void> _loadFavorites() async {
@@ -138,15 +172,12 @@ class CameraListState extends State<StatefulWidget> {
 
   @override
   void dispose() {
+    // Only dispose renderers - sessions are managed by hub
     for (final r in _renderers.values) {
       r.srcObject = null;
       r.dispose();
     }
-    for (final s in _sessions.values) {
-      s.dispose();
-    }
     _renderers.clear();
-    _sessions.clear();
     _filterCtrl.dispose();
     super.dispose();
   }
@@ -161,7 +192,7 @@ class CameraListState extends State<StatefulWidget> {
     }
 
     bool isWorkingNow(String id) =>
-        _working.contains(id) && _sessions.containsKey(id);
+        _working.contains(id) && _hub.isConnected(id);
 
     if (_workingOnly && _pendingOnly) {
       base = base
@@ -187,14 +218,14 @@ class CameraListState extends State<StatefulWidget> {
   Future<void> connectAll() async {
     final targets = _visibleCameras();
     for (final id in targets) {
-      if (!_sessions.containsKey(id)) {
+      if (!_hub.isConnected(id)) {
         await _connect(id);
       }
     }
   }
 
   Future<void> stopAll() async {
-    final ids = _sessions.keys.toList();
+    final ids = _hub.connectedCameraIds.toList();
     for (final id in ids) {
       await _disconnect(id);
     }
@@ -203,17 +234,25 @@ class CameraListState extends State<StatefulWidget> {
   Future<void> _connect(String cameraId) async {
     dev.log('Connecting $cameraId...');
 
-    final session = WebRtcCameraSession(
-      cameraId: cameraId,
-      signalRService: _service,
-    );
-
+    // Initialize renderer first
     final renderer = RTCVideoRenderer();
     await renderer.initialize();
+    setState(() => _renderers[cameraId] = renderer);
 
+    // Connect via hub - session is managed there
+    final session = await _hub.connectToCamera(cameraId);
+    if (session == null) {
+      // Failed to connect, cleanup renderer
+      renderer.dispose();
+      setState(() => _renderers.remove(cameraId));
+      return;
+    }
+
+    // Set up callbacks
     session.onTrack = (RTCTrackEvent event) {
       if (event.streams.isEmpty) return;
-      setState(() => renderer.srcObject = event.streams[0]);
+      // Use the stored remoteStream from session
+      setState(() => renderer.srcObject = session.remoteStream);
     };
 
     session.onLocalIceCandidate = () {
@@ -221,6 +260,7 @@ class CameraListState extends State<StatefulWidget> {
         setState(() => _pending.add(cameraId));
       }
     };
+
     session.onRemoteIceCandidate = () {
       if (!_pending.contains(cameraId) && !_working.contains(cameraId)) {
         setState(() => _pending.add(cameraId));
@@ -236,23 +276,17 @@ class CameraListState extends State<StatefulWidget> {
     session.onVideoCodecResolved = (codec) {
       setState(() => _codec[cameraId] = codec);
     };
-
-    setState(() {
-      _sessions[cameraId] = session;
-      _renderers[cameraId] = renderer;
-    });
-
-    await session.connect();
   }
 
   Future<void> _disconnect(String cameraId) async {
-    final session = _sessions.remove(cameraId);
-    if (session != null) {
-      await session.close();
-    }
+    // Disconnect via hub
+    await _hub.disconnectCamera(cameraId);
+
+    // Cleanup local renderer
     final renderer = _renderers.remove(cameraId);
     renderer?.srcObject = null;
     renderer?.dispose();
+
     setState(() {
       _pending.remove(cameraId);
       _working.remove(cameraId);
@@ -361,14 +395,14 @@ class CameraListState extends State<StatefulWidget> {
   }
 
   Widget _buildCameraItem(String cameraId, bool compact) {
-    final connected = _sessions.containsKey(cameraId);
+    final connected = _hub.isConnected(cameraId);
     final renderer = _renderers[cameraId];
     final isFav = _favorites.contains(cameraId);
     final device = _auth.devices[cameraId];
     final name = device?.name ?? 'Unknown Camera';
     final type = device?.sourceType ?? 'Unknown Type';
-    final codec =
-        _codec[cameraId] ?? _sessions[cameraId]?.negotiatedVideoCodec ?? '—';
+    final session = _hub.getSession(cameraId);
+    final codec = _codec[cameraId] ?? session?.negotiatedVideoCodec ?? '—';
 
     return CameraListItem(
       cameraId: cameraId,

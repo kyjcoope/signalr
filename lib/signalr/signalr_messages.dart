@@ -1,0 +1,400 @@
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+import '../webrtc/signaling_message.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SignalR Method Enum
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// SignalR JSON-RPC method types.
+enum SignalRMethod {
+  register('register'),
+  connect('connect'),
+  invite('invite'),
+  trickle('trickle'),
+  error('error');
+
+  const SignalRMethod(this.json);
+
+  /// The JSON string representation of this method.
+  final String json;
+
+  /// Parse a method name string to enum value.
+  static SignalRMethod? fromString(String? method) {
+    if (method == null) return null;
+    return SignalRMethod.values.where((m) => m.json == method).firstOrNull;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Base Interface
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// JSON-RPC 2.0 version constant.
+const String jsonRpcVersion = '2.0';
+
+/// Base interface for all SignalR messages.
+abstract interface class SignalRTypedMessage {
+  /// The JSON-RPC method.
+  SignalRMethod get method;
+
+  /// The message ID (for requests/responses).
+  String get id;
+
+  /// Convert to JSON map for sending.
+  Map<String, dynamic> toJson();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Register Messages
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Register request sent to SignalR server.
+class RegisterRequest implements SignalRTypedMessage {
+  RegisterRequest({required this.authorization, this.id = '1'});
+
+  final String authorization;
+
+  @override
+  final String id;
+
+  @override
+  SignalRMethod get method => SignalRMethod.register;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'jsonrpc': jsonRpcVersion,
+    'method': method.json,
+    'params': {'authorization': authorization},
+    'id': id,
+  };
+}
+
+/// Register response from SignalR server.
+class RegisterResponse {
+  RegisterResponse({required this.clientId});
+
+  factory RegisterResponse.fromJson(Map<String, dynamic> json) =>
+      RegisterResponse(clientId: json['result']?['id'] as String? ?? '');
+
+  /// The client ID assigned by the server.
+  final String clientId;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Connect Messages
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Connect request to start a camera session.
+class ConnectRequest implements SignalRTypedMessage {
+  ConnectRequest({
+    required this.deviceId,
+    this.authorization = '',
+    this.profile = '',
+    this.id = '2',
+  });
+
+  final String deviceId;
+  final String authorization;
+  final String profile;
+
+  @override
+  final String id;
+
+  @override
+  SignalRMethod get method => SignalRMethod.connect;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'jsonrpc': jsonRpcVersion,
+    'method': method.json,
+    'params': {
+      'authorization': authorization,
+      'peer': deviceId,
+      'profile': profile,
+    },
+    'id': id,
+  };
+}
+
+/// Connect response with session and ICE servers.
+class ConnectResponse {
+  ConnectResponse({
+    required this.session,
+    required this.iceServers,
+    required this.peer,
+    this.id = '',
+  });
+
+  factory ConnectResponse.fromJson(Map<String, dynamic> json) {
+    final result = json['result'] as Map<String, dynamic>? ?? {};
+    final iceList = result['iceServers'] as List? ?? [];
+
+    return ConnectResponse(
+      session: result['session'] as String? ?? '',
+      peer: result['peer'] as String? ?? '',
+      iceServers: iceList.map((e) => IceServerConfig.fromJson(e)).toList(),
+      id: json['id']?.toString() ?? '',
+    );
+  }
+
+  final String session;
+  final String peer;
+  final List<IceServerConfig> iceServers;
+  final String id;
+}
+
+/// ICE server configuration.
+class IceServerConfig {
+  IceServerConfig({required this.urls, this.credential, this.username});
+
+  factory IceServerConfig.fromJson(dynamic json) => IceServerConfig(
+    urls: (json['urls'] as List?)?.map((r) => r.toString()).toList() ?? [],
+    credential: json['credential'] as String?,
+    username: json['username'] as String?,
+  );
+
+  final List<String> urls;
+  final String? credential;
+  final String? username;
+
+  Map<String, Object?> toJson() => {
+    'urls': urls,
+    if (credential != null) 'credential': credential,
+    if (username != null) 'username': username,
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Invite Messages
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Invite request (offer) from the server.
+class InviteRequest {
+  InviteRequest({required this.session, required this.offer, required this.id});
+
+  factory InviteRequest.fromJson(Map<String, dynamic> json) {
+    final params = json['params'] as Map<String, dynamic>? ?? {};
+    final offerJson = params['offer'] as Map<String, dynamic>? ?? {};
+
+    return InviteRequest(
+      session: params['session'] as String? ?? '',
+      offer: SdpWrapper.fromJson(offerJson),
+      id: json['id']?.toString() ?? '',
+    );
+  }
+
+  final String session;
+  final SdpWrapper offer;
+  final String id;
+}
+
+/// Invite answer message sent back to server.
+class InviteAnswerMessage implements SignalRTypedMessage {
+  InviteAnswerMessage({
+    required this.session,
+    required this.answerSdp,
+    required this.id,
+  });
+
+  final String session;
+  final SdpWrapper answerSdp;
+
+  @override
+  final String id;
+
+  @override
+  SignalRMethod get method => SignalRMethod.invite;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'jsonrpc': jsonRpcVersion,
+    'result': {'session': session, 'answer': answerSdp.toJson()},
+    'id': id,
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Trickle Messages
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Trickle message for ICE candidate exchange.
+class TrickleMessage implements SignalRTypedMessage {
+  TrickleMessage({
+    required this.session,
+    required this.candidate,
+    this.id = '',
+  });
+
+  factory TrickleMessage.fromJson(Map<String, dynamic> json) {
+    final params = json['params'] as Map<String, dynamic>? ?? {};
+    final candidateData = params['candidate'] as Map<String, dynamic>? ?? {};
+
+    return TrickleMessage(
+      session: params['session'] as String? ?? '',
+      candidate: RTCIceCandidate(
+        candidateData['candidate'] as String? ?? '',
+        candidateData['sdpMid'] as String?,
+        candidateData['sdpMLineIndex'] as int?,
+      ),
+      id: json['id']?.toString() ?? '',
+    );
+  }
+
+  final String session;
+  final RTCIceCandidate candidate;
+
+  @override
+  final String id;
+
+  @override
+  SignalRMethod get method => SignalRMethod.trickle;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'jsonrpc': jsonRpcVersion,
+    'method': method.json,
+    'params': {
+      'session': session,
+      'candidate': {
+        'candidate': candidate.candidate,
+        'sdpMid': candidate.sdpMid,
+        'sdpMLineIndex': candidate.sdpMLineIndex,
+      },
+    },
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Error Messages
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Error notification message.
+class ErrorMessage implements SignalRTypedMessage {
+  ErrorMessage({
+    required this.code,
+    required this.message,
+    this.session,
+    this.id = '',
+  });
+
+  factory ErrorMessage.fromJson(Map<String, dynamic> json) {
+    final params = json['params'] as Map<String, dynamic>? ?? {};
+
+    return ErrorMessage(
+      code: params['code'] as int? ?? 0,
+      message: params['message'] as String? ?? '',
+      session: params['session'] as String?,
+      id: json['id']?.toString() ?? '',
+    );
+  }
+
+  final int code;
+  final String message;
+  final String? session;
+
+  @override
+  final String id;
+
+  @override
+  SignalRMethod get method => SignalRMethod.error;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'jsonrpc': jsonRpcVersion,
+    'method': method.json,
+    'params': {
+      'code': code,
+      'message': message,
+      if (session != null) 'session': session,
+    },
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ICE Restart Messages
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// ICE restart offer notification.
+class IceRestartMessage implements SignalRTypedMessage {
+  IceRestartMessage({required this.session, required this.offer});
+
+  final String session;
+  final SdpWrapper offer;
+
+  @override
+  String get id => '';
+
+  @override
+  SignalRMethod get method => SignalRMethod.invite; // Uses invite method
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'jsonrpc': jsonRpcVersion,
+    'method': 'restart',
+    'params': {'session': session, 'offer': offer.toJson()},
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Close/Leave Messages
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Close message sent when client disconnects.
+class CloseMessage implements SignalRTypedMessage {
+  CloseMessage({
+    required this.session,
+    required this.deviceId,
+    this.code = 1002,
+  });
+
+  final String session;
+  final String deviceId;
+  final int code;
+
+  @override
+  String get id => '';
+
+  @override
+  SignalRMethod get method => SignalRMethod.error;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'jsonrpc': jsonRpcVersion,
+    'method': method.json,
+    'params': {
+      'code': code,
+      'message':
+          'Client $deviceId has closed its connection with the Signaling Server.',
+      'session': session,
+    },
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Message Parser
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Parse incoming JSON-RPC messages to typed objects.
+class SignalRMessageParser {
+  /// Parse a request message (has method).
+  static dynamic parseRequest(Map<String, dynamic> json) {
+    final method = SignalRMethod.fromString(json['method'] as String?);
+
+    return switch (method) {
+      SignalRMethod.invite => InviteRequest.fromJson(json),
+      SignalRMethod.trickle => TrickleMessage.fromJson(json),
+      SignalRMethod.error => ErrorMessage.fromJson(json),
+      _ => json, // Return raw for unknown methods
+    };
+  }
+
+  /// Parse a response message (has result).
+  static dynamic parseResponse(Map<String, dynamic> json, String requestId) {
+    return switch (requestId) {
+      '1' => RegisterResponse.fromJson(json),
+      '2' => ConnectResponse.fromJson(json),
+      _ => json,
+    };
+  }
+}

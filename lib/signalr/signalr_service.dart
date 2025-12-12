@@ -481,6 +481,23 @@ class SignalRService {
     }
   }
 
+  /// Leave a signaling session on the server.
+  ///
+  /// This is the proper way to disconnect from a session - it notifies
+  /// the server to clean up resources for this session.
+  ///
+  /// Optionally sends a close message first for full cleanup.
+  Future<void> leaveSession(
+    String sessionId, {
+    String? deviceId,
+    bool sendCloseFirst = true,
+  }) async {
+    if (sendCloseFirst && deviceId != null) {
+      await sendCloseMessage(sessionId, deviceId);
+    }
+    await _connectionManager?.leaveSession(sessionId);
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Player Management
   // ═══════════════════════════════════════════════════════════════════════════

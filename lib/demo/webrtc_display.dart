@@ -4,7 +4,7 @@ import 'dart:developer' as dev;
 
 import 'package:signalr/models/models.dart';
 import 'package:signalr/auth/auth.dart';
-import 'package:signalr/signalr/signalr_service.dart';
+import 'package:signalr/signalr/signalr_session_hub.dart';
 import 'package:signalr/store/favorites_store.dart';
 import 'camera_list.dart';
 
@@ -17,7 +17,7 @@ class WebRtcDisplay extends StatefulWidget {
 }
 
 class _WebRtcDisplayState extends State<WebRtcDisplay> {
-  final signalRService = SignalRService.instance;
+  final hub = SignalRSessionHub.instance;
   final authService = AuthService();
 
   bool _devicesRegistered = false;
@@ -45,7 +45,7 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
   @override
   void dispose() {
     _scrollController.dispose();
-    signalRService.closeConnection(closeAllSessions: true);
+    hub.shutdown();
     super.dispose();
   }
 
@@ -78,11 +78,11 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
       ),
     );
 
-    await signalRService.initService('https://$url/SignalingHub');
+    await hub.initialize('https://$url/SignalingHub', authService);
 
     if (!mounted) return;
     setState(() => _devicesRegistered = true);
-    dev.log('SignalR session initialized');
+    dev.log('SignalRSessionHub initialized');
   }
 
   Future<void> _loadToggles() async {
@@ -157,7 +157,7 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
           Expanded(
             child: CameraList(
               key: _cameraListKey,
-              signalRService: signalRService,
+              hub: hub,
               authService: authService,
               favoritesOnly: _favoritesOnly,
               workingOnly: _workingOnly,
@@ -197,7 +197,7 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           sliver: CameraListSliver(
             key: _cameraListKey,
-            signalRService: signalRService,
+            hub: hub,
             authService: authService,
             favoritesOnly: _favoritesOnly,
             workingOnly: _workingOnly,

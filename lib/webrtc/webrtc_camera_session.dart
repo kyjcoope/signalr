@@ -86,6 +86,20 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
   String? _lastInviteId;
+
+  // Track storage for external access (e.g., mute/unmute)
+  MediaStream? _remoteStream;
+  MediaStreamTrack? _videoTrack;
+  MediaStreamTrack? _audioTrack;
+
+  /// The remote media stream from the camera.
+  MediaStream? get remoteStream => _remoteStream;
+
+  /// The video track from the remote stream.
+  MediaStreamTrack? get videoTrack => _videoTrack;
+
+  /// The audio track from the remote stream.
+  MediaStreamTrack? get audioTrack => _audioTrack;
   Timer? _negotiationTimer;
   Timer? _connectTimeout;
   int _iceRestartAttempts = 0;
@@ -336,7 +350,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       return {
         'iceServers': tcpServers,
         'iceTransportPolicy': 'relay',
-        'iceCandidatePoolSize': 0,
+        'iceCandidatePoolSize': 2,
         'rtcpMuxPolicy': 'require',
         'sdpSemantics': 'unified-plan',
       };
@@ -346,7 +360,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     return {
       'iceServers': servers,
       'iceTransportPolicy': 'all',
-      'iceCandidatePoolSize': 0,
+      'iceCandidatePoolSize': 2,
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
     };
@@ -355,6 +369,18 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void _bindPeerConnectionHandlers(RTCPeerConnection pc) {
     pc.onTrack = (event) {
       dev.log('$_tag Track received: ${event.track.kind}');
+
+      // Store track references for external access
+      if (event.streams.isNotEmpty) {
+        _remoteStream = event.streams[0];
+      }
+      if (event.track.kind == 'video') {
+        _videoTrack = event.track;
+      } else if (event.track.kind == 'audio') {
+        _audioTrack = event.track;
+        _audioTrack?.enabled = false; // Default muted
+      }
+
       onTrack?.call(event);
     };
 
@@ -613,6 +639,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _sessionId = null;
     _lastInviteId = null;
     _iceRestartAttempts = 0;
+    _remoteStream = null;
+    _videoTrack = null;
+    _audioTrack = null;
     _cancelNegotiationTimer();
   }
 
