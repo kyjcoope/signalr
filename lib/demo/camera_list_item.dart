@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 class CameraListItem extends StatelessWidget {
   const CameraListItem({
@@ -12,7 +11,7 @@ class CameraListItem extends StatelessWidget {
     required this.isFav,
     required this.isPending,
     required this.isWorking,
-    required this.renderer,
+    required this.textureId,
     required this.onConnect,
     required this.onDisconnect,
     required this.onToggleFavorite,
@@ -27,7 +26,7 @@ class CameraListItem extends StatelessWidget {
   final bool isFav;
   final bool isPending;
   final bool isWorking;
-  final RTCVideoRenderer? renderer;
+  final int? textureId;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
   final VoidCallback onToggleFavorite;
@@ -46,7 +45,7 @@ class CameraListItem extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             compact ? _buildCompactLayout() : _buildWideLayout(),
-            if (connected && renderer != null) ...[
+            if (connected && textureId != null) ...[
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
@@ -55,12 +54,7 @@ class CameraListItem extends StatelessWidget {
                   height: compact ? (_videoHeight * 0.75) : _videoHeight,
                   child: Container(
                     color: Colors.black,
-                    child: RTCVideoView(
-                      renderer!,
-                      mirror: false,
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                    ),
+                    child: Texture(textureId: textureId!),
                   ),
                 ),
               ),

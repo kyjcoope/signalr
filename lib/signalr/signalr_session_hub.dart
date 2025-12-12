@@ -127,19 +127,22 @@ class SignalRSessionHub {
       signalRService: _signalRService,
     );
 
-    // Wire up track to renderer
-    session.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        renderer.srcObject = event.streams[0];
-        dev.log('SignalRSessionHub: Renderer srcObject set for $cameraId');
-      }
-    };
-
     activeSessions[cameraId] = session;
     await session.connect();
 
     dev.log('SignalRSessionHub: Connected to $cameraId');
     return session;
+  }
+
+  /// Set renderer source for a camera session.
+  ///
+  /// Call this when the session receives a track to wire up the renderer.
+  void setRendererSource(String cameraId, MediaStream? stream) {
+    final renderer = _renderers[cameraId];
+    if (renderer != null && stream != null) {
+      renderer.srcObject = stream;
+      dev.log('SignalRSessionHub: Renderer srcObject set for $cameraId');
+    }
   }
 
   /// Disconnect from a camera.
