@@ -1,6 +1,36 @@
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../webrtc/signaling_message.dart';
+import 'json_rpc.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Core Message Types
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// SignalR message types for internal routing.
+enum SignalRMessageType {
+  onSignalReady,
+  onSignalClosed,
+  onSignalInvite,
+  onSignalTrickle,
+  onSignalTimeout,
+  onSignalError,
+  onSignalIceServers,
+}
+
+/// SignalR message wrapper for internal routing.
+class SignalRMessage {
+  SignalRMessage({required this.method, required this.detail});
+
+  /// The message type.
+  final SignalRMessageType method;
+
+  /// The message detail/payload.
+  final dynamic detail;
+
+  @override
+  String toString() => 'SignalRMessage(method: $method, detail: $detail)';
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SignalR Method Enum
@@ -12,6 +42,7 @@ enum SignalRMethod {
   connect('connect'),
   invite('invite'),
   trickle('trickle'),
+  restart('restart'),
   error('error');
 
   const SignalRMethod(this.json);
@@ -25,13 +56,6 @@ enum SignalRMethod {
     return SignalRMethod.values.where((m) => m.json == method).firstOrNull;
   }
 }
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Base Interface
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// JSON-RPC 2.0 version constant.
-const String jsonRpcVersion = '2.0';
 
 /// Base interface for all SignalR messages.
 abstract interface class SignalRTypedMessage {
@@ -62,12 +86,11 @@ class RegisterRequest implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.register;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'method': method.json,
-    'params': {'authorization': authorization},
-    'id': id,
-  };
+  Map<String, dynamic> toJson() => JsonRpc.request(
+    method: method.json,
+    id: id,
+    params: {'authorization': authorization},
+  );
 }
 
 /// Register response from SignalR server.
@@ -105,16 +128,15 @@ class ConnectRequest implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.connect;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'method': method.json,
-    'params': {
+  Map<String, dynamic> toJson() => JsonRpc.request(
+    method: method.json,
+    id: id,
+    params: {
       'authorization': authorization,
       'peer': deviceId,
       'profile': profile,
     },
-    'id': id,
-  };
+  );
 }
 
 /// Connect response with session and ICE servers.
@@ -207,11 +229,10 @@ class InviteAnswerMessage implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.invite;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'result': {'session': session, 'answer': answerSdp.toJson()},
-    'id': id,
-  };
+  Map<String, dynamic> toJson() => JsonRpc.response(
+    id: id,
+    result: {'session': session, 'answer': answerSdp.toJson()},
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -251,10 +272,9 @@ class TrickleMessage implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.trickle;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'method': method.json,
-    'params': {
+  Map<String, dynamic> toJson() => JsonRpc.notification(
+    method: method.json,
+    params: {
       'session': session,
       'candidate': {
         'candidate': candidate.candidate,
@@ -262,7 +282,7 @@ class TrickleMessage implements SignalRTypedMessage {
         'sdpMLineIndex': candidate.sdpMLineIndex,
       },
     },
-  };
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -300,15 +320,14 @@ class ErrorMessage implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.error;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'method': method.json,
-    'params': {
+  Map<String, dynamic> toJson() => JsonRpc.notification(
+    method: method.json,
+    params: {
       'code': code,
       'message': message,
       if (session != null) 'session': session,
     },
-  };
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -326,14 +345,13 @@ class IceRestartMessage implements SignalRTypedMessage {
   String get id => '';
 
   @override
-  SignalRMethod get method => SignalRMethod.invite; // Uses invite method
+  SignalRMethod get method => SignalRMethod.restart;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'method': 'restart',
-    'params': {'session': session, 'offer': offer.toJson()},
-  };
+  Map<String, dynamic> toJson() => JsonRpc.notification(
+    method: method.json,
+    params: {'session': session, 'offer': offer.toJson()},
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -359,16 +377,15 @@ class CloseMessage implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.error;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'method': method.json,
-    'params': {
+  Map<String, dynamic> toJson() => JsonRpc.notification(
+    method: method.json,
+    params: {
       'code': code,
       'message':
           'Client $deviceId has closed its connection with the Signaling Server.',
       'session': session,
     },
-  };
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

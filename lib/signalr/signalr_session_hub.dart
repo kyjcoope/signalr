@@ -1,27 +1,32 @@
 import 'dart:async';
 import 'dart:developer' as dev;
 
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+
 import '../auth/auth.dart';
 import '../webrtc/webrtc_camera_session.dart';
 import 'signalr_service.dart';
 
 /// Singleton hub managing SignalR connection and WebRTC camera sessions.
 ///
-/// Provides session persistence across page navigation and track access
-/// for audio/video control.
+/// Provides session and renderer persistence across page navigation,
+/// track access for audio/video control, and textureId access.
 ///
 /// Usage:
 /// ```dart
 /// // Initialize once at app startup
 /// await SignalRSessionHub.instance.initialize(signalRUrl, authService);
 ///
-/// // Connect to a camera
+/// // Connect to a camera (auto-creates renderer)
 /// final session = await SignalRSessionHub.instance.connectToCamera(cameraId);
+///
+/// // Get texture ID for display
+/// final textureId = SignalRSessionHub.instance.getTextureId(cameraId);
 ///
 /// // Toggle audio
 /// SignalRSessionHub.instance.toggleAudio(cameraId, enable: true);
 ///
-/// // Disconnect
+/// // Disconnect (auto-disposes renderer)
 /// await SignalRSessionHub.instance.disconnectCamera(cameraId);
 /// ```
 class SignalRSessionHub {
@@ -48,6 +53,9 @@ class SignalRSessionHub {
 
   /// Active WebRTC sessions by camera ID.
   final Map<String, WebRtcCameraSession> activeSessions = {};
+
+  /// Active renderers by camera ID.
+  final Map<String, RTCVideoRenderer> _renderers = {};
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Getters
@@ -94,7 +102,8 @@ class SignalRSessionHub {
 
   /// Connect to a camera and return its session.
   ///
-  /// Returns existing session if already connected, otherwise creates a new one.
+  /// Automatically creates and initializes renderer. Returns existing session
+  /// if already connected.
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
     if (!_initialized || _signalRService == null) {
       dev.log('SignalRSessionHub: Not initialized');
@@ -107,11 +116,24 @@ class SignalRSessionHub {
       return activeSessions[cameraId];
     }
 
+    // Create and initialize renderer
+    final renderer = RTCVideoRenderer();
+    await renderer.initialize();
+    _renderers[cameraId] = renderer;
+
     // Create new session
     final session = WebRtcCameraSession(
       cameraId: cameraId,
       signalRService: _signalRService,
     );
+
+    // Wire up track to renderer
+    session.onTrack = (event) {
+      if (event.streams.isNotEmpty) {
+        renderer.srcObject = event.streams[0];
+        dev.log('SignalRSessionHub: Renderer srcObject set for $cameraId');
+      }
+    };
 
     activeSessions[cameraId] = session;
     await session.connect();
@@ -122,7 +144,8 @@ class SignalRSessionHub {
 
   /// Disconnect from a camera.
   ///
-  /// Properly leaves the session on the server before closing the local session.
+  /// Properly leaves the session on the server, closes the session,
+  /// and disposes the renderer.
   Future<void> disconnectCamera(String cameraId) async {
     final session = activeSessions.remove(cameraId);
     if (session != null) {
@@ -132,8 +155,16 @@ class SignalRSessionHub {
         await _signalRService?.leaveSession(sessionId, deviceId: cameraId);
       }
       await session.close();
-      dev.log('SignalRSessionHub: Disconnected $cameraId');
     }
+
+    // Dispose renderer
+    final renderer = _renderers.remove(cameraId);
+    if (renderer != null) {
+      renderer.srcObject = null;
+      await renderer.dispose();
+    }
+
+    dev.log('SignalRSessionHub: Disconnected $cameraId');
   }
 
   /// Get session for a camera (if connected).
@@ -144,6 +175,21 @@ class SignalRSessionHub {
 
   /// Get list of connected camera IDs.
   List<String> get connectedCameraIds => activeSessions.keys.toList();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Renderer Access
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Get the renderer for a camera (if connected).
+  RTCVideoRenderer? getRenderer(String cameraId) => _renderers[cameraId];
+
+  /// Get the texture ID for a camera (if connected and renderer initialized).
+  ///
+  /// This is the value needed for SetTextureId actions.
+  int? getTextureId(String cameraId) => _renderers[cameraId]?.textureId;
+
+  /// Get all active renderers.
+  Map<String, RTCVideoRenderer> get renderers => Map.unmodifiable(_renderers);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Track Control
@@ -207,6 +253,13 @@ class SignalRSessionHub {
       await session.close();
     }
     activeSessions.clear();
+
+    // Dispose all renderers
+    for (final renderer in _renderers.values) {
+      renderer.srcObject = null;
+      await renderer.dispose();
+    }
+    _renderers.clear();
 
     await _signalRService?.closeConnection(closeAllSessions: true);
     _signalRService = null;

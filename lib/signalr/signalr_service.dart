@@ -1,40 +1,20 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:developer' as dev;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../webrtc/webrtc_player.dart';
 import '../webrtc/signaling_message.dart';
-import 'json_rpc.dart';
 import 'signalr_config.dart';
 import 'signalr_connection_manager.dart';
-
-/// ICE server configuration from the signaling server.
-class IceServer {
-  IceServer({required this.urls, this.credential, this.username});
-
-  factory IceServer.fromJson(dynamic json) => IceServer(
-    urls: (json['urls'] as List?)?.map((r) => r.toString()).toList() ?? [],
-    credential: json['credential'] as String?,
-    username: json['username'] as String?,
-  );
-
-  final List<String> urls;
-  final String? credential;
-  final String? username;
-
-  Map<String, Object?> toJson() => {
-    'urls': urls,
-    if (credential != null) 'credential': credential,
-    if (username != null) 'username': username,
-  };
-}
+import 'signalr_message_router.dart';
+import 'signalr_messages.dart';
 
 /// Singleton SignalR service for WebRTC signaling.
 ///
 /// Provides a high-level API for WebRTC signaling operations,
-/// delegating connection management to [SignalRConnectionManager].
+/// delegating connection management to [SignalRConnectionManager]
+/// and message routing to [SignalRMessageRouter].
 class SignalRService {
   SignalRService._()
     : _messageController = StreamController<SignalRMessage>.broadcast();
@@ -59,12 +39,13 @@ class SignalRService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   SignalRConnectionManager? _connectionManager;
+  SignalRMessageRouter? _messageRouter;
   SignalRConfig? _config;
   bool _serviceInitialized = false;
   String _signalRClientId = '';
 
   /// ICE server configuration received from the signaling server.
-  List<IceServer> iceServers = [];
+  List<IceServerConfig> iceServers = [];
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Players & Messaging
@@ -98,20 +79,25 @@ class SignalRService {
 
   /// Initialize the SignalR service.
   Future<void> initService(String signalRServerUrl) async {
-    dev.log('SignalRService: initService: $signalRServerUrl');
-
-    if (signalRServerUrl.isEmpty) {
-      dev.log('SignalRService: initService: SignalR Server URL is empty!');
-      return;
-    }
-
     if (_serviceInitialized) {
-      dev.log('SignalRService: initService: Service already initialized!');
+      dev.log('SignalRService: Already initialized, reconnecting...');
+      await _connect();
       return;
     }
 
+    dev.log('SignalRService: Initializing with URL: $signalRServerUrl');
     _config = SignalRConfig(signalRServerUrl: signalRServerUrl);
 
+    // Create message router
+    _messageRouter = SignalRMessageRouter(
+      findPlayerBySession: findPlayerBySession,
+      findPlayerByDevice: findPlayerByDevice,
+      findPlayerForConnection: _findPlayerForConnection,
+      onIceServers: (servers) => iceServers = servers,
+      onClientId: (id) => _signalRClientId = id,
+    );
+
+    // Create connection manager
     _connectionManager = SignalRConnectionManager(
       config: _config!,
       onConnected: _onConnected,
@@ -125,27 +111,24 @@ class SignalRService {
   }
 
   Future<void> _connect() async {
-    final connected = await _connectionManager!.connect();
+    final connected = await _connectionManager?.connect() ?? false;
     if (connected) {
       _bindMessageHandlers();
-      await _sendRegisterRequest();
     }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Connection Lifecycle Callbacks
+  // Connection Callbacks
   // ═══════════════════════════════════════════════════════════════════════════
 
   void _onConnected() {
     dev.log('SignalRService: Connected');
-    _notifyPlayers(SignalRMessageType.onSignalReady, {});
+    _sendRegisterRequest();
   }
 
   void _onDisconnected(Exception? error) {
     dev.log('SignalRService: Disconnected: $error');
-    _notifyPlayers(SignalRMessageType.onSignalClosed, {
-      'error': error?.toString(),
-    });
+    _notifyPlayers(SignalRMessageType.onSignalClosed, {'error': error});
   }
 
   void _onReconnecting(Exception? error) {
@@ -154,103 +137,28 @@ class SignalRService {
 
   void _onReconnected(String? connectionId) {
     dev.log('SignalRService: Reconnected: $connectionId');
-    _notifyPlayers(SignalRMessageType.onSignalReady, {});
     _sendRegisterRequest();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Message Handlers
+  // Message Handlers - Delegated to Router
   // ═══════════════════════════════════════════════════════════════════════════
 
   void _bindMessageHandlers() {
-    _connectionManager?.on('ReceivedSignalingMessage', _handleSignalRMessage);
-    _connectionManager?.on('register', _handleDeviceSessionInfo);
-    _connectionManager?.on('devicedisconnected', _handleDeviceDisconnected);
-    _connectionManager?.on('peerdisconnected', _handlePeerDisconnected);
-    _connectionManager?.on('error', _handleError);
-  }
+    final router = _messageRouter;
+    if (router == null) return;
 
-  void _handleSignalRMessage(List<Object?>? args) {
-    if (args == null || args.isEmpty) return;
-
-    final messageStr = args[0]?.toString();
-    if (messageStr == null) return;
-
-    dev.log('SignalRService: Received: $messageStr');
-
-    try {
-      final parsed = jsonDecode(messageStr) as Map<String, dynamic>;
-
-      if (parsed.isRequest) {
-        _handleRequestMessage(parsed);
-      } else if (parsed.isResponse) {
-        _handleResponseMessage(parsed);
-      }
-    } catch (e) {
-      dev.log('SignalRService: Parse error: $e');
-    }
-  }
-
-  void _handleRequestMessage(Map<String, dynamic> message) {
-    switch (message.method) {
-      case 'invite':
-        _handleInvite(message);
-      case 'trickle':
-        _handleTrickle(message);
-      case 'error':
-        _handleSignalError(message);
-      default:
-        dev.log('SignalRService: Unknown method: ${message.method}');
-    }
-  }
-
-  void _handleResponseMessage(Map<String, dynamic> message) {
-    switch (message.id) {
-      case '1': // Register response
-        _handleRegisterResponse(message);
-      case '2': // Connect response
-        _handleConnectResponse(message);
-      default:
-        dev.log('SignalRService: Unknown response id: ${message.id}');
-    }
-  }
-
-  void _handleRegisterResponse(Map<String, dynamic> message) {
-    final id = message.resultValue<String>('id');
-    if (id != null) {
-      _signalRClientId = id;
-      dev.log('SignalRService: Registered with client ID: $id');
-    }
-  }
-
-  void _handleConnectResponse(Map<String, dynamic> message) {
-    final result = message.result;
-    if (result == null) return;
-
-    final session = result['session'] as String?;
-    final peer = result['peer'] as String?;
-
-    // Parse ICE servers
-    final iceList = result['iceServers'] as List?;
-    if (iceList != null) {
-      iceServers = iceList.map((e) => IceServer.fromJson(e)).toList();
-      dev.log('SignalRService: Received ${iceServers.length} ICE servers');
-    }
-
-    // Find and notify the player
-    final player = _findPlayerForConnection(peer);
-    if (player != null && session != null) {
-      player.sessionId = session;
-      player.onSignalRMessage(
-        SignalRMessage(
-          method: SignalRMessageType.onSignalIceServers,
-          detail: {
-            'session': session,
-            'iceServers': iceServers.map((e) => e.toJson()).toList(),
-          },
-        ),
-      );
-    }
+    _connectionManager?.on(
+      'ReceivedSignalingMessage',
+      router.handleSignalRMessage,
+    );
+    _connectionManager?.on('register', router.handleDeviceSessionInfo);
+    _connectionManager?.on(
+      'devicedisconnected',
+      router.handleDeviceDisconnected,
+    );
+    _connectionManager?.on('peerdisconnected', router.handlePeerDisconnected);
+    _connectionManager?.on('error', router.handleError);
   }
 
   VideoWebRTCPlayer? _findPlayerForConnection(String? peer) {
@@ -259,90 +167,6 @@ class SignalRService {
       if (player != null) return player;
     }
     return _players.where((p) => p.sessionId == null).firstOrNull;
-  }
-
-  void _handleInvite(Map<String, dynamic> message) {
-    final session = message.param<String>('session');
-    if (session == null) return;
-
-    dev.log('SignalRService: Invite for session: $session');
-    findPlayerBySession(session)?.onSignalRMessage(
-      SignalRMessage(
-        method: SignalRMessageType.onSignalInvite,
-        detail: message,
-      ),
-    );
-  }
-
-  void _handleTrickle(Map<String, dynamic> message) {
-    final session = message.param<String>('session');
-    if (session == null) return;
-
-    dev.log('SignalRService: Trickle for session: $session');
-    findPlayerBySession(session)?.onSignalRMessage(
-      SignalRMessage(
-        method: SignalRMessageType.onSignalTrickle,
-        detail: {
-          'session': session,
-          'candidate': message.param<Map<String, dynamic>>('candidate'),
-        },
-      ),
-    );
-  }
-
-  void _handleSignalError(Map<String, dynamic> message) {
-    final session = message.param<String>('session');
-    if (session != null) {
-      findPlayerBySession(session)?.onSignalRMessage(
-        SignalRMessage(
-          method: SignalRMessageType.onSignalError,
-          detail: message,
-        ),
-      );
-    }
-  }
-
-  void _handleDeviceSessionInfo(List<Object?>? args) {
-    dev.log('SignalRService: Device session info: $args');
-  }
-
-  void _handleDeviceDisconnected(List<Object?>? args) {
-    dev.log('SignalRService: Device disconnected: $args');
-    // Notify all players that a device has disconnected
-    // The device ID is typically passed as the first argument
-    final deviceId = args?.firstOrNull?.toString();
-    if (deviceId != null) {
-      final player = findPlayerByDevice(deviceId);
-      if (player != null) {
-        player.onSignalRMessage(
-          SignalRMessage(
-            method: SignalRMessageType.onSignalClosed,
-            detail: {'device': deviceId, 'reason': 'device_disconnected'},
-          ),
-        );
-      }
-    }
-  }
-
-  void _handlePeerDisconnected(List<Object?>? args) {
-    dev.log('SignalRService: Peer disconnected: $args');
-    final session = args?.firstOrNull?.toString();
-    if (session != null) {
-      final player = findPlayerBySession(session);
-      if (player != null) {
-        dev.log('SignalRService: Notifying player of peer disconnection');
-        player.onSignalRMessage(
-          SignalRMessage(
-            method: SignalRMessageType.onSignalClosed,
-            detail: {'session': session, 'reason': 'peer_disconnected'},
-          ),
-        );
-      }
-    }
-  }
-
-  void _handleError(List<Object?>? args) {
-    dev.log('SignalRService: Error: $args');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -363,74 +187,47 @@ class SignalRService {
   }
 
   Future<void> _sendRegisterRequest() async {
-    final message = JsonRpc.request(
-      method: 'register',
-      id: '1',
-      params: {'authorization': ''},
-    );
-    await _sendMessage(message);
+    final message = RegisterRequest(authorization: '');
+    await _sendMessage(message.toJson());
   }
 
   /// Connect to a camera device.
-  Future<void> connectConsumerSession(String deviceId) async {
-    dev.log('SignalRService: Connecting to device: $deviceId');
-
-    final message = JsonRpc.request(
-      method: 'connect',
-      id: '2',
-      params: {'authorization': '', 'peer': deviceId, 'profile': ''},
-    );
-    await _sendMessage(message);
+  Future<bool> connectConsumerSession(String deviceId) async {
+    final message = ConnectRequest(deviceId: deviceId);
+    await _sendMessage(message.toJson());
+    return true;
   }
 
   /// Send an SDP answer for an invite.
-  Future<bool> sendSignalInviteMessage(
+  Future<void> sendSignalInviteMessage(
     String sessionId,
     SdpWrapper sdp,
     String messageId,
   ) async {
-    dev.log('SignalRService: Sending invite answer for session: $sessionId');
+    dev.log('SignalRService: Sending SDP answer for session: $sessionId');
+    dev.log('SignalRService: Message ID: $messageId');
 
-    if (!isPeerReady) return false;
+    final message = InviteAnswerMessage(
+      session: sessionId,
+      answerSdp: sdp,
+      id: messageId,
+    );
 
-    try {
-      final message = JsonRpc.response(
-        id: messageId,
-        result: {'session': sessionId, 'answer': sdp.toJson()},
-      );
-      await _connectionManager?.invoke('SendMessage', args: [message]);
-      return true;
-    } catch (e) {
-      dev.log('SignalRService: Send invite error: $e');
-      return false;
-    }
+    await _sendMessage(message.toJson());
+    dev.log('SignalRService: SDP answer sent');
   }
 
   /// Send an ICE candidate.
-  Future<bool> sendSignalTrickleMessage(
+  Future<void> sendSignalTrickleMessage(
     String sessionId,
     RTCIceCandidate candidate,
   ) async {
-    if (!isPeerReady) return false;
+    dev.log(
+      'SignalRService: Sending ICE candidate for session: $sessionId, mid=${candidate.sdpMid}',
+    );
 
-    try {
-      final message = JsonRpc.notification(
-        method: 'trickle',
-        params: {
-          'session': sessionId,
-          'candidate': {
-            'candidate': candidate.candidate,
-            'sdpMid': candidate.sdpMid,
-            'sdpMLineIndex': candidate.sdpMLineIndex,
-          },
-        },
-      );
-      await _connectionManager?.invoke('SendMessage', args: [message]);
-      return true;
-    } catch (e) {
-      dev.log('SignalRService: Send trickle error: $e');
-      return false;
-    }
+    final message = TrickleMessage(session: sessionId, candidate: candidate);
+    await _sendMessage(message.toJson());
   }
 
   /// Send an ICE restart offer.
@@ -444,14 +241,11 @@ class SignalRService {
     if (!isPeerReady) return false;
 
     try {
-      final message = JsonRpc.notification(
-        method: 'restart',
-        params: {'session': sessionId, 'offer': offer.toJson()},
-      );
-      await _connectionManager?.invoke('SendMessage', args: [message]);
+      final message = IceRestartMessage(session: sessionId, offer: offer);
+      await _sendMessage(message.toJson());
       return true;
     } catch (e) {
-      dev.log('SignalRService: Send ICE restart error: $e');
+      dev.log('SignalRService: ICE restart error: $e');
       return false;
     }
   }
@@ -466,16 +260,8 @@ class SignalRService {
     if (!isPeerReady) return;
 
     try {
-      final message = JsonRpc.notification(
-        method: 'error',
-        params: {
-          'code': 1002,
-          'message':
-              'Client $deviceId has closed its connection with the Signaling Server.',
-          'session': sessionId,
-        },
-      );
-      await _connectionManager?.invoke('SendMessage', args: [message]);
+      final message = CloseMessage(session: sessionId, deviceId: deviceId);
+      await _connectionManager?.invoke('SendMessage', args: [message.toJson()]);
     } catch (e) {
       dev.log('SignalRService: Send close message error: $e');
     }
@@ -557,6 +343,7 @@ class SignalRService {
     await _connectionManager?.dispose();
     if (closeAllSessions) {
       _connectionManager = null;
+      _messageRouter = null;
     }
   }
 }

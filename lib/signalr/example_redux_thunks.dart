@@ -53,6 +53,7 @@ Future<void> _handleConnect(dynamic store, String cameraId) async {
   final guid = getCameraGUID(store.state, cameraId);
   Logger().info('Connecting to camera $cameraId');
 
+  // Hub now auto-creates renderer in connectToCamera()
   final session = await SignalRSessionHub.instance.connectToCamera(guid);
   if (session == null) return;
 
@@ -64,9 +65,9 @@ Future<void> _handleConnect(dynamic store, String cameraId) async {
     );
 
     if (event.track.kind == 'video' && event.streams.isNotEmpty) {
-      // Video track - the session now stores it automatically
-      // Get texture ID from your renderer setup
-      // final textureId = session.renderer?.textureId;
+      // Get texture ID from hub (renderer is managed by hub now)
+      final textureId = SignalRSessionHub.instance.getTextureId(guid);
+      Logger().info('Texture ID for $cameraId: $textureId');
       // store.dispatch(SetTextureId(slug: cameraId, textureId: textureId));
     } else if (event.track.kind == 'audio') {
       // Audio track - session stores it, default muted
