@@ -8,6 +8,7 @@ import '../signalr/signalr_messages.dart';
 import '../signalr/signalr_service.dart';
 import 'codec_detector.dart';
 import 'ice_candidate_manager.dart';
+import 'peer_connection_factory.dart';
 import 'session_state.dart';
 import 'webrtc_player.dart';
 import 'sdp_utils.dart';
@@ -307,9 +308,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     dev.log('$_tag Session closed');
   }
 
-  /// Dispose of resources.
-  Future<void> dispose() => close();
-
   /// Enable or disable detailed logging.
   void setLoggingEnabled(bool enabled) {
     enableDetailedLogging = enabled;
@@ -332,39 +330,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   Map<String, dynamic> _buildConfig() {
-    final servers = _signalRService.iceServers.map((e) => e.toJson()).toList();
-
-    if (turnTcpOnly) {
-      // Filter to TCP-only TURN servers
-      final tcpServers = servers
-          .map((s) {
-            final urls = (s['urls'] is List ? s['urls'] : [s['urls']]) as List;
-            final tcpUrls = urls.where((u) {
-              final str = u.toString().toLowerCase();
-              return str.startsWith('turns:') || str.contains('transport=tcp');
-            }).toList();
-            return {...s, 'urls': tcpUrls};
-          })
-          .where((s) => (s['urls'] as List).isNotEmpty)
-          .toList();
-
-      return {
-        'iceServers': tcpServers,
-        'iceTransportPolicy': 'relay',
-        'iceCandidatePoolSize': 2,
-        'rtcpMuxPolicy': 'require',
-        'sdpSemantics': 'unified-plan',
-      };
-    }
-
-    servers.insert(0, {'urls': 'stun:stun.l.google.com:19302'});
-    return {
-      'iceServers': servers,
-      'iceTransportPolicy': 'all',
-      'iceCandidatePoolSize': 2,
-      'rtcpMuxPolicy': 'require',
-      'sdpSemantics': 'unified-plan',
-    };
+    return PeerConnectionFactory.buildConfig(
+      iceServers: _signalRService.iceServers,
+      turnTcpOnly: turnTcpOnly,
+      iceCandidatePoolSize: 2,
+    );
   }
 
   void _bindPeerConnectionHandlers(RTCPeerConnection pc) {
