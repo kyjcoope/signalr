@@ -353,8 +353,9 @@ class CameraListState extends State<StatefulWidget> {
 
   Widget _buildCameraItem(String cameraId, bool compact) {
     final connected = _hub.isConnected(cameraId);
-    // Get textureId from hub
+    // Get textureId and renderer from hub
     final textureId = _hub.getTextureId(cameraId);
+    final renderer = _hub.getRenderer(cameraId);
     final isFav = _favorites.contains(cameraId);
     final device = _auth.devices[cameraId];
     final name = device?.name ?? 'Unknown Camera';
@@ -372,6 +373,7 @@ class CameraListState extends State<StatefulWidget> {
       isPending: _pending.contains(cameraId),
       isWorking: _working.contains(cameraId) && connected,
       textureId: textureId,
+      renderer: renderer,
       onConnect: () => _connect(cameraId),
       onDisconnect: () => _disconnect(cameraId),
       onToggleFavorite: () => _toggleFavorite(cameraId),

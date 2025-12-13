@@ -127,7 +127,7 @@ class SignalRSessionHub {
       signalRService: _signalRService,
     );
 
-    // Automatically wire renderer to receive tracks
+    // Wire renderer to receive tracks
     session.onTrack = (event) {
       if (event.streams.isNotEmpty) {
         renderer.srcObject = event.streams[0];

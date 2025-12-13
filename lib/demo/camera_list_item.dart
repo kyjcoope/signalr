@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 class CameraListItem extends StatelessWidget {
   const CameraListItem({
@@ -12,6 +14,7 @@ class CameraListItem extends StatelessWidget {
     required this.isPending,
     required this.isWorking,
     required this.textureId,
+    required this.renderer,
     required this.onConnect,
     required this.onDisconnect,
     required this.onToggleFavorite,
@@ -27,6 +30,7 @@ class CameraListItem extends StatelessWidget {
   final bool isPending;
   final bool isWorking;
   final int? textureId;
+  final RTCVideoRenderer? renderer;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
   final VoidCallback onToggleFavorite;
@@ -45,7 +49,7 @@ class CameraListItem extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             compact ? _buildCompactLayout() : _buildWideLayout(),
-            if (connected && textureId != null) ...[
+            if (connected && _hasVideo) ...[
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
@@ -53,14 +57,7 @@ class CameraListItem extends StatelessWidget {
                   width: compact ? double.infinity : _videoWidth,
                   height: compact ? (_videoHeight * 0.75) : _videoHeight,
                   color: Colors.black,
-                  child: FittedBox(
-                    fit: BoxFit.contain,
-                    child: SizedBox(
-                      width: 16,
-                      height: 9,
-                      child: Texture(textureId: textureId!),
-                    ),
-                  ),
+                  child: _buildVideoWidget(),
                 ),
               ),
             ],
@@ -68,6 +65,29 @@ class CameraListItem extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  bool get _hasVideo => kIsWeb ? renderer != null : textureId != null;
+
+  Widget _buildVideoWidget() {
+    if (kIsWeb) {
+      // Web: use RTCVideoView which internally uses HtmlElementView
+      return RTCVideoView(
+        renderer!,
+        mirror: false,
+        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+      );
+    } else {
+      // Native: use Texture widget with aspect ratio preservation
+      return FittedBox(
+        fit: BoxFit.contain,
+        child: SizedBox(
+          width: 16,
+          height: 9,
+          child: Texture(textureId: textureId!),
+        ),
+      );
+    }
   }
 
   Widget _buildWideLayout() {
