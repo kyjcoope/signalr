@@ -69,12 +69,25 @@ abstract interface class SignalRTypedMessage {
   Map<String, dynamic> toJson();
 }
 
+/// Abstract base class for JSON-RPC request messages.
+///
+/// Subclasses only need to define [method], [id], and [params].
+/// The [toJson] method is automatically provided.
+abstract class JsonRpcRequest implements SignalRTypedMessage {
+  /// The request params.
+  Map<String, dynamic> get params;
+
+  @override
+  Map<String, dynamic> toJson() =>
+      JsonRpc.request(method: method.json, id: id, params: params);
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Register Messages
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Register request sent to SignalR server.
-class RegisterRequest implements SignalRTypedMessage {
+class RegisterRequest extends JsonRpcRequest {
   RegisterRequest({required this.authorization, this.id = '1'});
 
   final String authorization;
@@ -86,11 +99,7 @@ class RegisterRequest implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.register;
 
   @override
-  Map<String, dynamic> toJson() => JsonRpc.request(
-    method: method.json,
-    id: id,
-    params: {'authorization': authorization},
-  );
+  Map<String, dynamic> get params => {'authorization': authorization};
 }
 
 /// Register response from SignalR server.
@@ -109,7 +118,7 @@ class RegisterResponse {
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Connect request to start a camera session.
-class ConnectRequest implements SignalRTypedMessage {
+class ConnectRequest extends JsonRpcRequest {
   ConnectRequest({
     required this.deviceId,
     this.authorization = '',
@@ -128,15 +137,11 @@ class ConnectRequest implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.connect;
 
   @override
-  Map<String, dynamic> toJson() => JsonRpc.request(
-    method: method.json,
-    id: id,
-    params: {
-      'authorization': authorization,
-      'peer': deviceId,
-      'profile': profile,
-    },
-  );
+  Map<String, dynamic> get params => {
+    'authorization': authorization,
+    'peer': deviceId,
+    'profile': profile,
+  };
 }
 
 /// Connect response with session and ICE servers.

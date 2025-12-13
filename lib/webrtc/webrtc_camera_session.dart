@@ -10,6 +10,7 @@ import 'codec_detector.dart';
 import 'ice_candidate_manager.dart';
 import 'peer_connection_factory.dart';
 import 'session_state.dart';
+import 'session_timers.dart';
 import 'webrtc_player.dart';
 import 'sdp_utils.dart';
 import 'signaling_message.dart';
@@ -102,12 +103,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// The audio track from the remote stream.
   MediaStreamTrack? get audioTrack => _audioTrack;
-  Timer? _negotiationTimer;
-  Timer? _connectTimeout;
   int _iceRestartAttempts = 0;
 
-  /// Timeout for the connect phase (waiting for session/ICE servers).
-  static const Duration _connectPhaseTimeout = Duration(seconds: 15);
+  late final SessionTimers _timers;
 
   late final IceCandidateManager _iceManager;
   late final CodecDetector _codecDetector;
@@ -154,6 +152,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _codecDetector = CodecDetector(
       tag: _tag,
       onCodecResolved: (codec) => onVideoCodecResolved?.call(codec),
+    );
+
+    _timers = SessionTimers(
+      tag: _tag,
+      negotiationDuration: negotiationTimeout,
+      onNegotiationTimeout: () => _setState(SessionConnectionState.failed),
+      onConnectTimeout: () {
+        _signalRService.unregisterPlayer(this);
+        _setState(SessionConnectionState.failed);
+      },
     );
   }
 
@@ -412,36 +420,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     }
   }
 
-  void _startNegotiationTimer() {
-    _cancelNegotiationTimer();
-    _negotiationTimer = Timer(negotiationTimeout, () {
-      dev.log('$_tag ❌ Negotiation timeout');
-      _setState(SessionConnectionState.failed);
-    });
-  }
+  void _startNegotiationTimer() => _timers.startNegotiation();
 
-  void _cancelNegotiationTimer() {
-    _negotiationTimer?.cancel();
-    _negotiationTimer = null;
-  }
+  void _cancelNegotiationTimer() => _timers.cancelNegotiation();
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Connect Phase Timeout
   // ═══════════════════════════════════════════════════════════════════════════
 
-  void _startConnectTimeout() {
-    _cancelConnectTimeout();
-    _connectTimeout = Timer(_connectPhaseTimeout, () {
-      dev.log('$_tag ⏰ Connect phase timeout - no session received');
-      _signalRService.unregisterPlayer(this);
-      _setState(SessionConnectionState.failed);
-    });
-  }
+  void _startConnectTimeout() => _timers.startConnect();
 
-  void _cancelConnectTimeout() {
-    _connectTimeout?.cancel();
-    _connectTimeout = null;
-  }
+  void _cancelConnectTimeout() => _timers.cancelConnect();
 
   // ═══════════════════════════════════════════════════════════════════════════
   // WebRTC Event Handlers

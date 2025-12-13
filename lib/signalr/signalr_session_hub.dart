@@ -201,37 +201,29 @@ class SignalRSessionHub {
   /// Toggle audio track for a camera.
   ///
   /// Returns the new enabled state, or null if no audio track exists.
-  bool? toggleAudio(String cameraId, {bool? enable}) {
-    final session = activeSessions[cameraId];
-    final audioTrack = session?.audioTrack;
-    if (audioTrack == null) {
-      dev.log('SignalRSessionHub: No audio track for $cameraId');
-      return null;
-    }
-
-    final newEnabled = enable ?? !audioTrack.enabled;
-    audioTrack.enabled = newEnabled;
-    dev.log(
-      'SignalRSessionHub: Audio ${newEnabled ? "enabled" : "disabled"} for $cameraId',
-    );
-    return newEnabled;
-  }
+  bool? toggleAudio(String cameraId, {bool? enable}) =>
+      _toggleTrack(cameraId, isAudio: true, enable: enable);
 
   /// Toggle video track for a camera.
   ///
   /// Returns the new enabled state, or null if no video track exists.
-  bool? toggleVideo(String cameraId, {bool? enable}) {
+  bool? toggleVideo(String cameraId, {bool? enable}) =>
+      _toggleTrack(cameraId, isAudio: false, enable: enable);
+
+  bool? _toggleTrack(String cameraId, {required bool isAudio, bool? enable}) {
     final session = activeSessions[cameraId];
-    final videoTrack = session?.videoTrack;
-    if (videoTrack == null) {
-      dev.log('SignalRSessionHub: No video track for $cameraId');
+    final track = isAudio ? session?.audioTrack : session?.videoTrack;
+    final trackType = isAudio ? 'audio' : 'video';
+
+    if (track == null) {
+      dev.log('SignalRSessionHub: No $trackType track for $cameraId');
       return null;
     }
 
-    final newEnabled = enable ?? !videoTrack.enabled;
-    videoTrack.enabled = newEnabled;
+    final newEnabled = enable ?? !track.enabled;
+    track.enabled = newEnabled;
     dev.log(
-      'SignalRSessionHub: Video ${newEnabled ? "enabled" : "disabled"} for $cameraId',
+      'SignalRSessionHub: ${trackType.substring(0, 1).toUpperCase()}${trackType.substring(1)} ${newEnabled ? "enabled" : "disabled"} for $cameraId',
     );
     return newEnabled;
   }
