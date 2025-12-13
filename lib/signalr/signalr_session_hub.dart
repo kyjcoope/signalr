@@ -102,8 +102,8 @@ class SignalRSessionHub {
 
   /// Connect to a camera and return its session.
   ///
-  /// Automatically creates and initializes renderer. Returns existing session
-  /// if already connected.
+  /// Automatically creates and initializes renderer, and wires it to receive
+  /// tracks. Returns existing session if already connected.
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
     if (!_initialized || _signalRService == null) {
       dev.log('SignalRSessionHub: Not initialized');
@@ -127,22 +127,19 @@ class SignalRSessionHub {
       signalRService: _signalRService,
     );
 
+    // Automatically wire renderer to receive tracks
+    session.onTrack = (event) {
+      if (event.streams.isNotEmpty) {
+        renderer.srcObject = event.streams[0];
+        dev.log('SignalRSessionHub: Renderer srcObject set for $cameraId');
+      }
+    };
+
     activeSessions[cameraId] = session;
     await session.connect();
 
     dev.log('SignalRSessionHub: Connected to $cameraId');
     return session;
-  }
-
-  /// Set renderer source for a camera session.
-  ///
-  /// Call this when the session receives a track to wire up the renderer.
-  void setRendererSource(String cameraId, MediaStream? stream) {
-    final renderer = _renderers[cameraId];
-    if (renderer != null && stream != null) {
-      renderer.srcObject = stream;
-      dev.log('SignalRSessionHub: Renderer srcObject set for $cameraId');
-    }
   }
 
   /// Disconnect from a camera.

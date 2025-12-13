@@ -49,12 +49,17 @@ class CameraListItem extends StatelessWidget {
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
-                child: SizedBox(
+                child: Container(
                   width: compact ? double.infinity : _videoWidth,
                   height: compact ? (_videoHeight * 0.75) : _videoHeight,
-                  child: Container(
-                    color: Colors.black,
-                    child: Texture(textureId: textureId!),
+                  color: Colors.black,
+                  child: FittedBox(
+                    fit: BoxFit.contain,
+                    child: SizedBox(
+                      width: 16,
+                      height: 9,
+                      child: Texture(textureId: textureId!),
+                    ),
                   ),
                 ),
               ),

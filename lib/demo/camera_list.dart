@@ -209,21 +209,14 @@ class CameraListState extends State<StatefulWidget> {
     dev.log('Connecting $cameraId...');
 
     // Connect via hub - session AND renderer are managed there
+    // Hub automatically wires renderer.srcObject in its own onTrack callback
     final session = await _hub.connectToCamera(cameraId);
     if (session == null) {
       dev.log('Failed to connect to $cameraId');
       return;
     }
 
-    // Set up callbacks
-    session.onTrack = (event) {
-      if (event.streams.isEmpty) return;
-      // Wire up renderer source through hub
-      _hub.setRendererSource(cameraId, event.streams[0]);
-      // Trigger rebuild to show the textureId
-      setState(() {});
-    };
-
+    // Set up UI callbacks (these don't override hub's internal wiring)
     session.onLocalIceCandidate = () {
       if (!_pending.contains(cameraId) && !_working.contains(cameraId)) {
         setState(() => _pending.add(cameraId));
@@ -360,7 +353,7 @@ class CameraListState extends State<StatefulWidget> {
 
   Widget _buildCameraItem(String cameraId, bool compact) {
     final connected = _hub.isConnected(cameraId);
-    // Get textureId from hub instead of local renderer
+    // Get textureId from hub
     final textureId = _hub.getTextureId(cameraId);
     final isFav = _favorites.contains(cameraId);
     final device = _auth.devices[cameraId];
