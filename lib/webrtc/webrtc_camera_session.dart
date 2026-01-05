@@ -200,7 +200,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     }
   }
 
-  void _handleIceServers(dynamic detail) {
+  Future<void> _handleIceServers(dynamic detail) async {
     // Clear the connect timeout - we received a response
     _cancelConnectTimeout();
 
@@ -209,7 +209,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _sessionId = session;
       dev.log('$_tag Session started: $_sessionId');
       _setState(SessionConnectionState.initializingPeer);
-      _initializePeerConnection();
+      await _initializePeerConnection();
+      dev.log('$_tag Peer connection ready, awaiting invite');
     }
   }
 
@@ -335,6 +336,19 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     final pc = await createPeerConnection(_buildConfig());
     _bindPeerConnectionHandlers(pc);
     _peerConnection = pc;
+
+    // Add transceivers for audio and video.
+    // Some cameras expect audio transceiver even for video-only streams.
+    // This fixes "bundle" issues where cameras fail without audio m-line.
+    await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    dev.log('$_tag Added audio and video transceivers');
   }
 
   Map<String, dynamic> _buildConfig() {
@@ -403,10 +417,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         _codecDetector.extractFromSdp(finalAnswer!.sdp!);
       }
 
+      // Apply DTLS active role and H264 fixes to the answer SDP.
+      // This forces Flutter to initiate DTLS handshake, fixing deadlocks
+      // with IoT cameras that expect the client to send ClientHello first.
+      final fixedSdp = finalAnswer!.sdp!.withAnswerFixes;
+      dev.log('$_tag Applied answer fixes (DTLS active role)');
+
       _setState(SessionConnectionState.sendingAnswer);
       await _signalRService.sendSignalInviteMessage(
         _sessionId!,
-        SdpWrapper(type: finalAnswer!.type!, sdp: finalAnswer.sdp!),
+        SdpWrapper(type: finalAnswer.type!, sdp: fixedSdp),
         _lastInviteId ?? '',
       );
 

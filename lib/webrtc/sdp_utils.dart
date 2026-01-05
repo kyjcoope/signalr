@@ -101,6 +101,32 @@ extension SdpUtils on String {
     }
     return this;
   }
+
+  /// Force DTLS active role in the answer SDP.
+  ///
+  /// This fixes "hanging DTLS" where both sides wait for the other to send
+  /// ClientHello. By forcing 'active', Flutter will initiate the handshake.
+  ///
+  /// Only apply this to ANSWER SDPs, not offers.
+  String get withDtlsActiveRole {
+    // Replace actpass with active to force Flutter to be the DTLS client
+    // This is critical for IoT cameras that expect the client to initiate
+    return replaceAll('a=setup:actpass', 'a=setup:active');
+  }
+
+  /// Apply all answer-specific compatibility fixes.
+  ///
+  /// Use this for local answer SDP before sending to remote peer.
+  String get withAnswerFixes {
+    var sdp = this;
+    // Force active DTLS role
+    sdp = sdp.withDtlsActiveRole;
+    // Apply H264 fixes if needed
+    if (sdp.containsH264) {
+      sdp = sdp.withH264ProfileFix;
+    }
+    return sdp;
+  }
 }
 
 /// Resolve a mid from either the provided sdpMid or the mline index.
