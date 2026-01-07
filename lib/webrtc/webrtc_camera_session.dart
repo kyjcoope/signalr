@@ -352,11 +352,30 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   Map<String, dynamic> _buildConfig() {
-    return PeerConnectionFactory.buildConfig(
+    // DEBUG: Log ICE servers before building config
+    dev.log('$_tag 🔍 ICE servers count: ${_signalRService.iceServers.length}');
+    for (final server in _signalRService.iceServers) {
+      final hasCredentials =
+          server.credential != null && server.username != null;
+      dev.log(
+        '$_tag 🔍 ICE server: urls=${server.urls.length}, hasCredentials=$hasCredentials',
+      );
+      if (hasCredentials) {
+        dev.log(
+          '$_tag 🔍   credential=${server.credential?.substring(0, 8)}..., username=${server.username?.substring(0, 10)}...',
+        );
+      }
+    }
+
+    final config = PeerConnectionFactory.buildConfig(
       iceServers: _signalRService.iceServers,
       turnTcpOnly: turnTcpOnly,
       iceCandidatePoolSize: 2,
     );
+
+    // DEBUG: Log final config
+    dev.log('$_tag 🔍 Final ICE config: $config');
+    return config;
   }
 
   void _bindPeerConnectionHandlers(RTCPeerConnection pc) {

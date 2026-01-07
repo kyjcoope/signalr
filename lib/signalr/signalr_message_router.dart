@@ -160,6 +160,19 @@ class SignalRMessageRouter {
     if (iceList != null) {
       final servers = iceList.map((e) => IceServerConfig.fromJson(e)).toList();
       dev.log('SignalRMessageRouter: Received ${servers.length} ICE servers');
+      // DEBUG: Log credential details
+      for (int i = 0; i < servers.length; i++) {
+        final s = servers[i];
+        final hasCredentials = s.credential != null && s.username != null;
+        dev.log(
+          'SignalRMessageRouter: 🔍 Server[$i] urls=${s.urls.length}, hasCredentials=$hasCredentials',
+        );
+        if (hasCredentials) {
+          dev.log(
+            'SignalRMessageRouter: 🔍   credential=${s.credential?.substring(0, 8)}..., username=${s.username?.substring(0, 10)}...',
+          );
+        }
+      }
       onIceServers?.call(servers);
 
       // Notify the player
