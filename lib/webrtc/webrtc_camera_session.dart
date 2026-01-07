@@ -105,6 +105,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   MediaStreamTrack? get audioTrack => _audioTrack;
   int _iceRestartAttempts = 0;
 
+  // Encoded frame bypass support
+  StreamSubscription? _frameSubscription;
+  int _frameCount = 0;
+
+  /// Callback for encoded video frames (if using encoded frame bypass)
+  void Function(EncodedVideoFrame)? onEncodedFrame;
+
+  /// Number of encoded frames received
+  int get frameCount => _frameCount;
+
   late final SessionTimers _timers;
 
   late final IceCandidateManager _iceManager;
@@ -305,6 +315,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _codecDetector.dispose();
     _iceManager.reset();
 
+    // Cancel encoded frame subscription
+    await _frameSubscription?.cancel();
+    _frameSubscription = null;
+    _frameCount = 0;
+
     await _cleanupDataChannel();
     await _cleanupPeerConnection();
     _resetState();
@@ -394,6 +409,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       }
 
       onTrack?.call(event);
+
+      // Subscribe to encoded frame stream (for encoded frame bypass)
+      if (event.track.kind == 'video') {
+        _subscribeToEncodedFrames(event.track.id!);
+      }
     };
 
     pc.onIceConnectionState = _handleIceConnectionState;
@@ -598,6 +618,41 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     } catch (e) {
       dev.log('$_tag ICE restart failed: $e');
       _setState(SessionConnectionState.failed);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Encoded Frame Bypass
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Subscribe to encoded video frames from the native ring buffer.
+  Future<void> _subscribeToEncodedFrames(String trackId) async {
+    try {
+      dev.log('$_tag Subscribing to encoded frames for track: $trackId');
+      final frameStream = await WebRTCMediaStreamer().videoFramesFrom(trackId);
+
+      _frameSubscription = frameStream.listen(
+        (frame) {
+          _frameCount++;
+
+          // Log periodically (every 30 frames ~ 1 second at 30fps)
+          if (_frameCount % 30 == 1) {
+            dev.log(
+              '$_tag Encoded frames: $_frameCount (${frame.width}x${frame.height})',
+            );
+          }
+
+          // Invoke callback if set
+          onEncodedFrame?.call(frame);
+        },
+        onError: (e) {
+          dev.log('$_tag Frame stream error: $e');
+        },
+      );
+
+      dev.log('$_tag Frame stream subscription active');
+    } catch (e) {
+      dev.log('$_tag Failed to subscribe to encoded frames: $e');
     }
   }
 
