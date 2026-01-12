@@ -213,8 +213,18 @@ class SignalRService {
       id: messageId,
     );
 
-    await _sendMessage(message.toJson());
-    dev.log('SignalRService: SDP answer sent');
+    final jsonPayload = message.toJson();
+    dev.log('SignalRService: 📤 SDP ANSWER PAYLOAD:');
+    dev.log('SignalRService:   session: $sessionId');
+    dev.log('SignalRService:   id: $messageId');
+    dev.log('SignalRService:   answer.type: ${sdp.type}');
+    dev.log(
+      'SignalRService:   answer.sdp (first 500 chars): ${sdp.sdp.substring(0, sdp.sdp.length > 500 ? 500 : sdp.sdp.length)}',
+    );
+    dev.log('SignalRService:   Full JSON: $jsonPayload');
+
+    await _sendMessage(jsonPayload);
+    dev.log('SignalRService: ✅ SDP answer sent successfully');
   }
 
   /// Send an ICE candidate.
