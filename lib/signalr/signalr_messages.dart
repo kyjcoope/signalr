@@ -234,13 +234,10 @@ class InviteAnswerMessage implements SignalRTypedMessage {
   SignalRMethod get method => SignalRMethod.invite;
 
   @override
-  Map<String, dynamic> toJson() => {
-    'jsonrpc': jsonRpcVersion,
-    'method': method.json, // Backend expects "invite" method
-    'id': id,
-    'result': {'session': session, 'answer': answerSdp.toJson()},
-    'clientAnswerSent': DateTime.now().millisecondsSinceEpoch,
-  };
+  Map<String, dynamic> toJson() => JsonRpc.response(
+    id: id,
+    result: {'session': session, 'answer': answerSdp.toJson()},
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
