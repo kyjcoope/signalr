@@ -127,6 +127,59 @@ extension SdpUtils on String {
     }
     return sdp;
   }
+
+  /// Extract the video track ID from the SDP.
+  ///
+  /// Looks for `a=msid:<stream_id> <track_id>` or `a=ssrc:<ssrc> msid:<stream_id> <track_id>`.
+  String? get videoTrackId {
+    // 1. Try a=msid at media level
+    final sections = split(RegExp(r'\r?\nm='));
+    for (final raw in sections) {
+      final sec = raw.startsWith('m=') ? raw : 'm=$raw';
+      if (!sec.startsWith(RegExp(r'm=video'))) continue;
+
+      // Check for a=msid line
+      final msidMatch = RegExp(r'a=msid:\S+ (\S+)').firstMatch(sec);
+      if (msidMatch != null) {
+        return msidMatch.group(1);
+      }
+
+      // Check for a=ssrc msid line
+      final ssrcMatch = RegExp(r'a=ssrc:\d+ msid:\S+ (\S+)').firstMatch(sec);
+      if (ssrcMatch != null) {
+        return ssrcMatch.group(1);
+      }
+    }
+    return null;
+  }
+
+  /// Inject a parameter into the a=fmtp line for the video codec.
+  ///
+  /// Used to pass custom data (like x-track-id) to the native decoder factory.
+  String addFmtpParam(String param, String value) {
+    var sdp = this;
+    // Find the primary video payload type (usually 96 or similar)
+    // We'll just target all H264 fmtp lines for robustness
+    final h264Ids = RegExp(
+      r'a=rtpmap:(\d+) H264',
+    ).allMatches(sdp).map((m) => m.group(1)).toSet();
+
+    for (final pt in h264Ids) {
+      if (!sdp.contains('a=fmtp:$pt')) {
+        // If no fmtp line exists, this is rare for H264 but possible.
+        // We might want to add one, but for now let's skip to avoid breaking things.
+        continue;
+      }
+
+      // Append strictly if not already present
+      sdp = sdp.replaceAllMapped(RegExp('a=fmtp:$pt (.*)'), (match) {
+        final current = match.group(1)!;
+        if (current.contains('$param=')) return match.group(0)!;
+        return 'a=fmtp:$pt $current;$param=$value';
+      });
+    }
+    return sdp;
+  }
 }
 
 /// Resolve a mid from either the provided sdpMid or the mline index.

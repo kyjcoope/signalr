@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:developer' as dev;
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../auth/auth.dart';
@@ -8,27 +10,6 @@ import '../webrtc/webrtc_camera_session.dart';
 import 'signalr_service.dart';
 
 /// Singleton hub managing SignalR connection and WebRTC camera sessions.
-///
-/// Provides session and renderer persistence across page navigation,
-/// track access for audio/video control, and textureId access.
-///
-/// Usage:
-/// ```dart
-/// // Initialize once at app startup
-/// await SignalRSessionHub.instance.initialize(signalRUrl, authService);
-///
-/// // Connect to a camera (auto-creates renderer)
-/// final session = await SignalRSessionHub.instance.connectToCamera(cameraId);
-///
-/// // Get texture ID for display
-/// final textureId = SignalRSessionHub.instance.getTextureId(cameraId);
-///
-/// // Toggle audio
-/// SignalRSessionHub.instance.toggleAudio(cameraId, enable: true);
-///
-/// // Disconnect (auto-disposes renderer)
-/// await SignalRSessionHub.instance.disconnectCamera(cameraId);
-/// ```
 class SignalRSessionHub {
   SignalRSessionHub._();
 
@@ -54,32 +35,19 @@ class SignalRSessionHub {
   /// Active WebRTC sessions by camera ID.
   final Map<String, WebRtcCameraSession> activeSessions = {};
 
-  /// Active renderers by camera ID.
-  final Map<String, RTCVideoRenderer> _renderers = {};
-
   // ═══════════════════════════════════════════════════════════════════════════
   // Getters
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Whether the hub has been initialized.
   bool get isInitialized => _initialized;
-
-  /// The SignalR service instance.
   SignalRService? get signalRService => _signalRService;
-
-  /// The auth service instance.
   AuthService? get authService => _authService;
-
-  /// Number of active sessions.
   int get activeSessionCount => activeSessions.length;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Initialization
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Initialize the hub with SignalR URL and authentication.
-  ///
-  /// This should be called once at app startup after user authentication.
   Future<void> initialize(String signalRUrl, AuthService authService) async {
     if (_initialized) {
       dev.log('SignalRSessionHub: Already initialized');
@@ -100,38 +68,59 @@ class SignalRSessionHub {
   // Session Management
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Connect to a camera and return its session.
-  ///
-  /// Automatically creates and initializes renderer, and wires it to receive
-  /// tracks. Returns existing session if already connected.
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
     if (!_initialized || _signalRService == null) {
       dev.log('SignalRSessionHub: Not initialized');
       return null;
     }
 
-    // Return existing session if already connected
     if (activeSessions.containsKey(cameraId)) {
-      dev.log('SignalRSessionHub: Returning existing session for $cameraId');
       return activeSessions[cameraId];
     }
 
-    // Create and initialize renderer
-    final renderer = RTCVideoRenderer();
-    await renderer.initialize();
-    _renderers[cameraId] = renderer;
-
-    // Create new session
     final session = WebRtcCameraSession(
       cameraId: cameraId,
       signalRService: _signalRService,
     );
 
-    // Wire renderer to receive tracks
-    session.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        renderer.srcObject = event.streams[0];
-        dev.log('SignalRSessionHub: Renderer srcObject set for $cameraId');
+    session.onTrack = (event) async {
+      if (event.track.kind == 'video' && event.track.id != null) {
+        dev.log(
+          'SignalRSessionHub: Video track received for $cameraId. ID: ${event.track.id}',
+        );
+
+        // 1. Enable Raw Frame Capture on the track
+        try {
+          await event.track.startFrameCapture();
+          dev.log(
+            'SignalRSessionHub: Started raw frame capture for ${event.track.id}',
+          );
+          final RTCVideoRenderer renderer = RTCVideoRenderer();
+          await renderer.initialize();
+          renderer.srcObject = event.streams.isNotEmpty
+              ? event.streams.first
+              : null;
+          session.renderer = renderer;
+          session.onRendererCreated?.call();
+          dev.log('SignalRSessionHub: Renderer attached for $cameraId');
+        } catch (e) {
+          dev.log(
+            'SignalRSessionHub: Failed to start frame capture or attach renderer: $e',
+          );
+        }
+
+        // 2. Subscribe to the raw frame stream for verification
+        WebRTCMediaStreamer()
+            .videoFramesFrom(event.track.id!)
+            .then((stream) {
+              stream.listen(
+                (frame) => _processDebugFrame(frame, cameraId),
+                onError: (e) => print('Error receiving raw frames: $e'),
+              );
+            })
+            .catchError((e) {
+              print('Failed to initialize streamer for $cameraId: $e');
+            });
       }
     };
 
@@ -142,68 +131,130 @@ class SignalRSessionHub {
     return session;
   }
 
-  /// Disconnect from a camera.
-  ///
-  /// Properly leaves the session on the server, closes the session,
-  /// and disposes the renderer.
   Future<void> disconnectCamera(String cameraId) async {
     final session = activeSessions.remove(cameraId);
     if (session != null) {
-      // Leave session on server first (like old SignalRSessionHub)
       final sessionId = session.sessionId;
       if (sessionId != null) {
         await _signalRService?.leaveSession(sessionId, deviceId: cameraId);
       }
+
+      if (session.videoTrack?.id != null) {
+        // Stop capture and dispose stream
+        try {
+          await session.videoTrack!.stopFrameCapture();
+        } catch (e) {
+          print('Error stopping frame capture: $e');
+        }
+        WebRTCMediaStreamer().disposeVideoStream(session.videoTrack!.id!);
+      }
+
       await session.close();
     }
-
-    // Dispose renderer
-    final renderer = _renderers.remove(cameraId);
-    if (renderer != null) {
-      renderer.srcObject = null;
-      await renderer.dispose();
-    }
-
     dev.log('SignalRSessionHub: Disconnected $cameraId');
   }
 
-  /// Get session for a camera (if connected).
   WebRtcCameraSession? getSession(String cameraId) => activeSessions[cameraId];
-
-  /// Check if a camera is connected.
   bool isConnected(String cameraId) => activeSessions.containsKey(cameraId);
-
-  /// Get list of connected camera IDs.
   List<String> get connectedCameraIds => activeSessions.keys.toList();
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Renderer Access
+  // Debug / Visualization
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Get the renderer for a camera (if connected).
-  RTCVideoRenderer? getRenderer(String cameraId) => _renderers[cameraId];
+  void _processDebugFrame(EncodedVideoFrame frame, String cameraId) {
+    final session = activeSessions[cameraId];
+    if (session == null) return;
 
-  /// Get the texture ID for a camera (if connected and renderer initialized).
-  ///
-  /// This is the value needed for SetTextureId actions.
-  int? getTextureId(String cameraId) => _renderers[cameraId]?.textureId;
+    final now = DateTime.now();
+    if (now.difference(session.lastDebugFrameTime).inSeconds >= 5) {
+      session.lastDebugFrameTime = now;
+      print(
+        'SignalRSessionHub: capturing debug frame for $cameraId (5s throttle). Size: ${frame.width}x${frame.height}',
+      );
 
-  /// Get all active renderers.
-  Map<String, RTCVideoRenderer> get renderers => Map.unmodifiable(_renderers);
+      try {
+        // Generate a grayscale BMP from the Y-plane (first width*height bytes)
+        final bmp = _createGrayscaleBmp(
+          frame.buffer,
+          frame.width,
+          frame.height,
+        );
+        session.debugFrame.value = bmp;
+      } catch (e) {
+        print('Error processing debug frame: $e');
+      }
+    }
+  }
+
+  /// Creates a BMP image from the Y-plane (grayscale) of I420 buffer
+  Uint8List _createGrayscaleBmp(Uint8List i420Buffer, int width, int height) {
+    // I420: Y plane is first, size = width * height
+    final ySize = width * height;
+    if (i420Buffer.length < ySize) return Uint8List(0);
+
+    // BMP Header Size = 14 + 40 + 1024 (Palette) = 1078 bytes
+    // Row padding: rows must be multiple of 4 bytes
+    final rowPadding = (4 - (width % 4)) % 4;
+    final rowSize = width + rowPadding;
+    final pixelDataSize = rowSize * height;
+    final fileSize = 54 + 1024 + pixelDataSize; // 54 header, 1024 palette
+
+    final bmp = Uint8List(fileSize);
+    final view = ByteData.view(bmp.buffer);
+
+    // BITMAPFILEHEADER (14 bytes)
+    bmp[0] = 0x42; // B
+    bmp[1] = 0x4D; // M
+    view.setUint32(2, fileSize, Endian.little);
+    view.setUint32(10, 54 + 1024, Endian.little); // Offset to pixel data
+
+    // BITMAPINFOHEADER (40 bytes)
+    view.setUint32(14, 40, Endian.little); // Header size
+    view.setInt32(18, width, Endian.little);
+    view.setInt32(22, -height, Endian.little); // Top-down
+    view.setUint16(26, 1, Endian.little); // Planes
+    view.setUint16(28, 8, Endian.little); // 8-bit (indexed color)
+    view.setUint32(30, 0, Endian.little); // Compression (BI_RGB)
+    view.setUint32(34, pixelDataSize, Endian.little);
+    view.setUint32(46, 256, Endian.little); // Colors used
+    view.setUint32(50, 256, Endian.little); // Important colors
+
+    // Palette (1024 bytes) - Grayscale
+    int paletteOffset = 54;
+    for (int i = 0; i < 256; i++) {
+      bmp[paletteOffset + i * 4] = i; // Blue
+      bmp[paletteOffset + i * 4 + 1] = i; // Green
+      bmp[paletteOffset + i * 4 + 2] = i; // Red
+      bmp[paletteOffset + i * 4 + 3] = 0; // Reserved
+    }
+
+    // Pixel Data (Y plane copy)
+    int pixelOffset = 54 + 1024;
+    int srcOffset = 0;
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        bmp[pixelOffset + x] = i420Buffer[srcOffset + x];
+      }
+      // Zero padding
+      for (int p = 0; p < rowPadding; p++) {
+        bmp[pixelOffset + width + p] = 0;
+      }
+      pixelOffset += rowSize;
+      srcOffset +=
+          width; // I420 stride is typically width (tightly packed in our capturer)
+    }
+
+    return bmp;
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Track Control
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Toggle audio track for a camera.
-  ///
-  /// Returns the new enabled state, or null if no audio track exists.
   bool? toggleAudio(String cameraId, {bool? enable}) =>
       _toggleTrack(cameraId, isAudio: true, enable: enable);
 
-  /// Toggle video track for a camera.
-  ///
-  /// Returns the new enabled state, or null if no video track exists.
   bool? toggleVideo(String cameraId, {bool? enable}) =>
       _toggleTrack(cameraId, isAudio: false, enable: enable);
 
@@ -225,11 +276,9 @@ class SignalRSessionHub {
     return newEnabled;
   }
 
-  /// Get audio enabled state for a camera.
   bool? isAudioEnabled(String cameraId) =>
       activeSessions[cameraId]?.audioTrack?.enabled;
 
-  /// Get video enabled state for a camera.
   bool? isVideoEnabled(String cameraId) =>
       activeSessions[cameraId]?.videoTrack?.enabled;
 
@@ -237,21 +286,21 @@ class SignalRSessionHub {
   // Cleanup
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Shutdown the hub and close all sessions.
   Future<void> shutdown() async {
     dev.log('SignalRSessionHub: Shutting down...');
 
     for (final session in activeSessions.values) {
+      if (session.videoTrack?.id != null) {
+        // stop capture
+        try {
+          await session.videoTrack!.stopFrameCapture();
+        } catch (_) {}
+        WebRTCMediaStreamer().disposeVideoStream(session.videoTrack!.id!);
+      }
       await session.close();
     }
     activeSessions.clear();
-
-    // Dispose all renderers
-    for (final renderer in _renderers.values) {
-      renderer.srcObject = null;
-      await renderer.dispose();
-    }
-    _renderers.clear();
+    WebRTCMediaStreamer().dispose();
 
     await _signalRService?.closeConnection(closeAllSessions: true);
     _signalRService = null;

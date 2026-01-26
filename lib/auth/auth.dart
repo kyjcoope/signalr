@@ -14,6 +14,7 @@ Map<String, Device> _parseDevices(String responseBody) {
         guid: d['GUID'],
         sourceType: d['SourceType'],
         name: d['Name'],
+        raw: jsonEncode(d),
       ),
   };
 }
@@ -45,7 +46,16 @@ class AuthService {
       dev.log('Session ID: $_sessionId');
 
       if (_sessionId != null) {
-        devices = await _fetchDevices(url, _sessionId!);
+        devices.addAll(
+          await _fetchDevices(url, _sessionId!, name: 'Mobile 212 Fisheye'),
+        );
+        devices.addAll(
+          await _fetchDevices(url, _sessionId!, name: 'Mobile 212 Axis'),
+        );
+        devices.addAll(
+          await _fetchDevices(url, _sessionId!, name: 'Mobile 212 Illustra'),
+        );
+        dev.log('device first: ${devices.values.first.raw}');
       }
     } catch (e) {
       dev.log('Login error: $e');
@@ -53,12 +63,18 @@ class AuthService {
     }
   }
 
-  Future<Map<String, Device>> _fetchDevices(String host, String sid) async {
-    const payload = ObjectRequest(
+  Future<Map<String, Device>> _fetchDevices(
+    String host,
+    String sid, {
+    String name = '',
+  }) async {
+    var payload = ObjectRequest(
       typeFullName:
           'Jci.Osp.Objects.DeviceFleetManagement.UnifiedDeviceDataView',
       loadCollection: false,
-      pageSize: 5000,
+      whereClause: name.isNotEmpty ? 'Name = ?' : null,
+      arguments: name.isNotEmpty ? [name] : null,
+      pageSize: 10,
       pageNumber: 1,
     );
 

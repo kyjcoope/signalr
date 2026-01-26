@@ -59,7 +59,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   VoidCallback? onLocalIceCandidate;
   VoidCallback? onRemoteIceCandidate;
   void Function(String codec)? onVideoCodecResolved;
+  void Function(String? expected, String? actual)? onTrackInfo;
   void Function(SessionConnectionState state)? onStateChanged;
+  VoidCallback? onRendererCreated;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Player Interface
@@ -95,6 +97,15 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   MediaStreamTrack? _videoTrack;
   MediaStreamTrack? _audioTrack;
 
+  /// The renderer for this session.
+  RTCVideoRenderer? renderer;
+
+  /// Debug: Latest raw frame snapshot (BMP format).
+  final ValueNotifier<Uint8List?> debugFrame = ValueNotifier(null);
+
+  /// Throttling timer for debug frame updates
+  DateTime lastDebugFrameTime = DateTime.fromMillisecondsSinceEpoch(0);
+
   /// The remote media stream from the camera.
   MediaStream? get remoteStream => _remoteStream;
 
@@ -126,6 +137,15 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// Get negotiated video codec.
   String? get negotiatedVideoCodec => _codecDetector.codec;
+
+  String? _expectedTrackId;
+  String? _actualTrackId;
+
+  /// Expected track ID from the remote SDP offer
+  String? get expectedTrackId => _expectedTrackId;
+
+  /// Actual track ID from the received WebRTC track
+  String? get actualTrackId => _actualTrackId;
 
   /// Stream of data channel text messages.
   Stream<String> get messageStream => _messageController.stream;
@@ -229,6 +249,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _lastInviteId = detail['id']?.toString();
 
       if (sdpWrapper.type == 'offer') {
+        // Extract expected track ID from offer
+        _expectedTrackId = sdpWrapper.sdp.videoTrackId;
+        dev.log('$_tag Expected video track ID: $_expectedTrackId');
+        onTrackInfo?.call(_expectedTrackId, _actualTrackId);
+
         _negotiate(sdpWrapper);
       }
     } catch (e) {
@@ -295,6 +320,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _cancelNegotiationTimer();
     _cancelConnectTimeout();
     _logger.stop();
+
+    if (renderer != null) {
+      try {
+        renderer!.srcObject = null;
+        await renderer!.dispose();
+      } catch (e) {
+        dev.log('$_tag Error disposing renderer: $e');
+      }
+      renderer = null;
+    }
 
     // Send close message to signaling server before cleanup
     if (_sessionId != null) {
@@ -388,6 +423,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       }
       if (event.track.kind == 'video') {
         _videoTrack = event.track;
+        _actualTrackId = event.track.id;
+        dev.log('$_tag Actual video track ID: $_actualTrackId');
+        onTrackInfo?.call(_expectedTrackId, _actualTrackId);
       } else if (event.track.kind == 'audio') {
         _audioTrack = event.track;
         _audioTrack?.enabled = false; // Default muted
@@ -419,10 +457,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // Apply compatibility fixes
       final offerSdp = offer.sdp.withCompatibilityFixes;
 
-      await _peerConnection!.setRemoteDescription(
-        RTCSessionDescription(offerSdp, offer.type),
-      );
+      // Inject x-track-id into SDP before setting remote description.
+      final modifiedOfferSdp = offerSdp
+          .withH264ProfileFix // Apply H264 profile fix if not already part of compatibility fixes
+          .addFmtpParam('x-track-id', _expectedTrackId ?? '');
 
+      await _peerConnection!.setRemoteDescription(
+        RTCSessionDescription(modifiedOfferSdp, offer.type),
+      );
+      dev.log(
+        '$_tag Remote description set (with x-track-id: $_expectedTrackId)',
+      );
       _iceManager.setMlineMapping(offerSdp.mlineToMidMapping);
       _iceManager.markRemoteDescSet();
       await _iceManager.drainQueuedCandidates(_peerConnection!);
@@ -641,6 +686,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _remoteStream = null;
     _videoTrack = null;
     _audioTrack = null;
+    _expectedTrackId = null;
+    _actualTrackId = null;
+    renderer = null;
     _cancelNegotiationTimer();
   }
 

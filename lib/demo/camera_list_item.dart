@@ -1,6 +1,7 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+import 'dart:typed_data';
 
 class CameraListItem extends StatelessWidget {
   const CameraListItem({
@@ -13,12 +14,12 @@ class CameraListItem extends StatelessWidget {
     required this.isFav,
     required this.isPending,
     required this.isWorking,
-    required this.textureId,
-    required this.renderer,
     required this.onConnect,
     required this.onDisconnect,
     required this.onToggleFavorite,
     required this.compact,
+    this.renderer,
+    this.debugFrameNotifier,
   });
 
   final String cameraId;
@@ -29,12 +30,12 @@ class CameraListItem extends StatelessWidget {
   final bool isFav;
   final bool isPending;
   final bool isWorking;
-  final int? textureId;
-  final RTCVideoRenderer? renderer;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
   final VoidCallback onToggleFavorite;
   final bool compact;
+  final RTCVideoRenderer? renderer;
+  final ValueNotifier<Uint8List?>? debugFrameNotifier;
 
   static const double _videoWidth = 320;
   static const double _videoHeight = 180;
@@ -49,45 +50,73 @@ class CameraListItem extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             compact ? _buildCompactLayout() : _buildWideLayout(),
-            if (connected && _hasVideo) ...[
+            if (connected && renderer != null) ...[
               const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Container(
-                  width: compact ? double.infinity : _videoWidth,
-                  height: compact ? (_videoHeight * 0.75) : _videoHeight,
-                  color: Colors.black,
-                  child: _buildVideoWidget(),
-                ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Live Video
+                  Expanded(
+                    child: AspectRatio(
+                      aspectRatio: 16 / 9,
+                      child: Container(
+                        decoration: const BoxDecoration(color: Colors.black),
+                        child: RTCVideoView(
+                          renderer!,
+                          objectFit: RTCVideoViewObjectFit
+                              .RTCVideoViewObjectFitContain,
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Debug Frame
+                  if (debugFrameNotifier != null) ...[
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ValueListenableBuilder<Uint8List?>(
+                        valueListenable: debugFrameNotifier!,
+                        builder: (context, bytes, _) {
+                          if (bytes == null) return const SizedBox.shrink();
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Padding(
+                                padding: EdgeInsets.only(bottom: 2),
+                                child: Text(
+                                  'Raw Frame (5s)',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                              ),
+                              AspectRatio(
+                                aspectRatio: 16 / 9,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    border: Border.all(color: Colors.red),
+                                    color: Colors.black,
+                                  ),
+                                  child: Image.memory(
+                                    bytes,
+                                    gaplessPlayback: true,
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ],
           ],
         ),
       ),
     );
-  }
-
-  bool get _hasVideo => kIsWeb ? renderer != null : textureId != null;
-
-  Widget _buildVideoWidget() {
-    if (kIsWeb) {
-      // Web: use RTCVideoView which internally uses HtmlElementView
-      return RTCVideoView(
-        renderer!,
-        mirror: false,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-      );
-    } else {
-      // Native: use Texture widget with aspect ratio preservation
-      return FittedBox(
-        fit: BoxFit.contain,
-        child: SizedBox(
-          width: 16,
-          height: 9,
-          child: Texture(textureId: textureId!),
-        ),
-      );
-    }
   }
 
   Widget _buildWideLayout() {

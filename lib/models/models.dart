@@ -2,8 +2,14 @@ class Device {
   final String guid;
   final String sourceType;
   final String name;
+  final String raw;
 
-  Device({required this.guid, required this.sourceType, required this.name});
+  Device({
+    required this.guid,
+    required this.sourceType,
+    required this.name,
+    required this.raw,
+  });
 }
 
 class UserLogin {

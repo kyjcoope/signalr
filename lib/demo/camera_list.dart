@@ -65,6 +65,7 @@ class CameraListState extends State<StatefulWidget> {
   final Set<String> _working = {};
   final Set<String> _pending = {};
   final Map<String, String> _codec = {};
+  final Map<String, ({String? expected, String? actual})> _trackInfo = {};
 
   // Access widget properties dynamically
   SignalRSessionHub get _hub {
@@ -145,6 +146,7 @@ class CameraListState extends State<StatefulWidget> {
       _working.clear();
       _pending.clear();
       _codec.clear();
+      _trackInfo.clear();
     });
     await _store.saveFavorites(_favorites);
   }
@@ -238,6 +240,17 @@ class CameraListState extends State<StatefulWidget> {
     session.onVideoCodecResolved = (codec) {
       setState(() => _codec[cameraId] = codec);
     };
+
+    session.onTrackInfo = (expected, actual) {
+      if (!mounted) return;
+      setState(() {
+        _trackInfo[cameraId] = (expected: expected, actual: actual);
+      });
+    };
+
+    session.onRendererCreated = () {
+      if (mounted) setState(() {});
+    };
   }
 
   Future<void> _disconnect(String cameraId) async {
@@ -248,6 +261,7 @@ class CameraListState extends State<StatefulWidget> {
       _pending.remove(cameraId);
       _working.remove(cameraId);
       _codec.remove(cameraId);
+      _trackInfo.remove(cameraId);
     });
   }
 
@@ -353,9 +367,6 @@ class CameraListState extends State<StatefulWidget> {
 
   Widget _buildCameraItem(String cameraId, bool compact) {
     final connected = _hub.isConnected(cameraId);
-    // Get textureId and renderer from hub
-    final textureId = _hub.getTextureId(cameraId);
-    final renderer = _hub.getRenderer(cameraId);
     final isFav = _favorites.contains(cameraId);
     final device = _auth.devices[cameraId];
     final name = device?.name ?? 'Unknown Camera';
@@ -372,12 +383,12 @@ class CameraListState extends State<StatefulWidget> {
       isFav: isFav,
       isPending: _pending.contains(cameraId),
       isWorking: _working.contains(cameraId) && connected,
-      textureId: textureId,
-      renderer: renderer,
       onConnect: () => _connect(cameraId),
       onDisconnect: () => _disconnect(cameraId),
       onToggleFavorite: () => _toggleFavorite(cameraId),
       compact: compact,
+      renderer: session?.renderer,
+      debugFrameNotifier: session?.debugFrame,
     );
   }
 }
