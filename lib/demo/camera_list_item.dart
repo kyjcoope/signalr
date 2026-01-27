@@ -37,9 +37,6 @@ class CameraListItem extends StatelessWidget {
   final RTCVideoRenderer? renderer;
   final ValueNotifier<Uint8List?>? debugFrameNotifier;
 
-  static const double _videoWidth = 320;
-  static const double _videoHeight = 180;
-
   @override
   Widget build(BuildContext context) {
     return Card(

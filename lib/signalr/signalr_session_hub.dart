@@ -162,7 +162,7 @@ class SignalRSessionHub {
   // Debug / Visualization
   // ═══════════════════════════════════════════════════════════════════════════
 
-  void _processDebugFrame(EncodedVideoFrame frame, String cameraId) {
+  void _processDebugFrame(RawVideoFrame frame, String cameraId) {
     final session = activeSessions[cameraId];
     if (session == null) return;
 
