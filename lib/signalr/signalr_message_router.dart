@@ -213,7 +213,6 @@ class SignalRMessageRouter {
     final session = message.param<String>('session');
     if (session == null) return;
 
-    final receiptTime = DateTime.now();
     dev.log('SignalRMessageRouter: Trickle for session: $session');
 
     // Support batched candidates (params.candidates: [...])
@@ -225,11 +224,7 @@ class SignalRMessageRouter {
       findPlayerBySession(session)?.onSignalRMessage(
         SignalRMessage(
           method: SignalRMessageType.onSignalTrickle,
-          detail: {
-            'session': session,
-            'candidates': candidatesList,
-            'receiptTime': receiptTime.toIso8601String(),
-          },
+          detail: {'session': session, 'candidates': candidatesList},
         ),
       );
       return;
@@ -242,7 +237,6 @@ class SignalRMessageRouter {
         detail: {
           'session': session,
           'candidate': message.param<Map<String, dynamic>>('candidate'),
-          'receiptTime': receiptTime.toIso8601String(),
         },
       ),
     );

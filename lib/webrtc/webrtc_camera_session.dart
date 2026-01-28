@@ -242,9 +242,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       final session = detail['session'] as String?;
       if (session != _sessionId) return;
 
-      final receiptTime = detail['receiptTime'] as String?;
-      dev.log('$_tag Processing trickle (received: $receiptTime)');
-
       // Normalize: support both single candidate and batched candidates
       final List<Map<String, dynamic>> candidates = [];
 
