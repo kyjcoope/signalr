@@ -8,5 +8,5 @@ import 'demo/app.dart';
 void main() async {
   HttpOverrides.global = DeviceHttpOverrides();
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(MaterialApp(home: App()));
+  runApp(MaterialApp(home: SelectionArea(child: App())));
 }

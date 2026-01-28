@@ -240,23 +240,78 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void _handleTrickle(dynamic detail) {
     try {
       final session = detail['session'] as String?;
-      final candidateData = detail['candidate'] as Map<String, dynamic>?;
-      if (session != _sessionId || candidateData == null) return;
+      if (session != _sessionId) return;
 
-      final candidateStr = candidateData['candidate'] as String? ?? '';
-      if (candidateStr.isEmpty) {
-        dev.log('$_tag Received end-of-candidates');
+      final receiptTime = detail['receiptTime'] as String?;
+      dev.log('$_tag Processing trickle (received: $receiptTime)');
+
+      // Normalize: support both single candidate and batched candidates
+      final List<Map<String, dynamic>> candidates = [];
+
+      // Check for batched format first (params.candidates: [...])
+      final candidatesList = detail['candidates'];
+      if (candidatesList is List) {
+        for (final item in candidatesList) {
+          if (item is Map<String, dynamic>) {
+            candidates.add(item);
+          }
+        }
+      }
+
+      // Fallback to single candidate (params.candidate: {...})
+      final singleCandidate = detail['candidate'];
+      if (singleCandidate is Map<String, dynamic>) {
+        candidates.add(singleCandidate);
+      }
+
+      if (candidates.isEmpty) {
+        dev.log('$_tag No valid candidates in trickle message');
         return;
       }
 
-      final candidate = RTCIceCandidate(
-        candidateStr,
-        candidateData['sdpMid'] as String?,
-        candidateData['sdpMLineIndex'] as int?,
+      dev.log('$_tag Processing ${candidates.length} ICE candidate(s)');
+
+      for (final candidateData in candidates) {
+        _processCandidate(candidateData);
+      }
+    } catch (e) {
+      dev.log('$_tag Error handling trickle: $e');
+    }
+  }
+
+  /// Parse and process a single ICE candidate from raw data.
+  ///
+  /// Handles both string candidate values and nested objects.
+  /// Tolerates missing sdpMid/sdpMLineIndex with fallback defaults.
+  void _processCandidate(Map<String, dynamic> candidateData) {
+    try {
+      // Support both 'candidate' as string or nested object
+      String? candidateStr;
+      final rawCandidate = candidateData['candidate'];
+      if (rawCandidate is String) {
+        candidateStr = rawCandidate;
+      } else if (rawCandidate is Map<String, dynamic>) {
+        candidateStr = rawCandidate['candidate'] as String?;
+      }
+
+      // Empty candidate = end-of-candidates signal
+      if (candidateStr == null || candidateStr.isEmpty) {
+        dev.log('$_tag Received end-of-candidates marker');
+        return;
+      }
+
+      // Extract sdpMid and sdpMLineIndex with fallback
+      final sdpMid = candidateData['sdpMid'] as String?;
+      final sdpMLineIndex = candidateData['sdpMLineIndex'] as int? ?? 0;
+
+      final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
+
+      dev.log(
+        '$_tag Adding ICE candidate (mid=$sdpMid, mLineIdx=$sdpMLineIndex)',
       );
       _iceManager.handleRemoteCandidate(candidate, _peerConnection);
     } catch (e) {
-      dev.log('$_tag Error handling trickle: $e');
+      dev.log('$_tag Error processing candidate: $e');
     }
   }
 
