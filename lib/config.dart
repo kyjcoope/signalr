@@ -23,7 +23,7 @@ enum Environment {
 }
 
 /// Current active environment.
-const currentEnvironment = Environment.dev;
+const currentEnvironment = Environment.qa;
 
 /// Convenience accessors for current environment values.
 String get url => currentEnvironment.url;

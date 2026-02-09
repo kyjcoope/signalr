@@ -1,6 +1,8 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show ValueNotifier, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+import '../webrtc/webrtc_stats_monitor.dart';
 
 class CameraListItem extends StatelessWidget {
   const CameraListItem({
@@ -19,6 +21,7 @@ class CameraListItem extends StatelessWidget {
     required this.onDisconnect,
     required this.onToggleFavorite,
     required this.compact,
+    this.statsNotifier,
   });
 
   final String cameraId;
@@ -35,6 +38,7 @@ class CameraListItem extends StatelessWidget {
   final VoidCallback onDisconnect;
   final VoidCallback onToggleFavorite;
   final bool compact;
+  final ValueNotifier<WebRtcVideoStats>? statsNotifier;
 
   static const double _videoWidth = 320;
   static const double _videoHeight = 180;
@@ -53,11 +57,25 @@ class CameraListItem extends StatelessWidget {
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
-                child: Container(
+                child: SizedBox(
                   width: compact ? double.infinity : _videoWidth,
                   height: compact ? (_videoHeight * 0.75) : _videoHeight,
-                  color: Colors.black,
-                  child: _buildVideoWidget(),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: Container(
+                          color: Colors.black,
+                          child: _buildVideoWidget(),
+                        ),
+                      ),
+                      if (statsNotifier != null)
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: _StatsOverlay(notifier: statsNotifier!),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -276,6 +294,58 @@ class CameraListItem extends StatelessWidget {
           ],
         ),
         overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+}
+
+/// Semi-transparent overlay showing live WebRTC video stats.
+class _StatsOverlay extends StatelessWidget {
+  const _StatsOverlay({required this.notifier});
+
+  final ValueNotifier<WebRtcVideoStats> notifier;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<WebRtcVideoStats>(
+      valueListenable: notifier,
+      builder: (context, stats, _) {
+        // Don't show anything until we have real data.
+        if (stats.receivedFps <= 0 && stats.decodedFps <= 0) {
+          return const SizedBox.shrink();
+        }
+
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.65),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _line('Rx', '${stats.receivedFps.round()} fps'),
+              _line('Dec', '${stats.decodedFps.round()} fps'),
+              if (stats.width > 0 && stats.height > 0)
+                _line('Res', '${stats.width}x${stats.height}'),
+              if (stats.bitrateKbps > 0)
+                _line('Kbps', stats.bitrateKbps.round().toString()),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _line(String label, String value) {
+    return Text(
+      '$label: $value',
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 10,
+        fontFamily: 'monospace',
+        height: 1.4,
       ),
     );
   }

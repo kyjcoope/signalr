@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:developer' as dev;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../auth/auth.dart';
 import '../webrtc/webrtc_camera_session.dart';
+import '../webrtc/webrtc_stats_monitor.dart';
 import 'signalr_service.dart';
 
 /// Singleton hub managing SignalR connection and WebRTC camera sessions.
@@ -190,6 +192,10 @@ class SignalRSessionHub {
 
   /// Get all active renderers.
   Map<String, RTCVideoRenderer> get renderers => Map.unmodifiable(_renderers);
+
+  /// Get the live stats notifier for a camera (if connected).
+  ValueNotifier<WebRtcVideoStats>? getStatsNotifier(String cameraId) =>
+      activeSessions[cameraId]?.statsNotifier;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Track Control

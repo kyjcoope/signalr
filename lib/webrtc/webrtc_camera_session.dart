@@ -14,7 +14,7 @@ import 'session_timers.dart';
 import 'webrtc_player.dart';
 import 'sdp_utils.dart';
 import 'signaling_message.dart';
-import 'webrtc_logger.dart';
+import 'webrtc_stats_monitor.dart';
 
 /// Default timeout for negotiation operations.
 const Duration _negotiationTimeout = Duration(seconds: 30);
@@ -109,7 +109,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   late final IceCandidateManager _iceManager;
   late final CodecDetector _codecDetector;
-  final WebRtcLogger _logger = WebRtcLogger();
+  final WebRtcStatsMonitor _statsMonitor = WebRtcStatsMonitor();
   final StreamController<String> _messageController =
       StreamController<String>.broadcast();
 
@@ -126,6 +126,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// Get negotiated video codec.
   String? get negotiatedVideoCodec => _codecDetector.codec;
+
+  /// Live video stats notifier (received FPS, decoded FPS, etc.).
+  ValueNotifier<WebRtcVideoStats> get statsNotifier =>
+      _statsMonitor.statsNotifier;
 
   /// Stream of data channel text messages.
   Stream<String> get messageStream => _messageController.stream;
@@ -346,7 +350,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   Future<void> close() async {
     _cancelNegotiationTimer();
     _cancelConnectTimeout();
-    _logger.stop();
+    _statsMonitor.dispose();
 
     // Send close message to signaling server before cleanup
     if (_sessionId != null) {
@@ -372,8 +376,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   /// Enable or disable detailed logging.
   void setLoggingEnabled(bool enabled) {
     enableDetailedLogging = enabled;
-    _logger.setEnabled(enabled);
-    if (!enabled) _logger.stop();
+    _statsMonitor.enableLogging = enabled;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -532,21 +535,22 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
     switch (state) {
       case RTCIceConnectionState.RTCIceConnectionStateChecking:
-        _startLogger();
+        _statsMonitor.setTag(_tag);
+        _statsMonitor.enableLogging = enableDetailedLogging;
+        _statsMonitor.start(_peerConnection!);
       case RTCIceConnectionState.RTCIceConnectionStateConnected:
       case RTCIceConnectionState.RTCIceConnectionStateCompleted:
-        await _logOnce();
-        _logger.stop();
+        await _statsMonitor.logOnce(_peerConnection!);
         dev.log('$_tag 🎉 ICE CONNECTION ESTABLISHED!');
         _setState(SessionConnectionState.connected);
         _iceRestartAttempts = 0;
       case RTCIceConnectionState.RTCIceConnectionStateFailed:
-        await _logOnce();
+        await _statsMonitor.logOnce(_peerConnection!);
         dev.log('$_tag ❌ ICE FAILED');
         await _attemptIceRestart();
       case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
-        _startLogger();
-        await _logOnce();
+        _statsMonitor.start(_peerConnection!);
+        await _statsMonitor.logOnce(_peerConnection!);
         dev.log('$_tag ❌ ICE DISCONNECTED');
         _setState(SessionConnectionState.disconnected);
         // Give it a few seconds to self-recover before attempting restart
@@ -694,26 +698,5 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _videoTrack = null;
     _audioTrack = null;
     _cancelNegotiationTimer();
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Logging
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  void _startLogger() {
-    if (!enableDetailedLogging || _peerConnection == null) return;
-    _logger.setTag(_tag);
-    _logger.setEnabled(true);
-    _logger.start(
-      _peerConnection!,
-      interval: const Duration(seconds: 1),
-      tag: _tag,
-    );
-  }
-
-  Future<void> _logOnce() async {
-    if (!enableDetailedLogging || _peerConnection == null) return;
-    _logger.setTag(_tag);
-    await _logger.logOnce(_peerConnection!, tag: _tag);
   }
 }

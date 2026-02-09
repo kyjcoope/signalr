@@ -378,6 +378,7 @@ class CameraListState extends State<StatefulWidget> {
       onDisconnect: () => _disconnect(cameraId),
       onToggleFavorite: () => _toggleFavorite(cameraId),
       compact: compact,
+      statsNotifier: _hub.getStatsNotifier(cameraId),
     );
   }
 }
