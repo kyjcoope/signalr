@@ -59,6 +59,7 @@ class WebRtcVideoStats {
     this.width = 0,
     this.height = 0,
     this.bitrateKbps = 0,
+    this.codec = '',
   });
 
   /// Frames per second as reported by the browser / native stack.
@@ -76,13 +77,17 @@ class WebRtcVideoStats {
   /// Incoming video bitrate in kbps (computed from bytesReceived delta).
   final double bitrateKbps;
 
+  /// Codec name (e.g. 'H264', 'VP8', 'VP9', 'AV1').
+  final String codec;
+
   static const WebRtcVideoStats empty = WebRtcVideoStats();
 
   @override
   String toString() =>
       'WebRtcVideoStats(rx=${receivedFps.toStringAsFixed(1)}fps, '
       'dec=${decodedFps.toStringAsFixed(1)}fps, '
-      '${width}x$height, ${bitrateKbps.toStringAsFixed(0)}kbps)';
+      '${width}x$height, ${bitrateKbps.toStringAsFixed(0)}kbps, '
+      'codec=$codec)';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -163,7 +168,7 @@ class WebRtcStatsMonitor {
       }
 
       // ── Video stats (always) ──────────────────────────────────────────────
-      final vidRxBytes = _updateVideoStats(byType);
+      final vidRxBytes = _updateVideoStats(byId, byType);
 
       // ── Verbose logging (optional) ────────────────────────────────────────
       if (enableLogging) {
@@ -183,7 +188,10 @@ class WebRtcStatsMonitor {
 
   /// Updates the UI stats notifier. Returns the current vidRxBytes so the
   /// caller can defer the [_lastVidRxBytes] update until after logging.
-  int? _updateVideoStats(Map<String, List<StatsReport>> byType) {
+  int? _updateVideoStats(
+    Map<String, StatsReport> byId,
+    Map<String, List<StatsReport>> byType,
+  ) {
     final inV = byType['inbound-rtp']?.firstWhereOrNull(
       (r) =>
           _pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video' &&
@@ -198,6 +206,17 @@ class WebRtcStatsMonitor {
     final framesDecoded = _pickInt(v, ['framesDecoded']);
     final bytesReceived = _pickInt(v, ['bytesReceived']);
     final now = DateTime.now();
+
+    // Resolve codec name via codecId -> codec report -> mimeType
+    final codecId = _pick(v, ['codecId'], fallback: '');
+    String codec = '';
+    if (codecId.isNotEmpty) {
+      final codecReport = byId[codecId];
+      if (codecReport != null) {
+        final mime = _pick(codecReport.values, ['mimeType'], fallback: '');
+        codec = mime.contains('/') ? mime.split('/').last : mime;
+      }
+    }
 
     double decodedFps = 0;
     double bitrateKbps = 0;
@@ -224,6 +243,7 @@ class WebRtcStatsMonitor {
       width: width,
       height: height,
       bitrateKbps: bitrateKbps,
+      codec: codec,
     );
 
     return bytesReceived;
