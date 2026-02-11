@@ -163,12 +163,15 @@ class WebRtcStatsMonitor {
       }
 
       // ── Video stats (always) ──────────────────────────────────────────────
-      _updateVideoStats(byType);
+      final vidRxBytes = _updateVideoStats(byType);
 
       // ── Verbose logging (optional) ────────────────────────────────────────
       if (enableLogging) {
         _logDetailed(byId, byType);
       }
+
+      // Update _lastVidRxBytes AFTER logging so dKbps sees the correct delta.
+      _lastVidRxBytes = vidRxBytes ?? _lastVidRxBytes;
     } catch (_) {
       // Peer connection may have been disposed — silently ignore.
     }
@@ -178,13 +181,15 @@ class WebRtcStatsMonitor {
   // UI stats
   // ═══════════════════════════════════════════════════════════════════════════
 
-  void _updateVideoStats(Map<String, List<StatsReport>> byType) {
+  /// Updates the UI stats notifier. Returns the current vidRxBytes so the
+  /// caller can defer the [_lastVidRxBytes] update until after logging.
+  int? _updateVideoStats(Map<String, List<StatsReport>> byType) {
     final inV = byType['inbound-rtp']?.firstWhereOrNull(
       (r) =>
           _pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video' &&
           _pick(r.values, ['remoteSource'], fallback: 'false') == 'false',
     );
-    if (inV == null) return;
+    if (inV == null) return null;
 
     final v = inV.values;
     final receivedFps = _pickNum(v, ['framesPerSecond']) ?? 0;
@@ -212,9 +217,6 @@ class WebRtcStatsMonitor {
 
     _lastPollTime = now;
     _lastFramesDecoded = framesDecoded;
-    // Note: _lastVidRxBytes is shared between UI bitrate and log bitrate;
-    // we only update it here so deltas stay consistent.
-    _lastVidRxBytes = bytesReceived ?? _lastVidRxBytes;
 
     statsNotifier.value = WebRtcVideoStats(
       receivedFps: receivedFps.toDouble(),
@@ -223,6 +225,8 @@ class WebRtcStatsMonitor {
       height: height,
       bitrateKbps: bitrateKbps,
     );
+
+    return bytesReceived;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -324,11 +328,13 @@ class WebRtcStatsMonitor {
     }
 
     // video
+    final vidRxBytes = _pickInt(inV?.values ?? {}, ['bytesReceived']);
     final vidRxFps = _pickNum(inV?.values ?? {}, ['framesPerSecond']);
     final vidW = _pick(inV?.values ?? {}, ['frameWidth']);
     final vidH = _pick(inV?.values ?? {}, ['frameHeight']);
     final vidLost = _pick(inV?.values ?? {}, ['packetsLost']);
     final vidJit = _pickNum(inV?.values ?? {}, ['jitter']);
+    final vidRxKbps = dKbps(vidRxBytes, _lastVidRxBytes);
     final vidTxBytes = _pickInt(outV?.values ?? {}, ['bytesSent']);
     final vidTxFps = _pickNum(outV?.values ?? {}, ['framesPerSecond']);
     final vidTxKbps = dKbps(vidTxBytes, _lastVidTxBytes);
@@ -363,7 +369,7 @@ class WebRtcStatsMonitor {
         '| srtp: ${_dash(srtp)} | role: ${_dash(role)} | ufrag: ${_dash(ufrag)}',
       )
       ..writeln(
-        '${_pad("VIDEO")} | rx: ${_fmtOptKbps(statsNotifier.value.bitrateKbps)} '
+        '${_pad("VIDEO")} | rx: ${_fmtOptKbps(vidRxKbps)} '
         '| res: ${_fmtRes(vidW, vidH)} @${_fmtFps(vidRxFps)} '
         '| lost: ${_dash(vidLost)} | jit: ${_fmtMs(vidJit)} '
         '| tx: ${_fmtOptKbps(vidTxKbps)} @${_fmtFps(vidTxFps)}',
