@@ -59,6 +59,9 @@ class SignalRSessionHub {
   /// Active renderers by camera ID.
   final Map<String, RTCVideoRenderer> _renderers = {};
 
+  /// Active video track index per camera (0-based).
+  final Map<String, int> _activeVideoTrack = {};
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Getters
   // ═══════════════════════════════════════════════════════════════════════════
@@ -129,11 +132,18 @@ class SignalRSessionHub {
       signalRService: _signalRService,
     );
 
-    // Wire renderer to receive tracks
+    // Wire renderer to receive tracks — bind to FIRST video track only
+    bool rendererBound = false;
     session.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
+      if (event.track.kind == 'video' &&
+          event.streams.isNotEmpty &&
+          !rendererBound) {
+        rendererBound = true;
+        _activeVideoTrack[cameraId] = 0;
         renderer.srcObject = event.streams[0];
-        dev.log('SignalRSessionHub: Renderer srcObject set for $cameraId');
+        dev.log(
+          'SignalRSessionHub: Renderer srcObject set for $cameraId (track 1/${session.videoTrackCount})',
+        );
       }
     };
 
@@ -166,6 +176,8 @@ class SignalRSessionHub {
       await renderer.dispose();
     }
 
+    _activeVideoTrack.remove(cameraId);
+
     dev.log('SignalRSessionHub: Disconnected $cameraId');
   }
 
@@ -196,6 +208,45 @@ class SignalRSessionHub {
   /// Get the live stats notifier for a camera (if connected).
   ValueNotifier<WebRtcVideoStats>? getStatsNotifier(String cameraId) =>
       activeSessions[cameraId]?.statsNotifier;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Track Info & Switching
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Number of video tracks for a camera.
+  int getVideoTrackCount(String cameraId) =>
+      activeSessions[cameraId]?.videoTrackCount ?? 0;
+
+  /// Number of audio tracks for a camera.
+  int getAudioTrackCount(String cameraId) =>
+      activeSessions[cameraId]?.audioTrackCount ?? 0;
+
+  /// Currently active video track index (0-based).
+  int getActiveVideoTrack(String cameraId) => _activeVideoTrack[cameraId] ?? 0;
+
+  /// Switch the displayed video track for a camera.
+  ///
+  /// Returns true if the switch was successful.
+  bool switchVideoTrack(String cameraId, int trackIndex) {
+    final session = activeSessions[cameraId];
+    final renderer = _renderers[cameraId];
+    if (session == null || renderer == null) return false;
+
+    final streams = session.remoteStreams;
+    if (trackIndex < 0 || trackIndex >= streams.length) {
+      dev.log(
+        'SignalRSessionHub: Invalid track index $trackIndex for $cameraId (${streams.length} streams)',
+      );
+      return false;
+    }
+
+    _activeVideoTrack[cameraId] = trackIndex;
+    renderer.srcObject = streams[trackIndex];
+    dev.log(
+      'SignalRSessionHub: Switched $cameraId to video track ${trackIndex + 1}/${streams.length}',
+    );
+    return true;
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Track Control
@@ -258,6 +309,7 @@ class SignalRSessionHub {
       await renderer.dispose();
     }
     _renderers.clear();
+    _activeVideoTrack.clear();
 
     await _signalRService?.closeConnection(closeAllSessions: true);
     _signalRService = null;

@@ -22,6 +22,10 @@ class CameraListItem extends StatelessWidget {
     required this.onToggleFavorite,
     required this.compact,
     this.statsNotifier,
+    this.trackInfo,
+    this.videoTrackCount = 0,
+    this.activeVideoTrack = 0,
+    this.onSwitchTrack,
   });
 
   final String cameraId;
@@ -39,6 +43,10 @@ class CameraListItem extends StatelessWidget {
   final VoidCallback onToggleFavorite;
   final bool compact;
   final ValueNotifier<WebRtcVideoStats>? statsNotifier;
+  final String? trackInfo;
+  final int videoTrackCount;
+  final int activeVideoTrack;
+  final void Function(int trackIndex)? onSwitchTrack;
 
   static const double _videoWidth = 320;
   static const double _videoHeight = 180;
@@ -68,6 +76,14 @@ class CameraListItem extends StatelessWidget {
                           child: _buildVideoWidget(),
                         ),
                       ),
+                      // Track switching arrows
+                      if (videoTrackCount > 1)
+                        Positioned(
+                          bottom: 4,
+                          left: 0,
+                          right: 0,
+                          child: _buildTrackSwitcher(),
+                        ),
                       if (statsNotifier != null)
                         Positioned(
                           top: 4,
@@ -106,6 +122,65 @@ class CameraListItem extends StatelessWidget {
         ),
       );
     }
+  }
+
+  Widget _buildTrackSwitcher() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _trackArrow(
+          icon: Icons.chevron_left,
+          enabled: activeVideoTrack > 0,
+          onTap: () => onSwitchTrack?.call(activeVideoTrack - 1),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.65),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            '${activeVideoTrack + 1} / $videoTrackCount',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ),
+        _trackArrow(
+          icon: Icons.chevron_right,
+          enabled: activeVideoTrack < videoTrackCount - 1,
+          onTap: () => onSwitchTrack?.call(activeVideoTrack + 1),
+        ),
+      ],
+    );
+  }
+
+  Widget _trackArrow({
+    required IconData icon,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: enabled ? onTap : null,
+        child: Container(
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: enabled ? 0.5 : 0.2),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            icon,
+            color: enabled ? Colors.white : Colors.white38,
+            size: 18,
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildWideLayout() {
@@ -161,6 +236,10 @@ class CameraListItem extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         ),
+        if (trackInfo != null) ...[
+          const SizedBox(width: 6),
+          _chip(trackInfo!, Colors.teal, Icons.videocam),
+        ],
         const SizedBox(width: 8),
         _statusChip(),
         const SizedBox(width: 8),

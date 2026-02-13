@@ -91,18 +91,36 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   String? _lastInviteId;
 
   // Track storage for external access (e.g., mute/unmute)
-  MediaStream? _remoteStream;
-  MediaStreamTrack? _videoTrack;
-  MediaStreamTrack? _audioTrack;
+  final List<MediaStream> _remoteStreams = [];
+  final List<MediaStreamTrack> _videoTracks = [];
+  final List<MediaStreamTrack> _audioTracks = [];
 
-  /// The remote media stream from the camera.
-  MediaStream? get remoteStream => _remoteStream;
+  /// All remote media streams from the camera.
+  List<MediaStream> get remoteStreams => List.unmodifiable(_remoteStreams);
 
-  /// The video track from the remote stream.
-  MediaStreamTrack? get videoTrack => _videoTrack;
+  /// The first remote media stream (backward compat).
+  MediaStream? get remoteStream =>
+      _remoteStreams.isNotEmpty ? _remoteStreams.first : null;
 
-  /// The audio track from the remote stream.
-  MediaStreamTrack? get audioTrack => _audioTrack;
+  /// All video tracks from the remote streams.
+  List<MediaStreamTrack> get videoTracks => List.unmodifiable(_videoTracks);
+
+  /// All audio tracks from the remote streams.
+  List<MediaStreamTrack> get audioTracks => List.unmodifiable(_audioTracks);
+
+  /// The first video track (backward compat).
+  MediaStreamTrack? get videoTrack =>
+      _videoTracks.isNotEmpty ? _videoTracks.first : null;
+
+  /// The first audio track (backward compat).
+  MediaStreamTrack? get audioTrack =>
+      _audioTracks.isNotEmpty ? _audioTracks.first : null;
+
+  /// Number of video tracks received.
+  int get videoTrackCount => _videoTracks.length;
+
+  /// Number of audio tracks received.
+  int get audioTrackCount => _audioTracks.length;
   int _iceRestartAttempts = 0;
 
   late final SessionTimers _timers;
@@ -437,15 +455,24 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     pc.onTrack = (event) {
       dev.log('$_tag Track received: ${event.track.kind}');
 
-      // Store track references for external access
+      // Collect all streams and tracks for multi-track support
       if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
+        final stream = event.streams[0];
+        if (!_remoteStreams.any((s) => s.id == stream.id)) {
+          _remoteStreams.add(stream);
+        }
       }
       if (event.track.kind == 'video') {
-        _videoTrack = event.track;
+        _videoTracks.add(event.track);
+        dev.log(
+          '$_tag Video track ${_videoTracks.length} added (id=${event.track.id})',
+        );
       } else if (event.track.kind == 'audio') {
-        _audioTrack = event.track;
-        _audioTrack?.enabled = false; // Default muted
+        event.track.enabled = false; // Default muted
+        _audioTracks.add(event.track);
+        dev.log(
+          '$_tag Audio track ${_audioTracks.length} added (id=${event.track.id})',
+        );
       }
 
       onTrack?.call(event);
@@ -694,9 +721,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _sessionId = null;
     _lastInviteId = null;
     _iceRestartAttempts = 0;
-    _remoteStream = null;
-    _videoTrack = null;
-    _audioTrack = null;
+    _remoteStreams.clear();
+    _videoTracks.clear();
+    _audioTracks.clear();
     _cancelNegotiationTimer();
   }
 }

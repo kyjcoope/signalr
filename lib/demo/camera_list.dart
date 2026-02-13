@@ -363,6 +363,11 @@ class CameraListState extends State<StatefulWidget> {
     final session = _hub.getSession(cameraId);
     final codec = _codec[cameraId] ?? session?.negotiatedVideoCodec ?? '—';
 
+    // Track info
+    final vCount = _hub.getVideoTrackCount(cameraId);
+    final aCount = _hub.getAudioTrackCount(cameraId);
+    final trackInfo = connected ? 'V:$vCount A:$aCount' : null;
+
     return CameraListItem(
       cameraId: cameraId,
       name: name,
@@ -379,6 +384,14 @@ class CameraListState extends State<StatefulWidget> {
       onToggleFavorite: () => _toggleFavorite(cameraId),
       compact: compact,
       statsNotifier: _hub.getStatsNotifier(cameraId),
+      trackInfo: trackInfo,
+      videoTrackCount: vCount,
+      activeVideoTrack: _hub.getActiveVideoTrack(cameraId),
+      onSwitchTrack: (index) {
+        if (_hub.switchVideoTrack(cameraId, index)) {
+          setState(() {}); // Rebuild to update track switcher UI
+        }
+      },
     );
   }
 }
