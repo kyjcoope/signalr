@@ -94,6 +94,53 @@ extension SdpUtils on String {
     return null;
   }
 
+  /// Extract the primary video codec from each video m-section.
+  ///
+  /// Returns a list where index 0 = codec of the 1st video m-line, etc.
+  List<String> get videoCodecsPerSection {
+    final sections = split(RegExp(r'\r?\nm='));
+    final result = <String>[];
+    const helperCodecs = {'RTX', 'ULPFEC', 'RED', 'FLEXFEC-03'};
+
+    for (final raw in sections) {
+      final sec = raw.startsWith('m=') ? raw : 'm=$raw';
+      if (!sec.startsWith(RegExp(r'm=video'))) continue;
+
+      final secLines = sec.split(RegExp(r'\r?\n'));
+      final mLine = secLines.first;
+      final parts = mLine.split(' ');
+      if (parts.length < 4) {
+        result.add('?');
+        continue;
+      }
+
+      final pts = parts
+          .skip(3)
+          .where((p) => RegExp(r'^\d+$').hasMatch(p))
+          .toList();
+
+      String codec = '?';
+      for (final pt in pts) {
+        final rtpmapLine = secLines.firstWhere(
+          (l) => l.startsWith('a=rtpmap:$pt '),
+          orElse: () => '',
+        );
+        if (rtpmapLine.isEmpty) continue;
+
+        final codecPart = rtpmapLine.split(' ').skip(1).firstOrNull ?? '';
+        final codecName = codecPart.split('/').first.toUpperCase();
+
+        if (!helperCodecs.contains(codecName)) {
+          codec = codecName;
+          break;
+        }
+      }
+      result.add(codec);
+    }
+
+    return result;
+  }
+
   /// Munge SDP for H264 compatibility if needed.
   String get withCompatibilityFixes {
     if (containsH264) {

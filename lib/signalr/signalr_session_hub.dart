@@ -224,7 +224,15 @@ class SignalRSessionHub {
   /// Currently active video track index (0-based).
   int getActiveVideoTrack(String cameraId) => _activeVideoTrack[cameraId] ?? 0;
 
+  /// Get codec for a specific video track index.
+  String? getVideoTrackCodec(String cameraId, int trackIndex) =>
+      activeSessions[cameraId]?.getVideoTrackCodec(trackIndex);
+
   /// Switch the displayed video track for a camera.
+  ///
+  /// Creates a new MediaStream containing only the target video track
+  /// and assigns it to the renderer. Each video m-line in the SDP
+  /// produces a separate track, so we select the track directly.
   ///
   /// Returns true if the switch was successful.
   bool switchVideoTrack(String cameraId, int trackIndex) {
@@ -232,18 +240,27 @@ class SignalRSessionHub {
     final renderer = _renderers[cameraId];
     if (session == null || renderer == null) return false;
 
-    final streams = session.remoteStreams;
-    if (trackIndex < 0 || trackIndex >= streams.length) {
+    final tracks = session.videoTracks;
+    if (trackIndex < 0 || trackIndex >= tracks.length) {
       dev.log(
-        'SignalRSessionHub: Invalid track index $trackIndex for $cameraId (${streams.length} streams)',
+        'SignalRSessionHub: Invalid track index $trackIndex for $cameraId (${tracks.length} video tracks)',
       );
       return false;
     }
 
     _activeVideoTrack[cameraId] = trackIndex;
-    renderer.srcObject = streams[trackIndex];
+
+    // Find the stream that contains this track, or use the first stream
+    final targetTrack = tracks[trackIndex];
+    final ownerStream = session.remoteStreams.firstWhere(
+      (s) => s.getVideoTracks().any((t) => t.id == targetTrack.id),
+      orElse: () => session.remoteStreams.first,
+    );
+    renderer.srcObject = ownerStream;
+
+    final codec = session.getVideoTrackCodec(trackIndex) ?? '?';
     dev.log(
-      'SignalRSessionHub: Switched $cameraId to video track ${trackIndex + 1}/${streams.length}',
+      'SignalRSessionHub: Switched $cameraId to video track ${trackIndex + 1}/${tracks.length} (codec=$codec, streamId=${ownerStream.id})',
     );
     return true;
   }

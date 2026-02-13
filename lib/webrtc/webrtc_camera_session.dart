@@ -94,6 +94,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   final List<MediaStream> _remoteStreams = [];
   final List<MediaStreamTrack> _videoTracks = [];
   final List<MediaStreamTrack> _audioTracks = [];
+  final List<String> _videoTrackCodecs = [];
 
   /// All remote media streams from the camera.
   List<MediaStream> get remoteStreams => List.unmodifiable(_remoteStreams);
@@ -121,6 +122,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// Number of audio tracks received.
   int get audioTrackCount => _audioTracks.length;
+
+  /// Codec names per video track (parallel to videoTracks).
+  List<String> get videoTrackCodecs => List.unmodifiable(_videoTrackCodecs);
+
+  /// Get codec for a specific video track index.
+  String? getVideoTrackCodec(int index) {
+    if (index < 0 || index >= _videoTrackCodecs.length) return null;
+    return _videoTrackCodecs[index];
+  }
+
   int _iceRestartAttempts = 0;
 
   late final SessionTimers _timers;
@@ -453,27 +464,45 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   void _bindPeerConnectionHandlers(RTCPeerConnection pc) {
     pc.onTrack = (event) {
-      dev.log('$_tag Track received: ${event.track.kind}');
+      final track = event.track;
+      final streamIds = event.streams.map((s) => s.id).join(', ');
+      final mid = event.transceiver?.mid ?? '?';
 
-      // Collect all streams and tracks for multi-track support
+      dev.log('$_tag ──────────── Track Received ────────────');
+      dev.log('$_tag   kind      : ${track.kind}');
+      dev.log('$_tag   id        : ${track.id}');
+      dev.log('$_tag   label     : ${track.label}');
+      dev.log('$_tag   mid       : $mid');
+      dev.log('$_tag   enabled   : ${track.enabled}');
+      dev.log('$_tag   muted     : ${track.muted}');
+      dev.log('$_tag   streamIds : $streamIds');
+
+      // Collect all streams
       if (event.streams.isNotEmpty) {
         final stream = event.streams[0];
         if (!_remoteStreams.any((s) => s.id == stream.id)) {
           _remoteStreams.add(stream);
         }
       }
-      if (event.track.kind == 'video') {
-        _videoTracks.add(event.track);
-        dev.log(
-          '$_tag Video track ${_videoTracks.length} added (id=${event.track.id})',
-        );
-      } else if (event.track.kind == 'audio') {
-        event.track.enabled = false; // Default muted
-        _audioTracks.add(event.track);
-        dev.log(
-          '$_tag Audio track ${_audioTracks.length} added (id=${event.track.id})',
-        );
+
+      if (track.kind == 'video') {
+        final trackIdx = _videoTracks.length;
+        _videoTracks.add(track);
+        // Assign codec from pre-parsed SDP codecs if available
+        final codec = trackIdx < _videoTrackCodecs.length
+            ? _videoTrackCodecs[trackIdx]
+            : '?';
+        dev.log('$_tag   codec     : $codec');
+        dev.log('$_tag   → Video track #${trackIdx + 1} added');
+      } else if (track.kind == 'audio') {
+        track.enabled = false; // Default muted
+        _audioTracks.add(track);
+        dev.log('$_tag   → Audio track #${_audioTracks.length} added (muted)');
       }
+
+      dev.log(
+        '$_tag ──────────── Totals: V:${_videoTracks.length} A:${_audioTracks.length} ────────────',
+      );
 
       onTrack?.call(event);
     };
@@ -500,6 +529,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
       // Apply compatibility fixes
       final offerSdp = offer.sdp.withCompatibilityFixes;
+
+      // Extract per-track codecs from the offer SDP
+      _videoTrackCodecs.clear();
+      _videoTrackCodecs.addAll(offerSdp.videoCodecsPerSection);
+      dev.log('$_tag Per-track codecs from SDP: $_videoTrackCodecs');
 
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(offerSdp, offer.type),
@@ -724,6 +758,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _remoteStreams.clear();
     _videoTracks.clear();
     _audioTracks.clear();
+    _videoTrackCodecs.clear();
     _cancelNegotiationTimer();
   }
 }

@@ -201,9 +201,10 @@ class CameraListState extends State<StatefulWidget> {
     final name = device?.name ?? 'Unknown Camera';
     final type = device?.sourceType ?? 'Unknown Type';
 
-    // Codec — from Redux state, fallback to hub session
-    final hubSession = _hub.getSession(slug);
-    final codec = session.codec ?? hubSession?.negotiatedVideoCodec ?? '—';
+    // Codec — use the active track's codec
+    final activeTrack = _hub.getActiveVideoTrack(slug);
+    final codec =
+        _hub.getVideoTrackCodec(slug, activeTrack) ?? session.codec ?? '—';
 
     // Renderer + textureId — still from hub (not in Redux)
     final renderer = _hub.getRenderer(slug);
