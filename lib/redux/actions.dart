@@ -75,6 +75,13 @@ class SetSessionTextureId {
   SetSessionTextureId(this.slug, this.textureId);
 }
 
+/// Set audio enabled/disabled for a camera.
+class SetAudioEnabled {
+  final String slug;
+  final bool enabled;
+  SetAudioEnabled(this.slug, this.enabled);
+}
+
 /// Remove a single camera session (on disconnect).
 class RemoveSession {
   final String slug;

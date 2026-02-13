@@ -87,6 +87,13 @@ SessionState sessionReducer(SessionState state, dynamic action) {
     return state.copyWith(sessions: updated);
   }
 
+  if (action is SetAudioEnabled) {
+    final current = state.sessions[action.slug] ?? const CameraSessionInfo();
+    final updated = Map<String, CameraSessionInfo>.from(state.sessions);
+    updated[action.slug] = current.copyWith(audioEnabled: action.enabled);
+    return state.copyWith(sessions: updated);
+  }
+
   if (action is RemoveSession) {
     final updated = Map<String, CameraSessionInfo>.from(state.sessions)
       ..remove(action.slug);

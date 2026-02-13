@@ -16,12 +16,15 @@ import 'selectors.dart';
 // Auth / Hub Initialization
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Login and initialize the SignalR hub. Does NOT fetch cameras.
+/// Initialize SignalR hub with explicit URL. Does NOT fetch cameras.
 ///
 /// Cameras are loaded from persistence. Use [fetchCameras] to refresh.
-ThunkAction<AppState> loginAndInitHub({required AuthService authService}) {
+ThunkAction<AppState> initializeSignalRThunk({
+  required AuthService authService,
+  required String signalRUrl,
+}) {
   return (Store<AppState> store) async {
-    dev.log('[Thunk] loginAndInitHub: starting');
+    dev.log('[Thunk] initializeSignalRThunk: starting');
     store.dispatch(SetServerStatus(ServerStatus.connecting));
 
     try {
@@ -40,8 +43,8 @@ ThunkAction<AppState> loginAndInitHub({required AuthService authService}) {
 
       // Initialize SignalR hub
       final hub = SignalRSessionHub.instance;
-      await hub.initialize('https://$url/SignalingHub', authService);
-      dev.log('[Thunk] loginAndInitHub: hub initialized');
+      await hub.initialize(signalRUrl, authService);
+      dev.log('[Thunk] initializeSignalRThunk: hub initialized');
 
       // Sync any existing sessions (e.g., survived page navigation)
       for (final entry in hub.activeSessions.entries) {
@@ -56,12 +59,37 @@ ThunkAction<AppState> loginAndInitHub({required AuthService authService}) {
 
       store.dispatch(SetServerStatus(ServerStatus.connected));
       dev.log(
-        '[Thunk] loginAndInitHub: complete (${store.state.cameras.cameras.length} cameras from persist)',
+        '[Thunk] initializeSignalRThunk: complete '
+        '(${store.state.cameras.cameras.length} cameras from persist)',
       );
     } catch (e) {
-      dev.log('[Thunk] loginAndInitHub: ERROR $e');
+      dev.log('[Thunk] initializeSignalRThunk: ERROR $e');
       store.dispatch(SetServerStatus(ServerStatus.error));
     }
+  };
+}
+
+/// Convenience wrapper — uses the global [url] from config.dart.
+ThunkAction<AppState> loginAndInitHub({required AuthService authService}) {
+  return initializeSignalRThunk(
+    authService: authService,
+    signalRUrl: 'https://$url/SignalingHub',
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Hub Disposal
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Shutdown the SignalR hub, clear all sessions, and reset server status.
+ThunkAction<AppState> disposeSignalRThunk() {
+  return (Store<AppState> store) async {
+    dev.log('[Thunk] disposeSignalRThunk: shutting down');
+    final hub = SignalRSessionHub.instance;
+    await hub.shutdown();
+    store.dispatch(ClearSessions());
+    store.dispatch(SetServerStatus(ServerStatus.idle));
+    dev.log('[Thunk] disposeSignalRThunk: complete');
   };
 }
 
@@ -193,6 +221,20 @@ ThunkAction<AppState> switchVideoTrack(String slug, int trackIndex) {
     final hub = SignalRSessionHub.instance;
     if (hub.switchVideoTrack(slug, trackIndex)) {
       store.dispatch(SetActiveVideoTrack(slug, trackIndex));
+    }
+  };
+}
+
+/// Toggle audio track for a camera.
+///
+/// Calls the hub to enable/disable the audio track, then updates Redux.
+/// Pass [enable] to force a specific state, or omit to toggle.
+ThunkAction<AppState> toggleAudioTrack(String cameraId, {bool? enable}) {
+  return (Store<AppState> store) async {
+    final hub = SignalRSessionHub.instance;
+    final newState = hub.toggleAudio(cameraId, enable: enable);
+    if (newState != null) {
+      store.dispatch(SetAudioEnabled(cameraId, newState));
     }
   };
 }

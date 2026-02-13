@@ -11,6 +11,7 @@ class CameraSessionInfo {
   final int audioTrackCount;
   final int activeVideoTrack;
   final int? textureId;
+  final bool audioEnabled;
 
   const CameraSessionInfo({
     this.status = ConnectionStatus.idle,
@@ -19,6 +20,7 @@ class CameraSessionInfo {
     this.audioTrackCount = 0,
     this.activeVideoTrack = 0,
     this.textureId,
+    this.audioEnabled = true,
   });
 
   CameraSessionInfo copyWith({
@@ -28,6 +30,7 @@ class CameraSessionInfo {
     int? audioTrackCount,
     int? activeVideoTrack,
     int? textureId,
+    bool? audioEnabled,
   }) {
     return CameraSessionInfo(
       status: status ?? this.status,
@@ -36,6 +39,7 @@ class CameraSessionInfo {
       audioTrackCount: audioTrackCount ?? this.audioTrackCount,
       activeVideoTrack: activeVideoTrack ?? this.activeVideoTrack,
       textureId: textureId ?? this.textureId,
+      audioEnabled: audioEnabled ?? this.audioEnabled,
     );
   }
 }
