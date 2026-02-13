@@ -1,28 +1,25 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_redux/flutter_redux.dart';
+import 'package:redux/redux.dart';
 import 'package:signalr/demo/camera_list_item.dart';
 import 'package:signalr/auth/auth.dart';
-import 'dart:developer' as dev;
 
 import '../signalr/signalr_session_hub.dart';
-import '../store/favorites_store.dart';
+import '../redux/app_state.dart';
+import '../redux/actions.dart';
+import '../redux/selectors.dart';
+import '../redux/thunks.dart' as thunks;
+import '../redux/camera_session_info.dart';
 
 /// Camera list widget for fixed toolbar layout.
 class CameraList extends StatefulWidget {
   const CameraList({
     super.key,
-    required this.hub,
     required this.authService,
-    required this.favoritesOnly,
-    required this.workingOnly,
-    required this.pendingOnly,
     this.scrollController,
   });
 
-  final SignalRSessionHub hub;
   final AuthService authService;
-  final bool favoritesOnly;
-  final bool workingOnly;
-  final bool pendingOnly;
   final ScrollController? scrollController;
 
   @override
@@ -31,20 +28,9 @@ class CameraList extends StatefulWidget {
 
 /// Camera list as a sliver for scrolling toolbar layout.
 class CameraListSliver extends StatefulWidget {
-  const CameraListSliver({
-    super.key,
-    required this.hub,
-    required this.authService,
-    required this.favoritesOnly,
-    required this.workingOnly,
-    required this.pendingOnly,
-  });
+  const CameraListSliver({super.key, required this.authService});
 
-  final SignalRSessionHub hub;
   final AuthService authService;
-  final bool favoritesOnly;
-  final bool workingOnly;
-  final bool pendingOnly;
 
   @override
   CameraListState createState() => CameraListState();
@@ -52,55 +38,14 @@ class CameraListSliver extends StatefulWidget {
 
 /// Shared state for both CameraList and CameraListSliver.
 ///
-/// Uses renderers from SignalRSessionHub instead of managing local renderers.
-/// This matches the production Redux pattern where textureId is used with Texture widget.
+/// Uses Redux store for camera/session/favorites/filter state.
+/// The SignalRSessionHub singleton still manages renderers + sessions directly.
 class CameraListState extends State<StatefulWidget> {
   final TextEditingController _filterCtrl = TextEditingController();
-  String _filter = '';
 
   static const double _compactBreakpoint = 600;
 
-  final FavoritesStore _store = FavoritesStore();
-  Set<String> _favorites = {};
-  final Set<String> _working = {};
-  final Set<String> _pending = {};
-  final Map<String, String> _codec = {};
-
-  // Access widget properties dynamically
-  SignalRSessionHub get _hub {
-    final w = widget;
-    if (w is CameraList) return w.hub;
-    if (w is CameraListSliver) return w.hub;
-    throw StateError('Invalid widget type');
-  }
-
-  AuthService get _auth {
-    final w = widget;
-    if (w is CameraList) return w.authService;
-    if (w is CameraListSliver) return w.authService;
-    throw StateError('Invalid widget type');
-  }
-
-  bool get _favoritesOnly {
-    final w = widget;
-    if (w is CameraList) return w.favoritesOnly;
-    if (w is CameraListSliver) return w.favoritesOnly;
-    return false;
-  }
-
-  bool get _workingOnly {
-    final w = widget;
-    if (w is CameraList) return w.workingOnly;
-    if (w is CameraListSliver) return w.workingOnly;
-    return false;
-  }
-
-  bool get _pendingOnly {
-    final w = widget;
-    if (w is CameraList) return w.pendingOnly;
-    if (w is CameraListSliver) return w.pendingOnly;
-    return false;
-  }
+  final _hub = SignalRSessionHub.instance;
 
   ScrollController? get _scrollController {
     final w = widget;
@@ -108,163 +53,46 @@ class CameraListState extends State<StatefulWidget> {
     return null;
   }
 
+  Store<AppState> get _store =>
+      StoreProvider.of<AppState>(context, listen: false);
+
   @override
   void initState() {
     super.initState();
     _filterCtrl.addListener(() {
       final q = _filterCtrl.text.trim();
-      if (q != _filter) setState(() => _filter = q);
+      _store.dispatch(SetSearchQuery(q));
     });
-    _loadFavorites();
-    _syncExistingSessions();
-  }
-
-  /// Sync UI state with any existing sessions in the hub.
-  /// This enables session persistence across page navigation.
-  void _syncExistingSessions() {
-    for (final entry in _hub.activeSessions.entries) {
-      final cameraId = entry.key;
-      final session = entry.value;
-
-      // Mark as working if connected
-      if (session.remoteStream != null) {
-        _working.add(cameraId);
-      }
-    }
-  }
-
-  Future<void> _loadFavorites() async {
-    final favs = await _store.loadFavorites();
-    if (!mounted) return;
-    setState(() => _favorites = favs);
-  }
-
-  Future<void> resetFavoritesAndWorking() async {
-    setState(() {
-      _favorites.clear();
-      _working.clear();
-      _pending.clear();
-      _codec.clear();
-    });
-    await _store.saveFavorites(_favorites);
   }
 
   @override
   void dispose() {
-    // No local renderers to dispose - they're managed by hub
     _filterCtrl.dispose();
     super.dispose();
   }
 
-  Iterable<String> get _availableProducers => _auth.devices.keys;
-
-  List<String> _visibleCameras() {
-    var base = _availableProducers.toList()..sort();
-
-    if (_favoritesOnly) {
-      base = base.where((id) => _favorites.contains(id)).toList();
-    }
-
-    bool isWorkingNow(String id) =>
-        _working.contains(id) && _hub.isConnected(id);
-
-    if (_workingOnly && _pendingOnly) {
-      base = base
-          .where((id) => isWorkingNow(id) || _pending.contains(id))
-          .toList();
-    } else if (_workingOnly) {
-      base = base.where(isWorkingNow).toList();
-    } else if (_pendingOnly) {
-      base = base.where((id) => _pending.contains(id)).toList();
-    }
-
-    if (_filter.isNotEmpty) {
-      final f = _filter.toLowerCase();
-      base = base.where((id) {
-        final name = _auth.devices[id]?.name.toLowerCase() ?? '';
-        return id.toLowerCase().contains(f) || name.contains(f);
-      }).toList();
-    }
-
-    return base;
-  }
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Public API (called from toolbar via GlobalKey)
+  // ═══════════════════════════════════════════════════════════════════════════
 
   Future<void> connectAll() async {
-    final targets = _visibleCameras();
-    for (final id in targets) {
-      if (!_hub.isConnected(id)) {
-        await _connect(id);
-      }
-    }
+    _store.dispatch(thunks.connectAllVisible());
   }
 
   Future<void> stopAll() async {
-    final ids = _hub.connectedCameraIds.toList();
-    for (final id in ids) {
-      await _disconnect(id);
-    }
+    _store.dispatch(thunks.stopAll());
   }
 
-  Future<void> _connect(String cameraId) async {
-    dev.log('Connecting $cameraId...');
-
-    // Connect via hub - session AND renderer are managed there
-    // Hub automatically wires renderer.srcObject in its own onTrack callback
-    final session = await _hub.connectToCamera(cameraId);
-    if (session == null) {
-      dev.log('Failed to connect to $cameraId');
-      return;
-    }
-
-    // Set up UI callbacks (these don't override hub's internal wiring)
-    session.onLocalIceCandidate = () {
-      if (!_pending.contains(cameraId) && !_working.contains(cameraId)) {
-        setState(() => _pending.add(cameraId));
-      }
-    };
-
-    session.onRemoteIceCandidate = () {
-      if (!_pending.contains(cameraId) && !_working.contains(cameraId)) {
-        setState(() => _pending.add(cameraId));
-      }
-    };
-
-    session.onConnectionComplete = () {
-      if (_pending.remove(cameraId) || !_working.contains(cameraId)) {
-        setState(() => _working.add(cameraId));
-      }
-    };
-
-    session.onVideoCodecResolved = (codec) {
-      setState(() => _codec[cameraId] = codec);
-    };
+  Future<void> resetFavoritesAndWorking() async {
+    _store.dispatch(thunks.resetFavoritesAndWorking());
   }
 
-  Future<void> _disconnect(String cameraId) async {
-    // Disconnect via hub - renderer is disposed there
-    await _hub.disconnectCamera(cameraId);
-
-    setState(() {
-      _pending.remove(cameraId);
-      _working.remove(cameraId);
-      _codec.remove(cameraId);
-    });
-  }
-
-  Future<void> _toggleFavorite(String cameraId) async {
-    setState(() {
-      if (_favorites.contains(cameraId)) {
-        _favorites.remove(cameraId);
-      } else {
-        _favorites.add(cameraId);
-      }
-    });
-    await _store.saveFavorites(_favorites);
-  }
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Build
+  // ═══════════════════════════════════════════════════════════════════════════
 
   @override
   Widget build(BuildContext context) {
-    // Dispatch to correct build method based on widget type
     if (widget is CameraListSliver) {
       return _buildSliver(context);
     }
@@ -272,51 +100,61 @@ class CameraListState extends State<StatefulWidget> {
   }
 
   Widget _buildList(BuildContext context) {
-    final all = _availableProducers.toList()..sort();
-    final cameras = _visibleCameras();
+    return StoreConnector<AppState, _CameraListVM>(
+      converter: _CameraListVM.fromStore,
+      builder: (context, vm) {
+        if (vm.allSlugs.isEmpty) {
+          return const Center(child: Text('No cameras available'));
+        }
 
-    if (all.isEmpty) {
-      return const Center(child: Text('No cameras available'));
-    }
+        final width = MediaQuery.of(context).size.width;
+        final compact = width < _compactBreakpoint;
 
-    final width = MediaQuery.of(context).size.width;
-    final compact = width < _compactBreakpoint;
-
-    return Column(
-      children: [
-        _buildFilterRow(all.length, cameras.length),
-        Expanded(
-          child: ListView.builder(
-            controller: _scrollController,
-            itemCount: cameras.length,
-            itemBuilder: (context, index) =>
-                _buildCameraItem(cameras[index], compact),
-          ),
-        ),
-      ],
+        return Column(
+          children: [
+            _buildFilterRow(vm.allSlugs.length, vm.visibleSlugs.length),
+            Expanded(
+              child: ListView.builder(
+                controller: _scrollController,
+                itemCount: vm.visibleSlugs.length,
+                itemBuilder: (context, index) =>
+                    _buildCameraItem(vm.visibleSlugs[index], compact, vm),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
   Widget _buildSliver(BuildContext context) {
-    final all = _availableProducers.toList()..sort();
-    final cameras = _visibleCameras();
-    final width = MediaQuery.of(context).size.width;
-    final compact = width < _compactBreakpoint;
+    return StoreConnector<AppState, _CameraListVM>(
+      converter: _CameraListVM.fromStore,
+      builder: (context, vm) {
+        final width = MediaQuery.of(context).size.width;
+        final compact = width < _compactBreakpoint;
 
-    return SliverMainAxisGroup(
-      slivers: [
-        SliverToBoxAdapter(child: _buildFilterRow(all.length, cameras.length)),
-        if (cameras.isEmpty)
-          const SliverFillRemaining(
-            child: Center(child: Text('No cameras available')),
-          )
-        else
-          SliverList.builder(
-            itemCount: cameras.length,
-            itemBuilder: (context, index) =>
-                _buildCameraItem(cameras[index], compact),
-          ),
-      ],
+        return SliverMainAxisGroup(
+          slivers: [
+            SliverToBoxAdapter(
+              child: _buildFilterRow(
+                vm.allSlugs.length,
+                vm.visibleSlugs.length,
+              ),
+            ),
+            if (vm.visibleSlugs.isEmpty)
+              const SliverFillRemaining(
+                child: Center(child: Text('No cameras available')),
+              )
+            else
+              SliverList.builder(
+                itemCount: vm.visibleSlugs.length,
+                itemBuilder: (context, index) =>
+                    _buildCameraItem(vm.visibleSlugs[index], compact, vm),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -334,7 +172,7 @@ class CameraListState extends State<StatefulWidget> {
                 isDense: true,
                 contentPadding: const EdgeInsets.symmetric(vertical: 8),
                 border: const OutlineInputBorder(),
-                suffixIcon: _filter.isEmpty
+                suffixIcon: _filterCtrl.text.isEmpty
                     ? null
                     : IconButton(
                         tooltip: 'Clear',
@@ -351,47 +189,69 @@ class CameraListState extends State<StatefulWidget> {
     );
   }
 
-  Widget _buildCameraItem(String cameraId, bool compact) {
-    final connected = _hub.isConnected(cameraId);
-    // Get textureId and renderer from hub
-    final textureId = _hub.getTextureId(cameraId);
-    final renderer = _hub.getRenderer(cameraId);
-    final isFav = _favorites.contains(cameraId);
-    final device = _auth.devices[cameraId];
+  Widget _buildCameraItem(String slug, bool compact, _CameraListVM vm) {
+    final store = _store;
+    final state = store.state;
+    final device = selectDevice(state, slug);
+    final session = selectSessionInfo(state, slug);
+    final connected = session.status == ConnectionStatus.connected;
+    final isPending = session.status == ConnectionStatus.pending;
+    final isWorking = connected;
+    final isFav = selectIsFavorite(state, slug);
     final name = device?.name ?? 'Unknown Camera';
     final type = device?.sourceType ?? 'Unknown Type';
-    final session = _hub.getSession(cameraId);
-    final codec = _codec[cameraId] ?? session?.negotiatedVideoCodec ?? '—';
+
+    // Codec — from Redux state, fallback to hub session
+    final hubSession = _hub.getSession(slug);
+    final codec = session.codec ?? hubSession?.negotiatedVideoCodec ?? '—';
+
+    // Renderer + textureId — still from hub (not in Redux)
+    final renderer = _hub.getRenderer(slug);
+    final textureId = _hub.getTextureId(slug);
 
     // Track info
-    final vCount = _hub.getVideoTrackCount(cameraId);
-    final aCount = _hub.getAudioTrackCount(cameraId);
-    final trackInfo = connected ? 'V:$vCount A:$aCount' : null;
+    final trackInfo = selectTrackInfo(state, slug);
 
     return CameraListItem(
-      cameraId: cameraId,
+      cameraId: slug,
       name: name,
       type: type,
       codec: codec,
       connected: connected,
       isFav: isFav,
-      isPending: _pending.contains(cameraId),
-      isWorking: _working.contains(cameraId) && connected,
+      isPending: isPending,
+      isWorking: isWorking,
       textureId: textureId,
       renderer: renderer,
-      onConnect: () => _connect(cameraId),
-      onDisconnect: () => _disconnect(cameraId),
-      onToggleFavorite: () => _toggleFavorite(cameraId),
+      onConnect: () => store.dispatch(thunks.connectCamera(slug)),
+      onDisconnect: () => store.dispatch(thunks.disconnectCamera(slug)),
+      onToggleFavorite: () =>
+          store.dispatch(thunks.toggleFavoriteAndPersist(slug)),
       compact: compact,
-      statsNotifier: _hub.getStatsNotifier(cameraId),
+      statsNotifier: _hub.getStatsNotifier(slug),
       trackInfo: trackInfo,
-      videoTrackCount: vCount,
-      activeVideoTrack: _hub.getActiveVideoTrack(cameraId),
-      onSwitchTrack: (index) {
-        if (_hub.switchVideoTrack(cameraId, index)) {
-          setState(() {}); // Rebuild to update track switcher UI
-        }
-      },
+      videoTrackCount: session.videoTrackCount,
+      activeVideoTrack: session.activeVideoTrack,
+      onSwitchTrack: (index) =>
+          store.dispatch(thunks.switchVideoTrack(slug, index)),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// View Model
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _CameraListVM {
+  final List<String> allSlugs;
+  final List<String> visibleSlugs;
+
+  _CameraListVM({required this.allSlugs, required this.visibleSlugs});
+
+  static _CameraListVM fromStore(Store<AppState> store) {
+    return _CameraListVM(
+      allSlugs: selectAllSlugs(store.state),
+      visibleSlugs: selectVisibleCameras(store.state),
     );
   }
 }

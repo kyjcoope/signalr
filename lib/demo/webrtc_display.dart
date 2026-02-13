@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:signalr/config.dart';
-import 'dart:developer' as dev;
+import 'package:flutter_redux/flutter_redux.dart';
+import 'package:redux/redux.dart';
 
-import 'package:signalr/models/models.dart';
 import 'package:signalr/auth/auth.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
-import 'package:signalr/store/favorites_store.dart';
+import 'package:signalr/redux/app_state.dart';
+import 'package:signalr/redux/thunks.dart';
 import 'camera_list.dart';
 
 /// Main display widget for WebRTC camera streams.
@@ -17,15 +17,7 @@ class WebRtcDisplay extends StatefulWidget {
 }
 
 class _WebRtcDisplayState extends State<WebRtcDisplay> {
-  final hub = SignalRSessionHub.instance;
-  final authService = AuthService();
-
-  bool _devicesRegistered = false;
-
-  final _store = FavoritesStore();
-  bool _favoritesOnly = false;
-  bool _workingOnly = false;
-  bool _pendingOnly = false;
+  final _authService = AuthService();
 
   final GlobalKey<CameraListState> _cameraListKey =
       GlobalKey<CameraListState>();
@@ -37,15 +29,14 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
   @override
   void initState() {
     super.initState();
-    _initialize();
-    _loadToggles();
     _scrollController.addListener(_onScroll);
+    _initialize();
   }
 
   @override
   void dispose() {
     _scrollController.dispose();
-    hub.shutdown();
+    SignalRSessionHub.instance.shutdown();
     super.dispose();
   }
 
@@ -65,51 +56,8 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
   }
 
   Future<void> _initialize() async {
-    await authService.login(
-      UserLogin(
-        username: username,
-        password: password,
-        clientName: 'driver',
-        clientID: 'fb2be96f-05a3-4fea-a151-6365feaaf30c',
-        clientVersion: '3.0',
-        grantType: 'password',
-        scopes: '[IdentityServerApi, rabbitmq-jci, api]',
-        clientId_: 'jci-authui-client',
-      ),
-    );
-
-    await hub.initialize('https://$url/SignalingHub', authService);
-
-    if (!mounted) return;
-    setState(() => _devicesRegistered = true);
-    dev.log('SignalRSessionHub initialized');
-  }
-
-  Future<void> _loadToggles() async {
-    final favOnly = await _store.loadFavoritesOnly();
-    final workOnly = await _store.loadWorkingOnly();
-    final pendingOnly = await _store.loadPendingOnly();
-    if (!mounted) return;
-    setState(() {
-      _favoritesOnly = favOnly;
-      _workingOnly = workOnly;
-      _pendingOnly = pendingOnly;
-    });
-  }
-
-  Future<void> _setFavoritesOnly(bool v) async {
-    setState(() => _favoritesOnly = v);
-    await _store.saveFavoritesOnly(v);
-  }
-
-  Future<void> _setWorkingOnly(bool v) async {
-    setState(() => _workingOnly = v);
-    await _store.saveWorkingOnly(v);
-  }
-
-  Future<void> _setPendingOnly(bool v) async {
-    setState(() => _pendingOnly = v);
-    await _store.savePendingOnly(v);
+    final store = StoreProvider.of<AppState>(context, listen: false);
+    store.dispatch(loginAndFetchCameras(authService: _authService));
   }
 
   @override
@@ -117,20 +65,25 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
     final width = MediaQuery.of(context).size.width;
     final isCompact = width < _compactBreakpoint;
 
-    if (!_devicesRegistered) {
-      return const Center(child: CircularProgressIndicator());
-    }
+    return StoreConnector<AppState, bool>(
+      converter: (store) => store.state.cameras.isLoaded,
+      builder: (context, isLoaded) {
+        if (!isLoaded) {
+          return const Center(child: CircularProgressIndicator());
+        }
 
-    // On compact screens, toolbar scrolls with content
-    // On large screens, toolbar is fixed at top
-    return Scaffold(
-      body: isCompact ? _buildScrollingLayout() : _buildFixedToolbarLayout(),
-      floatingActionButton: _showScrollToTop
-          ? FloatingActionButton.small(
-              onPressed: _scrollToTop,
-              child: const Icon(Icons.keyboard_arrow_up),
-            )
-          : null,
+        return Scaffold(
+          body: isCompact
+              ? _buildScrollingLayout()
+              : _buildFixedToolbarLayout(),
+          floatingActionButton: _showScrollToTop
+              ? FloatingActionButton.small(
+                  onPressed: _scrollToTop,
+                  child: const Icon(Icons.keyboard_arrow_up),
+                )
+              : null,
+        );
+      },
     );
   }
 
@@ -140,28 +93,12 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
-          _ControlsToolbar(
-            favoritesOnly: _favoritesOnly,
-            workingOnly: _workingOnly,
-            pendingOnly: _pendingOnly,
-            onFavoritesChanged: _setFavoritesOnly,
-            onWorkingChanged: _setWorkingOnly,
-            onPendingChanged: _setPendingOnly,
-            onConnectAll: () => _cameraListKey.currentState?.connectAll(),
-            onStopAll: () => _cameraListKey.currentState?.stopAll(),
-            onReset: () =>
-                _cameraListKey.currentState?.resetFavoritesAndWorking(),
-            isCompact: false,
-          ),
+          _ControlsToolbar(cameraListKey: _cameraListKey),
           const SizedBox(height: 12),
           Expanded(
             child: CameraList(
               key: _cameraListKey,
-              hub: hub,
-              authService: authService,
-              favoritesOnly: _favoritesOnly,
-              workingOnly: _workingOnly,
-              pendingOnly: _pendingOnly,
+              authService: _authService,
               scrollController: _scrollController,
             ),
           ),
@@ -178,30 +115,14 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-            child: _ControlsToolbar(
-              favoritesOnly: _favoritesOnly,
-              workingOnly: _workingOnly,
-              pendingOnly: _pendingOnly,
-              onFavoritesChanged: _setFavoritesOnly,
-              onWorkingChanged: _setWorkingOnly,
-              onPendingChanged: _setPendingOnly,
-              onConnectAll: () => _cameraListKey.currentState?.connectAll(),
-              onStopAll: () => _cameraListKey.currentState?.stopAll(),
-              onReset: () =>
-                  _cameraListKey.currentState?.resetFavoritesAndWorking(),
-              isCompact: true,
-            ),
+            child: _ControlsToolbar(cameraListKey: _cameraListKey),
           ),
         ),
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           sliver: CameraListSliver(
             key: _cameraListKey,
-            hub: hub,
-            authService: authService,
-            favoritesOnly: _favoritesOnly,
-            workingOnly: _workingOnly,
-            pendingOnly: _pendingOnly,
+            authService: _authService,
           ),
         ),
       ],
@@ -209,86 +130,73 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
   }
 }
 
-/// Compact toolbar with toggles and action buttons.
+/// Compact toolbar with toggles and action buttons — now Redux-connected.
 class _ControlsToolbar extends StatelessWidget {
-  const _ControlsToolbar({
-    required this.favoritesOnly,
-    required this.workingOnly,
-    required this.pendingOnly,
-    required this.onFavoritesChanged,
-    required this.onWorkingChanged,
-    required this.onPendingChanged,
-    required this.onConnectAll,
-    required this.onStopAll,
-    required this.onReset,
-    required this.isCompact,
-  });
+  const _ControlsToolbar({required this.cameraListKey});
 
-  final bool favoritesOnly;
-  final bool workingOnly;
-  final bool pendingOnly;
-  final ValueChanged<bool> onFavoritesChanged;
-  final ValueChanged<bool> onWorkingChanged;
-  final ValueChanged<bool> onPendingChanged;
-  final VoidCallback onConnectAll;
-  final VoidCallback onStopAll;
-  final VoidCallback onReset;
-  final bool isCompact;
+  final GlobalKey<CameraListState> cameraListKey;
 
   @override
   Widget build(BuildContext context) {
-    if (isCompact) {
-      return _buildCompactToolbar(context);
-    }
-    return _buildWideToolbar(context);
+    final width = MediaQuery.of(context).size.width;
+    final isCompact = width < 600;
+
+    return StoreConnector<AppState, _ToolbarVM>(
+      converter: _ToolbarVM.fromStore,
+      builder: (context, vm) {
+        if (isCompact) {
+          return _buildCompact(context, vm);
+        }
+        return _buildWide(context, vm);
+      },
+    );
   }
 
-  Widget _buildWideToolbar(BuildContext context) {
+  Widget _buildWide(BuildContext context, _ToolbarVM vm) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
           children: [
-            // Toggles
             _CompactToggle(
               icon: Icons.star,
               color: Colors.amber,
-              value: favoritesOnly,
-              onChanged: onFavoritesChanged,
+              value: vm.favoritesOnly,
+              onChanged: vm.onFavoritesChanged,
               tooltip: 'Favorites only',
             ),
             const SizedBox(width: 8),
             _CompactToggle(
               icon: Icons.hourglass_top,
               color: Colors.blue,
-              value: pendingOnly,
-              onChanged: onPendingChanged,
+              value: vm.pendingOnly,
+              onChanged: vm.onPendingChanged,
               tooltip: 'Pending only',
             ),
             const SizedBox(width: 8),
             _CompactToggle(
               icon: Icons.check_circle,
               color: Colors.green,
-              value: workingOnly,
-              onChanged: onWorkingChanged,
+              value: vm.workingOnly,
+              onChanged: vm.onWorkingChanged,
               tooltip: 'Working only',
             ),
             const Spacer(),
-            // Actions
             ElevatedButton.icon(
-              onPressed: onConnectAll,
+              onPressed: () => cameraListKey.currentState?.connectAll(),
               icon: const Icon(Icons.play_arrow, size: 18),
               label: const Text('Connect All'),
             ),
             const SizedBox(width: 8),
             OutlinedButton.icon(
-              onPressed: onStopAll,
+              onPressed: () => cameraListKey.currentState?.stopAll(),
               icon: const Icon(Icons.stop, size: 18, color: Colors.red),
               label: const Text('Stop All'),
             ),
             const SizedBox(width: 8),
             IconButton(
-              onPressed: onReset,
+              onPressed: () =>
+                  cameraListKey.currentState?.resetFavoritesAndWorking(),
               icon: const Icon(Icons.refresh),
               tooltip: 'Reset',
             ),
@@ -298,50 +206,49 @@ class _ControlsToolbar extends StatelessWidget {
     );
   }
 
-  Widget _buildCompactToolbar(BuildContext context) {
+  Widget _buildCompact(BuildContext context, _ToolbarVM vm) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(8),
         child: Row(
           children: [
-            // Toggles - compact icon buttons
             _CompactToggle(
               icon: Icons.star,
               color: Colors.amber,
-              value: favoritesOnly,
-              onChanged: onFavoritesChanged,
+              value: vm.favoritesOnly,
+              onChanged: vm.onFavoritesChanged,
               tooltip: 'Favorites',
             ),
             _CompactToggle(
               icon: Icons.hourglass_top,
               color: Colors.blue,
-              value: pendingOnly,
-              onChanged: onPendingChanged,
+              value: vm.pendingOnly,
+              onChanged: vm.onPendingChanged,
               tooltip: 'Pending',
             ),
             _CompactToggle(
               icon: Icons.check_circle,
               color: Colors.green,
-              value: workingOnly,
-              onChanged: onWorkingChanged,
+              value: vm.workingOnly,
+              onChanged: vm.onWorkingChanged,
               tooltip: 'Working',
             ),
             const Spacer(),
-            // Actions - icon buttons on mobile
             IconButton(
-              onPressed: onConnectAll,
+              onPressed: () => cameraListKey.currentState?.connectAll(),
               icon: const Icon(Icons.play_arrow, color: Colors.green),
               tooltip: 'Connect All',
               visualDensity: VisualDensity.compact,
             ),
             IconButton(
-              onPressed: onStopAll,
+              onPressed: () => cameraListKey.currentState?.stopAll(),
               icon: const Icon(Icons.stop, color: Colors.red),
               tooltip: 'Stop All',
               visualDensity: VisualDensity.compact,
             ),
             IconButton(
-              onPressed: onReset,
+              onPressed: () =>
+                  cameraListKey.currentState?.resetFavoritesAndWorking(),
               icon: const Icon(Icons.refresh),
               tooltip: 'Reset',
               visualDensity: VisualDensity.compact,
@@ -349,6 +256,36 @@ class _ControlsToolbar extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _ToolbarVM {
+  final bool favoritesOnly;
+  final bool workingOnly;
+  final bool pendingOnly;
+  final void Function(bool) onFavoritesChanged;
+  final void Function(bool) onWorkingChanged;
+  final void Function(bool) onPendingChanged;
+
+  _ToolbarVM({
+    required this.favoritesOnly,
+    required this.workingOnly,
+    required this.pendingOnly,
+    required this.onFavoritesChanged,
+    required this.onWorkingChanged,
+    required this.onPendingChanged,
+  });
+
+  static _ToolbarVM fromStore(Store<AppState> store) {
+    final filters = store.state.filters;
+    return _ToolbarVM(
+      favoritesOnly: filters.favoritesOnly,
+      workingOnly: filters.workingOnly,
+      pendingOnly: filters.pendingOnly,
+      onFavoritesChanged: (v) => store.dispatch(setFavoritesOnlyAndPersist(v)),
+      onWorkingChanged: (v) => store.dispatch(setWorkingOnlyAndPersist(v)),
+      onPendingChanged: (v) => store.dispatch(setPendingOnlyAndPersist(v)),
     );
   }
 }
