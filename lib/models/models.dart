@@ -4,6 +4,18 @@ class Device {
   final String name;
 
   Device({required this.guid, required this.sourceType, required this.name});
+
+  factory Device.fromJson(Map<String, dynamic> json) => Device(
+    guid: json['guid'] as String,
+    sourceType: json['sourceType'] as String,
+    name: json['name'] as String,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'guid': guid,
+    'sourceType': sourceType,
+    'name': name,
+  };
 }
 
 class UserLogin {

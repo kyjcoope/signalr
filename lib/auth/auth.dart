@@ -53,6 +53,13 @@ class AuthService {
     }
   }
 
+  /// Re-fetch devices from the API using the existing session.
+  Future<void> fetchDevices() async {
+    if (_sessionId == null) throw StateError('Not logged in');
+    devices = await _fetchDevices(url, _sessionId!);
+    dev.log('Fetched ${devices.length} devices');
+  }
+
   Future<Map<String, Device>> _fetchDevices(String host, String sid) async {
     const payload = ObjectRequest(
       typeFullName:

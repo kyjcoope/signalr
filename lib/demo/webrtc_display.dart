@@ -57,7 +57,7 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
 
   Future<void> _initialize() async {
     final store = StoreProvider.of<AppState>(context, listen: false);
-    store.dispatch(loginAndFetchCameras(authService: _authService));
+    store.dispatch(loginAndInitHub(authService: _authService));
   }
 
   @override
@@ -67,11 +67,7 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
 
     return StoreConnector<AppState, bool>(
       converter: (store) => store.state.cameras.isLoaded,
-      builder: (context, isLoaded) {
-        if (!isLoaded) {
-          return const Center(child: CircularProgressIndicator());
-        }
-
+      builder: (context, hasCameras) {
         return Scaffold(
           body: isCompact
               ? _buildScrollingLayout()
@@ -93,7 +89,10 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
-          _ControlsToolbar(cameraListKey: _cameraListKey),
+          _ControlsToolbar(
+            cameraListKey: _cameraListKey,
+            authService: _authService,
+          ),
           const SizedBox(height: 12),
           Expanded(
             child: CameraList(
@@ -115,7 +114,10 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-            child: _ControlsToolbar(cameraListKey: _cameraListKey),
+            child: _ControlsToolbar(
+              cameraListKey: _cameraListKey,
+              authService: _authService,
+            ),
           ),
         ),
         SliverPadding(
@@ -132,9 +134,13 @@ class _WebRtcDisplayState extends State<WebRtcDisplay> {
 
 /// Compact toolbar with toggles and action buttons — now Redux-connected.
 class _ControlsToolbar extends StatelessWidget {
-  const _ControlsToolbar({required this.cameraListKey});
+  const _ControlsToolbar({
+    required this.cameraListKey,
+    required this.authService,
+  });
 
   final GlobalKey<CameraListState> cameraListKey;
+  final AuthService authService;
 
   @override
   Widget build(BuildContext context) {
@@ -142,7 +148,7 @@ class _ControlsToolbar extends StatelessWidget {
     final isCompact = width < 600;
 
     return StoreConnector<AppState, _ToolbarVM>(
-      converter: _ToolbarVM.fromStore,
+      converter: (store) => _ToolbarVM.fromStore(store, authService),
       builder: (context, vm) {
         if (isCompact) {
           return _buildCompact(context, vm);
@@ -152,12 +158,46 @@ class _ControlsToolbar extends StatelessWidget {
     );
   }
 
+  /// Status dot: red=idle/error, amber=connecting, green=connected.
+  Widget _statusDot(ServerStatus status) {
+    final Color color;
+    final String tooltip;
+    switch (status) {
+      case ServerStatus.idle:
+        color = Colors.grey;
+        tooltip = 'Not connected';
+        break;
+      case ServerStatus.connecting:
+        color = Colors.amber;
+        tooltip = 'Connecting…';
+        break;
+      case ServerStatus.connected:
+        color = Colors.green;
+        tooltip = 'Connected';
+        break;
+      case ServerStatus.error:
+        color = Colors.red;
+        tooltip = 'Connection error';
+        break;
+    }
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        width: 12,
+        height: 12,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+      ),
+    );
+  }
+
   Widget _buildWide(BuildContext context, _ToolbarVM vm) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
           children: [
+            _statusDot(vm.serverStatus),
+            const SizedBox(width: 12),
             _CompactToggle(
               icon: Icons.star,
               color: Colors.amber,
@@ -182,8 +222,25 @@ class _ControlsToolbar extends StatelessWidget {
               tooltip: 'Working only',
             ),
             const Spacer(),
+            if (vm.isFetching)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12),
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            OutlinedButton.icon(
+              onPressed: vm.canFetch ? vm.onFetchCameras : null,
+              icon: const Icon(Icons.cloud_download, size: 18),
+              label: const Text('Fetch Cameras'),
+            ),
+            const SizedBox(width: 8),
             ElevatedButton.icon(
-              onPressed: () => cameraListKey.currentState?.connectAll(),
+              onPressed: vm.canFetch
+                  ? () => cameraListKey.currentState?.connectAll()
+                  : null,
               icon: const Icon(Icons.play_arrow, size: 18),
               label: const Text('Connect All'),
             ),
@@ -212,6 +269,8 @@ class _ControlsToolbar extends StatelessWidget {
         padding: const EdgeInsets.all(8),
         child: Row(
           children: [
+            _statusDot(vm.serverStatus),
+            const SizedBox(width: 8),
             _CompactToggle(
               icon: Icons.star,
               color: Colors.amber,
@@ -234,8 +293,22 @@ class _ControlsToolbar extends StatelessWidget {
               tooltip: 'Working',
             ),
             const Spacer(),
+            if (vm.isFetching)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
             IconButton(
-              onPressed: () => cameraListKey.currentState?.connectAll(),
+              onPressed: vm.canFetch ? vm.onFetchCameras : null,
+              icon: const Icon(Icons.cloud_download),
+              tooltip: 'Fetch Cameras',
+              visualDensity: VisualDensity.compact,
+            ),
+            IconButton(
+              onPressed: vm.canFetch
+                  ? () => cameraListKey.currentState?.connectAll()
+                  : null,
               icon: const Icon(Icons.play_arrow, color: Colors.green),
               tooltip: 'Connect All',
               visualDensity: VisualDensity.compact,
@@ -264,28 +337,42 @@ class _ToolbarVM {
   final bool favoritesOnly;
   final bool workingOnly;
   final bool pendingOnly;
+  final ServerStatus serverStatus;
+  final bool isFetching;
   final void Function(bool) onFavoritesChanged;
   final void Function(bool) onWorkingChanged;
   final void Function(bool) onPendingChanged;
+  final VoidCallback onFetchCameras;
+
+  /// Fetch/connect buttons enabled only when server is connected and not mid-fetch.
+  bool get canFetch => serverStatus == ServerStatus.connected && !isFetching;
 
   _ToolbarVM({
     required this.favoritesOnly,
     required this.workingOnly,
     required this.pendingOnly,
+    required this.serverStatus,
+    required this.isFetching,
     required this.onFavoritesChanged,
     required this.onWorkingChanged,
     required this.onPendingChanged,
+    required this.onFetchCameras,
   });
 
-  static _ToolbarVM fromStore(Store<AppState> store) {
+  static _ToolbarVM fromStore(Store<AppState> store, AuthService authService) {
     final filters = store.state.filters;
+    final auth = store.state.auth;
     return _ToolbarVM(
       favoritesOnly: filters.favoritesOnly,
       workingOnly: filters.workingOnly,
       pendingOnly: filters.pendingOnly,
+      serverStatus: auth.serverStatus,
+      isFetching: auth.isFetchingCameras,
       onFavoritesChanged: (v) => store.dispatch(setFavoritesOnlyAndPersist(v)),
       onWorkingChanged: (v) => store.dispatch(setWorkingOnlyAndPersist(v)),
       onPendingChanged: (v) => store.dispatch(setPendingOnlyAndPersist(v)),
+      onFetchCameras: () =>
+          store.dispatch(fetchCameras(authService: authService)),
     );
   }
 }

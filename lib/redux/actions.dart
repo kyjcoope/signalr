@@ -1,5 +1,22 @@
 import '../models/models.dart';
+import 'app_state.dart';
 import 'camera_session_info.dart';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Auth Actions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Set server connection status (idle/connecting/connected/error).
+class SetServerStatus {
+  final ServerStatus status;
+  SetServerStatus(this.status);
+}
+
+/// Set whether cameras are currently being fetched.
+class SetFetchingCameras {
+  final bool value;
+  SetFetchingCameras(this.value);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Camera Actions

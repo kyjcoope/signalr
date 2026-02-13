@@ -5,11 +5,26 @@ import 'camera_session_info.dart';
 /// Root reducer — delegates to sub-reducers.
 AppState appReducer(AppState state, dynamic action) {
   return AppState(
+    auth: authReducer(state.auth, action),
     cameras: cameraReducer(state.cameras, action),
     sessions: sessionReducer(state.sessions, action),
     filters: filterReducer(state.filters, action),
     favorites: favoritesReducer(state.favorites, action),
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Auth Reducer
+// ═══════════════════════════════════════════════════════════════════════════
+
+AuthState authReducer(AuthState state, dynamic action) {
+  if (action is SetServerStatus) {
+    return state.copyWith(serverStatus: action.status);
+  }
+  if (action is SetFetchingCameras) {
+    return state.copyWith(isFetchingCameras: action.value);
+  }
+  return state;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

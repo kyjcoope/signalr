@@ -13,61 +13,81 @@ import 'camera_session_info.dart';
 import 'selectors.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Auth / Camera Thunks
+// Auth / Hub Initialization
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Login, fetch cameras, initialize SignalR hub, and load favorites.
-ThunkAction<AppState> loginAndFetchCameras({required AuthService authService}) {
+/// Login and initialize the SignalR hub. Does NOT fetch cameras.
+///
+/// Cameras are loaded from persistence. Use [fetchCameras] to refresh.
+ThunkAction<AppState> loginAndInitHub({required AuthService authService}) {
   return (Store<AppState> store) async {
-    dev.log('[Thunk] loginAndFetchCameras: starting');
+    dev.log('[Thunk] loginAndInitHub: starting');
+    store.dispatch(SetServerStatus(ServerStatus.connecting));
 
-    await authService.login(
-      UserLogin(
-        username: username,
-        password: password,
-        clientName: 'driver',
-        clientID: 'fb2be96f-05a3-4fea-a151-6365feaaf30c',
-        clientVersion: '3.0',
-        grantType: 'password',
-        scopes: '[IdentityServerApi, rabbitmq-jci, api]',
-        clientId_: 'jci-authui-client',
-      ),
-    );
+    try {
+      await authService.login(
+        UserLogin(
+          username: username,
+          password: password,
+          clientName: 'driver',
+          clientID: 'fb2be96f-05a3-4fea-a151-6365feaaf30c',
+          clientVersion: '3.0',
+          grantType: 'password',
+          scopes: '[IdentityServerApi, rabbitmq-jci, api]',
+          clientId_: 'jci-authui-client',
+        ),
+      );
 
-    // Dispatch cameras to store
-    store.dispatch(SetCameras(authService.devices));
-    dev.log(
-      '[Thunk] loginAndFetchCameras: ${authService.devices.length} cameras loaded',
-    );
+      // Initialize SignalR hub
+      final hub = SignalRSessionHub.instance;
+      await hub.initialize('https://$url/SignalingHub', authService);
+      dev.log('[Thunk] loginAndInitHub: hub initialized');
 
-    // Initialize SignalR hub
-    final hub = SignalRSessionHub.instance;
-    await hub.initialize('https://$url/SignalingHub', authService);
-    dev.log('[Thunk] loginAndFetchCameras: hub initialized');
-
-    // Sync any existing sessions (e.g., survived page navigation)
-    for (final entry in hub.activeSessions.entries) {
-      final cameraId = entry.key;
-      final session = entry.value;
-      if (session.remoteStream != null) {
-        store.dispatch(SetSessionStatus(cameraId, ConnectionStatus.connected));
+      // Sync any existing sessions (e.g., survived page navigation)
+      for (final entry in hub.activeSessions.entries) {
+        final cameraId = entry.key;
+        final session = entry.value;
+        if (session.remoteStream != null) {
+          store.dispatch(
+            SetSessionStatus(cameraId, ConnectionStatus.connected),
+          );
+        }
       }
+
+      store.dispatch(SetServerStatus(ServerStatus.connected));
+      dev.log(
+        '[Thunk] loginAndInitHub: complete (${store.state.cameras.cameras.length} cameras from persist)',
+      );
+    } catch (e) {
+      dev.log('[Thunk] loginAndInitHub: ERROR $e');
+      store.dispatch(SetServerStatus(ServerStatus.error));
     }
+  };
+}
 
-    // Load favorites from storage
-    final favStore = FavoritesStore();
-    final favs = await favStore.loadFavorites();
-    store.dispatch(SetFavorites(favs));
+// ═══════════════════════════════════════════════════════════════════════════
+// Camera Fetch
+// ═══════════════════════════════════════════════════════════════════════════
 
-    // Load filter toggles from storage
-    final favOnly = await favStore.loadFavoritesOnly();
-    final workOnly = await favStore.loadWorkingOnly();
-    final pendingOnly = await favStore.loadPendingOnly();
-    store.dispatch(SetFavoritesOnly(favOnly));
-    store.dispatch(SetWorkingOnly(workOnly));
-    store.dispatch(SetPendingOnly(pendingOnly));
+/// Fetch cameras from the API and update the store.
+///
+/// This acts as a refresh — replaces persisted cameras with fresh data.
+ThunkAction<AppState> fetchCameras({required AuthService authService}) {
+  return (Store<AppState> store) async {
+    dev.log('[Thunk] fetchCameras: fetching...');
+    store.dispatch(SetFetchingCameras(true));
 
-    dev.log('[Thunk] loginAndFetchCameras: complete');
+    try {
+      await authService.fetchDevices();
+      store.dispatch(SetCameras(authService.devices));
+      dev.log(
+        '[Thunk] fetchCameras: ${authService.devices.length} cameras loaded',
+      );
+    } catch (e) {
+      dev.log('[Thunk] fetchCameras: ERROR $e');
+    } finally {
+      store.dispatch(SetFetchingCameras(false));
+    }
   };
 }
 

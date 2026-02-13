@@ -12,7 +12,7 @@ void main() async {
   HttpOverrides.global = DeviceHttpOverrides();
   WidgetsFlutterBinding.ensureInitialized();
 
-  final store = createAppStore();
+  final store = await createAppStore();
 
   runApp(
     StoreProvider<AppState>(
