@@ -9,7 +9,6 @@ import '../redux/app_state.dart';
 import '../redux/actions.dart';
 import '../redux/selectors.dart';
 import '../redux/thunks.dart' as thunks;
-import '../redux/camera_session_info.dart';
 
 /// Camera list widget for fixed toolbar layout.
 class CameraList extends StatefulWidget {
@@ -193,9 +192,9 @@ class CameraListState extends State<StatefulWidget> {
     final store = _store;
     final state = store.state;
     final device = selectDevice(state, slug);
-    final session = selectSessionInfo(state, slug);
-    final connected = session.status == ConnectionStatus.connected;
-    final isPending = session.status == ConnectionStatus.pending;
+    final session = getWebRtcSession(state, slug);
+    final connected = isWebRtcConnected(state, slug);
+    final isPending = isWebRtcPending(state, slug);
     final isWorking = connected;
     final isFav = selectIsFavorite(state, slug);
     final name = device?.name ?? 'Unknown Camera';
@@ -204,7 +203,9 @@ class CameraListState extends State<StatefulWidget> {
     // Codec — use the active track's codec
     final activeTrack = _hub.getActiveVideoTrack(slug);
     final codec =
-        _hub.getVideoTrackCodec(slug, activeTrack) ?? session.codec ?? '—';
+        _hub.getVideoTrackCodec(slug, activeTrack) ??
+        session?.negotiatedCodec ??
+        '—';
 
     // Renderer + textureId — still from hub (not in Redux)
     final renderer = _hub.getRenderer(slug);
@@ -231,8 +232,8 @@ class CameraListState extends State<StatefulWidget> {
       compact: compact,
       statsNotifier: _hub.getStatsNotifier(slug),
       trackInfo: trackInfo,
-      videoTrackCount: session.videoTrackCount,
-      activeVideoTrack: session.activeVideoTrack,
+      videoTrackCount: session?.videoTrackCount ?? 0,
+      activeVideoTrack: session?.activeVideoTrack ?? 0,
       onSwitchTrack: (index) =>
           store.dispatch(thunks.switchVideoTrack(slug, index)),
     );

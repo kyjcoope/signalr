@@ -7,10 +7,63 @@ import '../models/models.dart';
 import '../signalr/signalr_session_hub.dart';
 import '../store/favorites_store.dart';
 import '../utils/logger.dart';
+import '../webrtc/session_state.dart';
 import 'actions.dart';
 import 'app_state.dart';
-import 'camera_session_info.dart';
 import 'selectors.dart';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Session Sync
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a [WebRtcSessionState] snapshot from the hub's current state.
+///
+/// This is the single point that translates live hub/session state into
+/// a plain Redux value object. All callbacks call this instead of dispatching
+/// individual fine-grained actions.
+void syncSessionToRedux(Store<AppState> store, String slug) {
+  final hub = SignalRSessionHub.instance;
+  final session = hub.getSession(slug);
+  if (session == null) return;
+
+  // Map internal session state → Redux connection state
+  final connectionState = _mapConnectionState(session.state);
+
+  final snapshot = WebRtcSessionState(
+    connectionState: connectionState,
+    textureId: hub.getTextureId(slug),
+    videoTrackCount: hub.getVideoTrackCount(slug),
+    audioTrackCount: hub.getAudioTrackCount(slug),
+    activeVideoTrack: hub.getActiveVideoTrack(slug),
+    audioEnabled: hub.isAudioEnabled(slug) ?? true,
+    negotiatedCodec: session.negotiatedVideoCodec,
+  );
+
+  store.dispatch(SetSessionSnapshot(slug, snapshot));
+}
+
+/// Map internal [SessionConnectionState] to Redux [WebRtcConnectionState].
+WebRtcConnectionState _mapConnectionState(SessionConnectionState state) {
+  switch (state) {
+    case SessionConnectionState.idle:
+    case SessionConnectionState.closed:
+      return WebRtcConnectionState.sessionDisconnected;
+    case SessionConnectionState.waitingForSession:
+    case SessionConnectionState.initializingPeer:
+    case SessionConnectionState.settingRemoteDescription:
+    case SessionConnectionState.creatingAnswer:
+    case SessionConnectionState.sendingAnswer:
+    case SessionConnectionState.exchangingIce:
+      return WebRtcConnectionState.sessionPending;
+    case SessionConnectionState.connected:
+      return WebRtcConnectionState.sessionConnected;
+    case SessionConnectionState.disconnected:
+    case SessionConnectionState.restarting:
+      return WebRtcConnectionState.sessionReconnecting;
+    case SessionConnectionState.failed:
+      return WebRtcConnectionState.sessionFailed;
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Auth / Hub Initialization
@@ -47,14 +100,8 @@ ThunkAction<AppState> initializeSignalRThunk({
       Logger().info('[Thunk] initializeSignalRThunk: hub initialized');
 
       // Sync any existing sessions (e.g., survived page navigation)
-      for (final entry in hub.activeSessions.entries) {
-        final cameraId = entry.key;
-        final session = entry.value;
-        if (session.remoteStream != null) {
-          store.dispatch(
-            SetSessionStatus(cameraId, ConnectionStatus.connected),
-          );
-        }
+      for (final cameraId in hub.connectedCameraIds) {
+        syncSessionToRedux(store, cameraId);
       }
 
       store.dispatch(SetServerStatus(ServerStatus.connected));
@@ -87,7 +134,7 @@ ThunkAction<AppState> disposeSignalRThunk() {
     Logger().info('[Thunk] disposeSignalRThunk: shutting down');
     final hub = SignalRSessionHub.instance;
     await hub.shutdown();
-    store.dispatch(ClearSessions());
+    store.dispatch(ClearAllSessions());
     store.dispatch(SetServerStatus(ServerStatus.idle));
     Logger().info('[Thunk] disposeSignalRThunk: complete');
   };
@@ -123,7 +170,7 @@ ThunkAction<AppState> fetchCameras({required AuthService authService}) {
 // Connection Thunks
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Connect to a single camera via the hub, wiring callbacks to dispatch.
+/// Connect to a single camera via the hub, wiring callbacks to sync Redux.
 ThunkAction<AppState> connectCamera(String slug) {
   return (Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
@@ -135,45 +182,18 @@ ThunkAction<AppState> connectCamera(String slug) {
       return;
     }
 
-    // ICE candidates → pending
-    session.onLocalIceCandidate = () {
-      final info = selectSessionInfo(store.state, slug);
-      if (info.status == ConnectionStatus.idle) {
-        store.dispatch(SetSessionStatus(slug, ConnectionStatus.pending));
-      }
-    };
+    // Any state change → sync full snapshot to Redux
+    session.onStateChanged = (_) => syncSessionToRedux(store, slug);
 
-    session.onRemoteIceCandidate = () {
-      final info = selectSessionInfo(store.state, slug);
-      if (info.status == ConnectionStatus.idle) {
-        store.dispatch(SetSessionStatus(slug, ConnectionStatus.pending));
-      }
-    };
+    // Connection established → sync (captures tracks, texture, etc.)
+    session.onConnectionComplete = () => syncSessionToRedux(store, slug);
 
-    // Connection established → connected + track info
-    session.onConnectionComplete = () {
-      store.dispatch(SetSessionStatus(slug, ConnectionStatus.connected));
+    // Codec resolved → sync
+    session.onVideoCodecResolved = (_) => syncSessionToRedux(store, slug);
 
-      // Update track counts
-      store.dispatch(
-        SetSessionTrackInfo(
-          slug,
-          videoTrackCount: hub.getVideoTrackCount(slug),
-          audioTrackCount: hub.getAudioTrackCount(slug),
-        ),
-      );
-
-      // Update texture ID
-      final textureId = hub.getTextureId(slug);
-      if (textureId != null) {
-        store.dispatch(SetSessionTextureId(slug, textureId));
-      }
-    };
-
-    // Codec resolved
-    session.onVideoCodecResolved = (codec) {
-      store.dispatch(SetSessionCodec(slug, codec));
-    };
+    // ICE candidates → sync (transitions to pending)
+    session.onLocalIceCandidate = () => syncSessionToRedux(store, slug);
+    session.onRemoteIceCandidate = () => syncSessionToRedux(store, slug);
   };
 }
 
@@ -220,21 +240,21 @@ ThunkAction<AppState> switchVideoTrack(String slug, int trackIndex) {
   return (Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
     if (hub.switchVideoTrack(slug, trackIndex)) {
-      store.dispatch(SetActiveVideoTrack(slug, trackIndex));
+      syncSessionToRedux(store, slug);
     }
   };
 }
 
 /// Toggle audio track for a camera.
 ///
-/// Calls the hub to enable/disable the audio track, then updates Redux.
+/// Calls the hub to enable/disable the audio track, then syncs Redux.
 /// Pass [enable] to force a specific state, or omit to toggle.
 ThunkAction<AppState> toggleAudioTrack(String cameraId, {bool? enable}) {
   return (Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
     final newState = hub.toggleAudio(cameraId, enable: enable);
     if (newState != null) {
-      store.dispatch(SetAudioEnabled(cameraId, newState));
+      syncSessionToRedux(store, cameraId);
     }
   };
 }
@@ -282,7 +302,7 @@ ThunkAction<AppState> setPendingOnlyAndPersist(bool value) {
 ThunkAction<AppState> resetFavoritesAndWorking() {
   return (Store<AppState> store) async {
     store.dispatch(SetFavorites({}));
-    store.dispatch(ClearSessions());
+    store.dispatch(ClearAllSessions());
     await FavoritesStore().saveFavorites({});
   };
 }

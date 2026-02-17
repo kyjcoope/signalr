@@ -1,5 +1,8 @@
 import '../models/models.dart';
-import 'camera_session_info.dart';
+import '../webrtc/redux/webrtc_state.dart';
+
+// Re-export WebRTC state types so existing imports continue to work.
+export '../webrtc/redux/webrtc_state.dart';
 
 /// Server connection status.
 enum ServerStatus { idle, connecting, connected, error }
@@ -8,14 +11,14 @@ enum ServerStatus { idle, connecting, connected, error }
 class AppState {
   final AuthState auth;
   final CameraState cameras;
-  final SessionState sessions;
+  final WebRtcState webRtc;
   final FilterState filters;
   final FavoritesState favorites;
 
   const AppState({
     this.auth = const AuthState(),
     this.cameras = const CameraState(),
-    this.sessions = const SessionState(),
+    this.webRtc = const WebRtcState(),
     this.filters = const FilterState(),
     this.favorites = const FavoritesState(),
   });
@@ -23,20 +26,20 @@ class AppState {
   AppState copyWith({
     AuthState? auth,
     CameraState? cameras,
-    SessionState? sessions,
+    WebRtcState? webRtc,
     FilterState? filters,
     FavoritesState? favorites,
   }) {
     return AppState(
       auth: auth ?? this.auth,
       cameras: cameras ?? this.cameras,
-      sessions: sessions ?? this.sessions,
+      webRtc: webRtc ?? this.webRtc,
       filters: filters ?? this.filters,
       favorites: favorites ?? this.favorites,
     );
   }
 
-  /// Deserialize from JSON. Sessions and auth are NOT persisted.
+  /// Deserialize from JSON. WebRTC and auth are NOT persisted.
   static AppState fromJson(dynamic json) {
     if (json == null || json is! Map<String, dynamic>) return const AppState();
     return AppState(
@@ -46,7 +49,7 @@ class AppState {
     );
   }
 
-  /// Serialize to JSON. Sessions and auth are NOT persisted.
+  /// Serialize to JSON. WebRTC and auth are NOT persisted.
   dynamic toJson() => {
     'cameras': cameras.toJson(),
     'filters': filters.toJson(),
@@ -107,17 +110,6 @@ class CameraState {
     'cameras': cameras.map((k, v) => MapEntry(k, v.toJson())),
     'isLoaded': isLoaded,
   };
-}
-
-/// WebRTC session info keyed by slug (GUID). NOT persisted.
-class SessionState {
-  final Map<String, CameraSessionInfo> sessions;
-
-  const SessionState({this.sessions = const {}});
-
-  SessionState copyWith({Map<String, CameraSessionInfo>? sessions}) {
-    return SessionState(sessions: sessions ?? this.sessions);
-  }
 }
 
 /// UI filter toggles.
