@@ -1,4 +1,3 @@
-import 'dart:developer' as dev;
 import 'package:redux/redux.dart';
 import 'package:redux_thunk/redux_thunk.dart';
 
@@ -7,6 +6,7 @@ import '../config.dart';
 import '../models/models.dart';
 import '../signalr/signalr_session_hub.dart';
 import '../store/favorites_store.dart';
+import '../utils/logger.dart';
 import 'actions.dart';
 import 'app_state.dart';
 import 'camera_session_info.dart';
@@ -24,7 +24,7 @@ ThunkAction<AppState> initializeSignalRThunk({
   required String signalRUrl,
 }) {
   return (Store<AppState> store) async {
-    dev.log('[Thunk] initializeSignalRThunk: starting');
+    Logger().info('[Thunk] initializeSignalRThunk: starting');
     store.dispatch(SetServerStatus(ServerStatus.connecting));
 
     try {
@@ -44,7 +44,7 @@ ThunkAction<AppState> initializeSignalRThunk({
       // Initialize SignalR hub
       final hub = SignalRSessionHub.instance;
       await hub.initialize(signalRUrl, authService);
-      dev.log('[Thunk] initializeSignalRThunk: hub initialized');
+      Logger().info('[Thunk] initializeSignalRThunk: hub initialized');
 
       // Sync any existing sessions (e.g., survived page navigation)
       for (final entry in hub.activeSessions.entries) {
@@ -58,12 +58,12 @@ ThunkAction<AppState> initializeSignalRThunk({
       }
 
       store.dispatch(SetServerStatus(ServerStatus.connected));
-      dev.log(
+      Logger().info(
         '[Thunk] initializeSignalRThunk: complete '
         '(${store.state.cameras.cameras.length} cameras from persist)',
       );
     } catch (e) {
-      dev.log('[Thunk] initializeSignalRThunk: ERROR $e');
+      Logger().error('[Thunk] initializeSignalRThunk: ERROR $e');
       store.dispatch(SetServerStatus(ServerStatus.error));
     }
   };
@@ -84,12 +84,12 @@ ThunkAction<AppState> loginAndInitHub({required AuthService authService}) {
 /// Shutdown the SignalR hub, clear all sessions, and reset server status.
 ThunkAction<AppState> disposeSignalRThunk() {
   return (Store<AppState> store) async {
-    dev.log('[Thunk] disposeSignalRThunk: shutting down');
+    Logger().info('[Thunk] disposeSignalRThunk: shutting down');
     final hub = SignalRSessionHub.instance;
     await hub.shutdown();
     store.dispatch(ClearSessions());
     store.dispatch(SetServerStatus(ServerStatus.idle));
-    dev.log('[Thunk] disposeSignalRThunk: complete');
+    Logger().info('[Thunk] disposeSignalRThunk: complete');
   };
 }
 
@@ -102,17 +102,17 @@ ThunkAction<AppState> disposeSignalRThunk() {
 /// This acts as a refresh — replaces persisted cameras with fresh data.
 ThunkAction<AppState> fetchCameras({required AuthService authService}) {
   return (Store<AppState> store) async {
-    dev.log('[Thunk] fetchCameras: fetching...');
+    Logger().info('[Thunk] fetchCameras: fetching...');
     store.dispatch(SetFetchingCameras(true));
 
     try {
       await authService.fetchDevices();
       store.dispatch(SetCameras(authService.devices));
-      dev.log(
+      Logger().info(
         '[Thunk] fetchCameras: ${authService.devices.length} cameras loaded',
       );
     } catch (e) {
-      dev.log('[Thunk] fetchCameras: ERROR $e');
+      Logger().error('[Thunk] fetchCameras: ERROR $e');
     } finally {
       store.dispatch(SetFetchingCameras(false));
     }
@@ -128,10 +128,10 @@ ThunkAction<AppState> connectCamera(String slug) {
   return (Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
 
-    dev.log('[Thunk] connectCamera: $slug');
+    Logger().info('[Thunk] connectCamera: $slug');
     final session = await hub.connectToCamera(slug);
     if (session == null) {
-      dev.log('[Thunk] connectCamera: FAILED for $slug');
+      Logger().error('[Thunk] connectCamera: FAILED for $slug');
       return;
     }
 
@@ -180,7 +180,7 @@ ThunkAction<AppState> connectCamera(String slug) {
 /// Disconnect a single camera.
 ThunkAction<AppState> disconnectCamera(String slug) {
   return (Store<AppState> store) async {
-    dev.log('[Thunk] disconnectCamera: $slug');
+    Logger().info('[Thunk] disconnectCamera: $slug');
     final hub = SignalRSessionHub.instance;
     await hub.disconnectCamera(slug);
     store.dispatch(RemoveSession(slug));

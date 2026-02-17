@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:developer' as dev;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -7,6 +6,7 @@ import 'package:signalr_netcore/http_connection_options.dart';
 import 'package:signalr_netcore/hub_connection.dart';
 import 'package:signalr_netcore/hub_connection_builder.dart';
 
+import '../utils/logger.dart';
 import 'signalr_config.dart';
 
 /// Callback for when a SignalR message is received.
@@ -81,9 +81,9 @@ class SignalRConnectionManager {
     if (_connection?.state == HubConnectionState.Connected) {
       try {
         await _connection?.stop();
-        dev.log('SignalRConnectionManager: Disconnected');
+        Logger().info('SignalRConnectionManager: Disconnected');
       } catch (e) {
-        dev.log('SignalRConnectionManager: Error disconnecting: $e');
+        Logger().error('SignalRConnectionManager: Error disconnecting: $e');
       }
     }
   }
@@ -108,7 +108,7 @@ class SignalRConnectionManager {
   /// Invoke a method on the hub.
   Future<void> invoke(String methodName, {List<Object>? args}) async {
     if (!isConnected) {
-      dev.log('SignalRConnectionManager: Cannot invoke - not connected');
+      Logger().warn('SignalRConnectionManager: Cannot invoke - not connected');
       return;
     }
     await _connection?.invoke(methodName, args: args);
@@ -120,14 +120,16 @@ class SignalRConnectionManager {
   /// allowing proper cleanup on the server side.
   Future<void> leaveSession(String sessionId) async {
     if (!isConnected) {
-      dev.log('SignalRConnectionManager: Cannot leave session - not connected');
+      Logger().warn(
+        'SignalRConnectionManager: Cannot leave session - not connected',
+      );
       return;
     }
     try {
       await _connection?.invoke('LeaveSession', args: [sessionId]);
-      dev.log('SignalRConnectionManager: Left session $sessionId');
+      Logger().info('SignalRConnectionManager: Left session $sessionId');
     } catch (e) {
-      dev.log('SignalRConnectionManager: Error leaving session: $e');
+      Logger().error('SignalRConnectionManager: Error leaving session: $e');
     }
   }
 
@@ -138,7 +140,7 @@ class SignalRConnectionManager {
   void _createConnection() {
     if (_connection != null) return;
 
-    dev.log(
+    Logger().info(
       'SignalRConnectionManager: Creating connection to ${_config.signalRServerUrl}',
     );
 
@@ -159,18 +161,18 @@ class SignalRConnectionManager {
     _cancelTimers();
 
     if (_connection == null) {
-      dev.log('SignalRConnectionManager: No connection to start');
+      Logger().warn('SignalRConnectionManager: No connection to start');
       return false;
     }
 
     if (isConnected) {
-      dev.log('SignalRConnectionManager: Already connected');
+      Logger().info('SignalRConnectionManager: Already connected');
       onConnected?.call();
       return true;
     }
 
     if (_connection!.state == HubConnectionState.Connecting) {
-      dev.log('SignalRConnectionManager: Already connecting');
+      Logger().info('SignalRConnectionManager: Already connecting');
       return false;
     }
 
@@ -183,14 +185,14 @@ class SignalRConnectionManager {
       _retryCount = 0;
       _isConnecting = false;
 
-      dev.log(
+      Logger().info(
         'SignalRConnectionManager: Connected (${_connection!.connectionId})',
       );
       onConnected?.call();
       return true;
     } catch (e) {
       _isConnecting = false;
-      dev.log('SignalRConnectionManager: Connection failed: $e');
+      Logger().error('SignalRConnectionManager: Connection failed: $e');
       return _scheduleRetry();
     }
   }
@@ -198,13 +200,13 @@ class SignalRConnectionManager {
   bool _scheduleRetry() {
     _retryCount++;
     if (_retryCount > _config.reconnectionRetryCount) {
-      dev.log('SignalRConnectionManager: Max retries exceeded');
+      Logger().warn('SignalRConnectionManager: Max retries exceeded');
       return false;
     }
 
     final delay =
         _config.reconnectionTimeout * math.pow(2, _retryCount - 1).toInt();
-    dev.log('SignalRConnectionManager: Retry $_retryCount in ${delay}ms');
+    Logger().info('SignalRConnectionManager: Retry $_retryCount in ${delay}ms');
 
     _retryTimer = Timer(Duration(milliseconds: delay), () {
       _startConnection();
@@ -227,17 +229,17 @@ class SignalRConnectionManager {
   }
 
   void _handleClose({Exception? error}) {
-    dev.log('SignalRConnectionManager: Connection closed: $error');
+    Logger().info('SignalRConnectionManager: Connection closed: $error');
     onDisconnected?.call(error);
   }
 
   void _handleReconnecting({Exception? error}) {
-    dev.log('SignalRConnectionManager: Reconnecting: $error');
+    Logger().warn('SignalRConnectionManager: Reconnecting: $error');
     onReconnecting?.call(error);
   }
 
   void _handleReconnected({String? connectionId}) {
-    dev.log('SignalRConnectionManager: Reconnected: $connectionId');
+    Logger().info('SignalRConnectionManager: Reconnected: $connectionId');
     _retryCount = 0;
     onReconnected?.call(connectionId);
   }
@@ -248,7 +250,7 @@ class SignalRConnectionManager {
 
   void _startTimeout() {
     _connectTimeout = Timer(_connectionTimeout, () {
-      dev.log('SignalRConnectionManager: Connection timeout');
+      Logger().warn('SignalRConnectionManager: Connection timeout');
       _isConnecting = false;
       _scheduleRetry();
     });

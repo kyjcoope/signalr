@@ -1,5 +1,6 @@
 import 'dart:async';
-import 'dart:developer' as dev;
+
+import '../utils/logger.dart';
 
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
@@ -106,7 +107,7 @@ class WebRtcStatsMonitor {
 
   final Duration interval;
 
-  /// Toggle verbose dev.log output (ICE, DTLS, PATH, VIDEO, AUDIO).
+  /// Toggle verbose log output (ICE, DTLS, PATH, VIDEO, AUDIO).
   bool enableLogging;
 
   /// Listen to this notifier for live stats updates.
@@ -277,7 +278,7 @@ class WebRtcStatsMonitor {
           );
 
     if (pair == null) {
-      dev.log('$_tag WebRTC: awaiting selected candidate-pair…');
+      Logger().info('$_tag WebRTC: awaiting selected candidate-pair…');
       return;
     }
 
@@ -286,7 +287,7 @@ class WebRtcStatsMonitor {
     final remoteId = _pick(pair.values, ['remoteCandidateId']);
     final local = byId[localId], remote = byId[remoteId];
     if (local == null || remote == null) {
-      dev.log(
+      Logger().info(
         '$_tag WebRTC: candidate reports missing (local=$localId remote=$remoteId)',
       );
       return;
@@ -399,6 +400,6 @@ class WebRtcStatsMonitor {
         '| lost: ${_dash(audLost)} | jit: ${_fmtMs(audJit)} '
         '| tx: ${_fmtOptKbps(audTxKbps)}',
       );
-    dev.log(buf.toString());
+    Logger().info(buf.toString());
   }
 }

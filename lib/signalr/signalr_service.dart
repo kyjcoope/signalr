@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:developer' as dev;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../webrtc/webrtc_player.dart';
 import '../webrtc/signaling_message.dart';
+import '../utils/logger.dart';
 import 'signalr_config.dart';
 import 'signalr_connection_manager.dart';
 import 'signalr_message_router.dart';
@@ -80,12 +80,12 @@ class SignalRService {
   /// Initialize the SignalR service.
   Future<void> initService(String signalRServerUrl) async {
     if (_serviceInitialized) {
-      dev.log('SignalRService: Already initialized, reconnecting...');
+      Logger().info('SignalRService: Already initialized, reconnecting...');
       await _connect();
       return;
     }
 
-    dev.log('SignalRService: Initializing with URL: $signalRServerUrl');
+    Logger().info('SignalRService: Initializing with URL: $signalRServerUrl');
     _config = SignalRConfig(signalRServerUrl: signalRServerUrl);
 
     // Create message router
@@ -122,21 +122,21 @@ class SignalRService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   void _onConnected() {
-    dev.log('SignalRService: Connected');
+    Logger().info('SignalRService: Connected');
     _sendRegisterRequest();
   }
 
   void _onDisconnected(Exception? error) {
-    dev.log('SignalRService: Disconnected: $error');
+    Logger().warn('SignalRService: Disconnected: $error');
     _notifyPlayers(SignalRMessageType.onSignalClosed, {'error': error});
   }
 
   void _onReconnecting(Exception? error) {
-    dev.log('SignalRService: Reconnecting: $error');
+    Logger().warn('SignalRService: Reconnecting: $error');
   }
 
   void _onReconnected(String? connectionId) {
-    dev.log('SignalRService: Reconnected: $connectionId');
+    Logger().info('SignalRService: Reconnected: $connectionId');
     _sendRegisterRequest();
   }
 
@@ -175,14 +175,14 @@ class SignalRService {
 
   Future<void> _sendMessage(Map<String, dynamic> data) async {
     if (!isPeerReady) {
-      dev.log('SignalRService: Cannot send - not connected');
+      Logger().warn('SignalRService: Cannot send - not connected');
       return;
     }
 
     try {
       await _connectionManager?.invoke('SendMessage', args: [data]);
     } catch (e) {
-      dev.log('SignalRService: Send error: $e');
+      Logger().error('SignalRService: Send error: $e');
     }
   }
 
@@ -204,8 +204,8 @@ class SignalRService {
     SdpWrapper sdp,
     String messageId,
   ) async {
-    dev.log('SignalRService: Sending SDP answer for session: $sessionId');
-    dev.log('SignalRService: Message ID: $messageId');
+    Logger().info('SignalRService: Sending SDP answer for session: $sessionId');
+    Logger().info('SignalRService: Message ID: $messageId');
 
     final message = InviteAnswerMessage(
       session: sessionId,
@@ -214,17 +214,17 @@ class SignalRService {
     );
 
     final jsonPayload = message.toJson();
-    dev.log('SignalRService: 📤 SDP ANSWER PAYLOAD:');
-    dev.log('SignalRService:   session: $sessionId');
-    dev.log('SignalRService:   id: $messageId');
-    dev.log('SignalRService:   answer.type: ${sdp.type}');
-    dev.log(
+    Logger().info('SignalRService: 📤 SDP ANSWER PAYLOAD:');
+    Logger().info('SignalRService:   session: $sessionId');
+    Logger().info('SignalRService:   id: $messageId');
+    Logger().info('SignalRService:   answer.type: ${sdp.type}');
+    Logger().info(
       'SignalRService:   answer.sdp (first 500 chars): ${sdp.sdp.substring(0, sdp.sdp.length > 500 ? 500 : sdp.sdp.length)}',
     );
-    dev.log('SignalRService:   Full JSON: $jsonPayload');
+    Logger().info('SignalRService:   Full JSON: $jsonPayload');
 
     await _sendMessage(jsonPayload);
-    dev.log('SignalRService: ✅ SDP answer sent successfully');
+    Logger().info('SignalRService: ✅ SDP answer sent successfully');
   }
 
   /// Send an ICE candidate.
@@ -232,7 +232,7 @@ class SignalRService {
     String sessionId,
     RTCIceCandidate candidate,
   ) async {
-    dev.log(
+    Logger().info(
       'SignalRService: Sending ICE candidate for session: $sessionId, mid=${candidate.sdpMid}',
     );
 
@@ -244,7 +244,7 @@ class SignalRService {
   ///
   /// This is used when the ICE connection fails and needs to be re-established.
   Future<bool> sendIceRestartOffer(String sessionId, SdpWrapper offer) async {
-    dev.log(
+    Logger().info(
       'SignalRService: Sending ICE restart offer for session: $sessionId',
     );
 
@@ -255,7 +255,7 @@ class SignalRService {
       await _sendMessage(message.toJson());
       return true;
     } catch (e) {
-      dev.log('SignalRService: ICE restart error: $e');
+      Logger().error('SignalRService: ICE restart error: $e');
       return false;
     }
   }
@@ -265,7 +265,9 @@ class SignalRService {
   /// Notifies the server that the client is intentionally closing the session.
   /// This matches the web UI behavior for clean disconnection.
   Future<void> sendCloseMessage(String sessionId, String deviceId) async {
-    dev.log('SignalRService: Sending close message for session: $sessionId');
+    Logger().info(
+      'SignalRService: Sending close message for session: $sessionId',
+    );
 
     if (!isPeerReady) return;
 
@@ -273,7 +275,7 @@ class SignalRService {
       final message = CloseMessage(session: sessionId, deviceId: deviceId);
       await _connectionManager?.invoke('SendMessage', args: [message.toJson()]);
     } catch (e) {
-      dev.log('SignalRService: Send close message error: $e');
+      Logger().error('SignalRService: Send close message error: $e');
     }
   }
 
@@ -301,7 +303,9 @@ class SignalRService {
   /// Register a player to receive SignalR messages.
   void registerPlayer(VideoWebRTCPlayer player) {
     if (_players.any((p) => p.playerId == player.playerId)) {
-      dev.log('SignalRService: Player ${player.playerId} already registered');
+      Logger().info(
+        'SignalRService: Player ${player.playerId} already registered',
+      );
       return;
     }
 
@@ -309,7 +313,9 @@ class SignalRService {
       player.onSignalRMessage,
     );
     _players.add(player);
-    dev.log('SignalRService: Registered player. Total: ${_players.length}');
+    Logger().info(
+      'SignalRService: Registered player. Total: ${_players.length}',
+    );
   }
 
   /// Unregister a player.
@@ -317,7 +323,7 @@ class SignalRService {
     player.subscription?.cancel();
     player.subscription = null;
     _players.removeWhere((p) => p.playerId == player.playerId);
-    dev.log(
+    Logger().info(
       'SignalRService: Unregistered player. Remaining: ${_players.length}',
     );
   }
@@ -340,7 +346,7 @@ class SignalRService {
 
   /// Close the SignalR connection.
   Future<void> closeConnection({bool closeAllSessions = false}) async {
-    dev.log('SignalRService: Closing connection');
+    Logger().info('SignalRService: Closing connection');
 
     if (closeAllSessions) {
       for (final player in _players) {

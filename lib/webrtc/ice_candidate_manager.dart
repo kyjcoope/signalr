@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:developer' as dev;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import '../utils/logger.dart';
 import 'sdp_utils.dart';
 
 /// Manages ICE candidate queueing, resolution, and signaling.
@@ -78,7 +78,7 @@ class IceCandidateManager {
   /// Handle a local ICE candidate from WebRTC.
   void handleLocalCandidate(RTCIceCandidate candidate, String? sessionId) {
     if ((candidate.candidate ?? '').isEmpty) {
-      dev.log('$tag ✅ End of LOCAL candidates');
+      Logger().info('$tag ✅ End of LOCAL candidates');
       _gatheringCompleter?.complete();
       return;
     }
@@ -141,7 +141,9 @@ class IceCandidateManager {
     RTCPeerConnection? pc,
   ) async {
     if ((candidate.candidate ?? '').isEmpty) {
-      dev.log('$tag Received end-of-candidates for mid=${candidate.sdpMid}');
+      Logger().info(
+        '$tag Received end-of-candidates for mid=${candidate.sdpMid}',
+      );
       return;
     }
 
@@ -157,7 +159,7 @@ class IceCandidateManager {
   Future<void> drainQueuedCandidates(RTCPeerConnection pc) async {
     if (_pendingRemoteCandidates.isEmpty) return;
 
-    dev.log(
+    Logger().info(
       '$tag Draining ${_pendingRemoteCandidates.length} queued candidates',
     );
 
@@ -182,7 +184,7 @@ class IceCandidateManager {
       _mlineToMid,
     );
     if (mid == null) {
-      dev.log('$tag Could not resolve mid for candidate - dropping');
+      Logger().info('$tag Could not resolve mid for candidate - dropping');
       return;
     }
 
@@ -193,9 +195,9 @@ class IceCandidateManager {
         candidate.sdpMLineIndex,
       );
       await pc.addCandidate(resolved);
-      dev.log('$tag ✅ Added remote ICE: mid=$mid');
+      Logger().info('$tag ✅ Added remote ICE: mid=$mid');
     } catch (e) {
-      dev.log('$tag Error adding ICE candidate: $e');
+      Logger().info('$tag Error adding ICE candidate: $e');
     }
   }
 }

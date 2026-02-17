@@ -1,5 +1,6 @@
 import 'dart:async';
-import 'dart:developer' as dev;
+
+import '../utils/logger.dart';
 
 /// Manages session timers for WebRTC connections.
 ///
@@ -27,7 +28,7 @@ class SessionTimers {
   void startNegotiation() {
     cancelNegotiation();
     _negotiationTimer = Timer(negotiationDuration, () {
-      dev.log('$tag ❌ Negotiation timeout');
+      Logger().warn('$tag ❌ Negotiation timeout');
       onNegotiationTimeout();
     });
   }
@@ -42,7 +43,7 @@ class SessionTimers {
   void startConnect() {
     cancelConnect();
     _connectTimer = Timer(connectDuration, () {
-      dev.log('$tag ⏰ Connect phase timeout - no session received');
+      Logger().warn('$tag ⏰ Connect phase timeout - no session received');
       onConnectTimeout();
     });
   }

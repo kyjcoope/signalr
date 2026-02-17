@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:developer' as dev;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../auth/auth.dart';
+import '../utils/logger.dart';
 import '../webrtc/webrtc_camera_session.dart';
 import '../webrtc/webrtc_stats_monitor.dart';
 import 'signalr_service.dart';
@@ -87,7 +87,7 @@ class SignalRSessionHub {
   /// This should be called once at app startup after user authentication.
   Future<void> initialize(String signalRUrl, AuthService authService) async {
     if (_initialized) {
-      dev.log('SignalRSessionHub: Already initialized');
+      Logger().info('SignalRSessionHub: Already initialized');
       return;
     }
 
@@ -96,7 +96,7 @@ class SignalRSessionHub {
     await _signalRService!.initService(signalRUrl);
     _initialized = true;
 
-    dev.log(
+    Logger().info(
       'SignalRSessionHub: Initialized with ${authService.devices.length} cameras',
     );
   }
@@ -111,13 +111,15 @@ class SignalRSessionHub {
   /// tracks. Returns existing session if already connected.
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
     if (!_initialized || _signalRService == null) {
-      dev.log('SignalRSessionHub: Not initialized');
+      Logger().warn('SignalRSessionHub: Not initialized');
       return null;
     }
 
     // Return existing session if already connected
     if (activeSessions.containsKey(cameraId)) {
-      dev.log('SignalRSessionHub: Returning existing session for $cameraId');
+      Logger().info(
+        'SignalRSessionHub: Returning existing session for $cameraId',
+      );
       return activeSessions[cameraId];
     }
 
@@ -141,7 +143,7 @@ class SignalRSessionHub {
         rendererBound = true;
         _activeVideoTrack[cameraId] = 0;
         renderer.srcObject = event.streams[0];
-        dev.log(
+        Logger().info(
           'SignalRSessionHub: Renderer srcObject set for $cameraId (track 1/${session.videoTrackCount})',
         );
       }
@@ -150,7 +152,7 @@ class SignalRSessionHub {
     activeSessions[cameraId] = session;
     await session.connect();
 
-    dev.log('SignalRSessionHub: Connected to $cameraId');
+    Logger().info('SignalRSessionHub: Connected to $cameraId');
     return session;
   }
 
@@ -178,7 +180,7 @@ class SignalRSessionHub {
 
     _activeVideoTrack.remove(cameraId);
 
-    dev.log('SignalRSessionHub: Disconnected $cameraId');
+    Logger().info('SignalRSessionHub: Disconnected $cameraId');
   }
 
   /// Get session for a camera (if connected).
@@ -242,7 +244,7 @@ class SignalRSessionHub {
 
     final tracks = session.videoTracks;
     if (trackIndex < 0 || trackIndex >= tracks.length) {
-      dev.log(
+      Logger().warn(
         'SignalRSessionHub: Invalid track index $trackIndex for $cameraId (${tracks.length} video tracks)',
       );
       return false;
@@ -259,7 +261,7 @@ class SignalRSessionHub {
     renderer.srcObject = ownerStream;
 
     final codec = session.getVideoTrackCodec(trackIndex) ?? '?';
-    dev.log(
+    Logger().info(
       'SignalRSessionHub: Switched $cameraId to video track ${trackIndex + 1}/${tracks.length} (codec=$codec, streamId=${ownerStream.id})',
     );
     return true;
@@ -287,13 +289,13 @@ class SignalRSessionHub {
     final trackType = isAudio ? 'audio' : 'video';
 
     if (track == null) {
-      dev.log('SignalRSessionHub: No $trackType track for $cameraId');
+      Logger().warn('SignalRSessionHub: No $trackType track for $cameraId');
       return null;
     }
 
     final newEnabled = enable ?? !track.enabled;
     track.enabled = newEnabled;
-    dev.log(
+    Logger().info(
       'SignalRSessionHub: ${trackType.substring(0, 1).toUpperCase()}${trackType.substring(1)} ${newEnabled ? "enabled" : "disabled"} for $cameraId',
     );
     return newEnabled;
@@ -313,7 +315,7 @@ class SignalRSessionHub {
 
   /// Shutdown the hub and close all sessions.
   Future<void> shutdown() async {
-    dev.log('SignalRSessionHub: Shutting down...');
+    Logger().info('SignalRSessionHub: Shutting down...');
 
     for (final session in activeSessions.values) {
       await session.close();
@@ -333,6 +335,6 @@ class SignalRSessionHub {
     _authService = null;
     _initialized = false;
 
-    dev.log('SignalRSessionHub: Shutdown complete');
+    Logger().info('SignalRSessionHub: Shutdown complete');
   }
 }

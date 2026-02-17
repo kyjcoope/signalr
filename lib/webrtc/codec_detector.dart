@@ -1,8 +1,8 @@
 import 'dart:async';
-import 'dart:developer' as dev;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import '../utils/logger.dart';
 import 'sdp_utils.dart';
 
 /// Detects the negotiated video codec from SDP or WebRTC stats.
@@ -128,7 +128,7 @@ class CodecDetector {
 
       _scheduleRetry(pc);
     } catch (e) {
-      dev.log('$tag Codec detection error: $e');
+      Logger().info('$tag Codec detection error: $e');
       _scheduleRetry(pc);
     }
   }
@@ -141,7 +141,7 @@ class CodecDetector {
   void _setCodec(String codec, String source) {
     _detectedCodec = codec;
     _retryTimer?.cancel();
-    dev.log('$tag Selected video codec ($source): $codec');
+    Logger().info('$tag Selected video codec ($source): $codec');
     onCodecResolved?.call(codec);
   }
 }

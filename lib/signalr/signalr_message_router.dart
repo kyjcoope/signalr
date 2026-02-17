@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'dart:developer' as dev;
 
 import '../webrtc/webrtc_player.dart';
+import '../utils/logger.dart';
 import 'json_rpc.dart';
 import 'signalr_messages.dart';
 
@@ -50,7 +50,7 @@ class SignalRMessageRouter {
     final messageStr = args[0]?.toString();
     if (messageStr == null) return;
 
-    dev.log('SignalRMessageRouter: Received: $messageStr');
+    Logger().info('SignalRMessageRouter: Received: $messageStr');
 
     try {
       final parsed = jsonDecode(messageStr) as Map<String, dynamic>;
@@ -61,18 +61,18 @@ class SignalRMessageRouter {
         _handleResponseMessage(parsed);
       }
     } catch (e) {
-      dev.log('SignalRMessageRouter: Parse error: $e');
+      Logger().error('SignalRMessageRouter: Parse error: $e');
     }
   }
 
   /// Handle device session info event.
   void handleDeviceSessionInfo(List<Object?>? args) {
-    dev.log('SignalRMessageRouter: Device session info: $args');
+    Logger().info('SignalRMessageRouter: Device session info: $args');
   }
 
   /// Handle device disconnection event.
   void handleDeviceDisconnected(List<Object?>? args) {
-    dev.log('SignalRMessageRouter: Device disconnected: $args');
+    Logger().info('SignalRMessageRouter: Device disconnected: $args');
     final deviceId = args?.firstOrNull?.toString();
     if (deviceId != null) {
       final player = findPlayerByDevice(deviceId);
@@ -87,12 +87,14 @@ class SignalRMessageRouter {
 
   /// Handle peer disconnection event.
   void handlePeerDisconnected(List<Object?>? args) {
-    dev.log('SignalRMessageRouter: Peer disconnected: $args');
+    Logger().info('SignalRMessageRouter: Peer disconnected: $args');
     final session = args?.firstOrNull?.toString();
     if (session != null) {
       final player = findPlayerBySession(session);
       if (player != null) {
-        dev.log('SignalRMessageRouter: Notifying player of peer disconnection');
+        Logger().info(
+          'SignalRMessageRouter: Notifying player of peer disconnection',
+        );
         player.onSignalRMessage(
           SignalRMessage(
             method: SignalRMessageType.onSignalClosed,
@@ -105,7 +107,7 @@ class SignalRMessageRouter {
 
   /// Handle generic error event.
   void handleError(List<Object?>? args) {
-    dev.log('SignalRMessageRouter: Error: $args');
+    Logger().error('SignalRMessageRouter: Error: $args');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -121,7 +123,9 @@ class SignalRMessageRouter {
       case 'error':
         _handleSignalError(message);
       default:
-        dev.log('SignalRMessageRouter: Unknown method: ${message.method}');
+        Logger().warn(
+          'SignalRMessageRouter: Unknown method: ${message.method}',
+        );
     }
   }
 
@@ -132,7 +136,9 @@ class SignalRMessageRouter {
       case '2': // Connect response
         _handleConnectResponse(message);
       default:
-        dev.log('SignalRMessageRouter: Unknown response id: ${message.id}');
+        Logger().warn(
+          'SignalRMessageRouter: Unknown response id: ${message.id}',
+        );
     }
   }
 
@@ -143,7 +149,7 @@ class SignalRMessageRouter {
   void _handleRegisterResponse(Map<String, dynamic> message) {
     final id = message.resultValue<String>('id');
     if (id != null) {
-      dev.log('SignalRMessageRouter: Registered with client ID: $id');
+      Logger().info('SignalRMessageRouter: Registered with client ID: $id');
       onClientId?.call(id);
     }
   }
@@ -159,16 +165,18 @@ class SignalRMessageRouter {
     final iceList = result['iceServers'] as List?;
     if (iceList != null) {
       final servers = iceList.map((e) => IceServerConfig.fromJson(e)).toList();
-      dev.log('SignalRMessageRouter: Received ${servers.length} ICE servers');
+      Logger().info(
+        'SignalRMessageRouter: Received ${servers.length} ICE servers',
+      );
       // DEBUG: Log credential details
       for (int i = 0; i < servers.length; i++) {
         final s = servers[i];
         final hasCredentials = s.credential != null && s.username != null;
-        dev.log(
+        Logger().info(
           'SignalRMessageRouter: 🔍 Server[$i] urls=${s.urls.length}, hasCredentials=$hasCredentials',
         );
         if (hasCredentials) {
-          dev.log(
+          Logger().info(
             'SignalRMessageRouter: 🔍   credential=${s.credential?.substring(0, 8)}..., username=${s.username?.substring(0, 10)}...',
           );
         }
@@ -200,7 +208,7 @@ class SignalRMessageRouter {
     final session = message.param<String>('session');
     if (session == null) return;
 
-    dev.log('SignalRMessageRouter: Invite for session: $session');
+    Logger().info('SignalRMessageRouter: Invite for session: $session');
     findPlayerBySession(session)?.onSignalRMessage(
       SignalRMessage(
         method: SignalRMessageType.onSignalInvite,
@@ -213,12 +221,12 @@ class SignalRMessageRouter {
     final session = message.param<String>('session');
     if (session == null) return;
 
-    dev.log('SignalRMessageRouter: Trickle for session: $session');
+    Logger().info('SignalRMessageRouter: Trickle for session: $session');
 
     // Support batched candidates (params.candidates: [...])
     final candidatesList = message.param<List<dynamic>>('candidates');
     if (candidatesList != null) {
-      dev.log(
+      Logger().info(
         'SignalRMessageRouter: Received ${candidatesList.length} batched candidates',
       );
       findPlayerBySession(session)?.onSignalRMessage(

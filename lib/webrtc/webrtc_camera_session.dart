@@ -1,11 +1,11 @@
 import 'dart:async';
-import 'dart:developer' as dev;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../signalr/signalr_messages.dart';
 import '../signalr/signalr_service.dart';
+import '../utils/logger.dart';
 import 'codec_detector.dart';
 import 'ice_candidate_manager.dart';
 import 'peer_connection_factory.dart';
@@ -170,7 +170,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     if (_state == newState) return;
     final oldState = _state;
     _state = newState;
-    dev.log('$_tag State: $oldState -> $newState');
+    Logger().info('$_tag State: $oldState -> $newState');
     onStateChanged?.call(newState);
   }
 
@@ -210,11 +210,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   @override
   void onSignalRMessage(SignalRMessage message) {
-    dev.log('$_tag onSignalRMessage: ${message.method}');
+    Logger().info('$_tag onSignalRMessage: ${message.method}');
 
     switch (message.method) {
       case SignalRMessageType.onSignalReady:
-        dev.log('$_tag SignalR is ready');
+        Logger().info('$_tag SignalR is ready');
         break;
       case SignalRMessageType.onSignalInvite:
         _handleInvite(message.detail);
@@ -223,13 +223,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       case SignalRMessageType.onSignalIceServers:
         _handleIceServers(message.detail);
       case SignalRMessageType.onSignalClosed:
-        dev.log('$_tag SignalR connection closed');
+        Logger().info('$_tag SignalR connection closed');
         _setState(SessionConnectionState.closed);
       case SignalRMessageType.onSignalTimeout:
-        dev.log('$_tag SignalR connection timeout');
+        Logger().warn('$_tag SignalR connection timeout');
         _setState(SessionConnectionState.failed);
       case SignalRMessageType.onSignalError:
-        dev.log('$_tag SignalR error: ${message.detail}');
+        Logger().error('$_tag SignalR error: ${message.detail}');
     }
   }
 
@@ -240,16 +240,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     final session = detail['session'] as String?;
     if (session != null) {
       _sessionId = session;
-      dev.log('$_tag Session started: $_sessionId');
+      Logger().info('$_tag Session started: $_sessionId');
       _setState(SessionConnectionState.initializingPeer);
       await _initializePeerConnection();
-      dev.log('$_tag Peer connection ready, awaiting invite');
+      Logger().info('$_tag Peer connection ready, awaiting invite');
     }
   }
 
   void _handleInvite(dynamic detail) {
     if (_state.isTerminal) {
-      dev.log('$_tag Ignoring invite in terminal state');
+      Logger().info('$_tag Ignoring invite in terminal state');
       return;
     }
 
@@ -265,7 +265,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         _negotiate(sdpWrapper);
       }
     } catch (e) {
-      dev.log('$_tag Error handling invite: $e');
+      Logger().error('$_tag Error handling invite: $e');
       _setState(SessionConnectionState.failed);
     }
   }
@@ -295,17 +295,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       }
 
       if (candidates.isEmpty) {
-        dev.log('$_tag No valid candidates in trickle message');
+        Logger().warn('$_tag No valid candidates in trickle message');
         return;
       }
 
-      dev.log('$_tag Processing ${candidates.length} ICE candidate(s)');
+      Logger().info('$_tag Processing ${candidates.length} ICE candidate(s)');
 
       for (final candidateData in candidates) {
         _processCandidate(candidateData);
       }
     } catch (e) {
-      dev.log('$_tag Error handling trickle: $e');
+      Logger().error('$_tag Error handling trickle: $e');
     }
   }
 
@@ -326,7 +326,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
       // Empty candidate = end-of-candidates signal
       if (candidateStr == null || candidateStr.isEmpty) {
-        dev.log('$_tag Received end-of-candidates marker');
+        Logger().info('$_tag Received end-of-candidates marker');
         return;
       }
 
@@ -336,12 +336,12 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
       final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
 
-      dev.log(
+      Logger().info(
         '$_tag Adding ICE candidate (mid=$sdpMid, mLineIdx=$sdpMLineIndex)',
       );
       _iceManager.handleRemoteCandidate(candidate, _peerConnection);
     } catch (e) {
-      dev.log('$_tag Error processing candidate: $e');
+      Logger().error('$_tag Error processing candidate: $e');
     }
   }
 
@@ -352,11 +352,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   /// Start connecting to the camera.
   Future<void> connect() async {
     if (_state != SessionConnectionState.idle) {
-      dev.log('$_tag Cannot connect: state is $_state');
+      Logger().warn('$_tag Cannot connect: state is $_state');
       return;
     }
 
-    dev.log('$_tag Connecting...');
+    Logger().info('$_tag Connecting...');
     _setState(SessionConnectionState.waitingForSession);
     _signalRService.registerPlayer(this);
 
@@ -399,7 +399,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       await _messageController.close();
     } catch (_) {}
 
-    dev.log('$_tag Session closed');
+    Logger().info('$_tag Session closed');
   }
 
   /// Enable or disable detailed logging.
@@ -415,7 +415,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   Future<void> _initializePeerConnection() async {
     if (_peerConnection != null) return;
 
-    dev.log('$_tag Initializing peer connection');
+    Logger().info('$_tag Initializing peer connection');
 
     final pc = await createPeerConnection(_buildConfig());
     _bindPeerConnectionHandlers(pc);
@@ -432,20 +432,22 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
-    dev.log('$_tag Added audio and video transceivers');
+    Logger().info('$_tag Added audio and video transceivers');
   }
 
   Map<String, dynamic> _buildConfig() {
     // DEBUG: Log ICE servers before building config
-    dev.log('$_tag 🔍 ICE servers count: ${_signalRService.iceServers.length}');
+    Logger().info(
+      '$_tag 🔍 ICE servers count: ${_signalRService.iceServers.length}',
+    );
     for (final server in _signalRService.iceServers) {
       final hasCredentials =
           server.credential != null && server.username != null;
-      dev.log(
+      Logger().info(
         '$_tag 🔍 ICE server: urls=${server.urls.length}, hasCredentials=$hasCredentials',
       );
       if (hasCredentials) {
-        dev.log(
+        Logger().info(
           '$_tag 🔍   credential=${server.credential?.substring(0, 8)}..., username=${server.username?.substring(0, 10)}...',
         );
       }
@@ -458,7 +460,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     );
 
     // DEBUG: Log final config
-    dev.log('$_tag 🔍 Final ICE config: $config');
+    Logger().info('$_tag 🔍 Final ICE config: $config');
     return config;
   }
 
@@ -468,14 +470,14 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       final streamIds = event.streams.map((s) => s.id).join(', ');
       final mid = event.transceiver?.mid ?? '?';
 
-      dev.log('$_tag ──────────── Track Received ────────────');
-      dev.log('$_tag   kind      : ${track.kind}');
-      dev.log('$_tag   id        : ${track.id}');
-      dev.log('$_tag   label     : ${track.label}');
-      dev.log('$_tag   mid       : $mid');
-      dev.log('$_tag   enabled   : ${track.enabled}');
-      dev.log('$_tag   muted     : ${track.muted}');
-      dev.log('$_tag   streamIds : $streamIds');
+      Logger().info('$_tag ──────────── Track Received ────────────');
+      Logger().info('$_tag   kind      : ${track.kind}');
+      Logger().info('$_tag   id        : ${track.id}');
+      Logger().info('$_tag   label     : ${track.label}');
+      Logger().info('$_tag   mid       : $mid');
+      Logger().info('$_tag   enabled   : ${track.enabled}');
+      Logger().info('$_tag   muted     : ${track.muted}');
+      Logger().info('$_tag   streamIds : $streamIds');
 
       // Collect all streams
       if (event.streams.isNotEmpty) {
@@ -492,15 +494,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         final codec = trackIdx < _videoTrackCodecs.length
             ? _videoTrackCodecs[trackIdx]
             : '?';
-        dev.log('$_tag   codec     : $codec');
-        dev.log('$_tag   → Video track #${trackIdx + 1} added');
+        Logger().info('$_tag   codec     : $codec');
+        Logger().info('$_tag   → Video track #${trackIdx + 1} added');
       } else if (track.kind == 'audio') {
         track.enabled = false; // Default muted
         _audioTracks.add(track);
-        dev.log('$_tag   → Audio track #${_audioTracks.length} added (muted)');
+        Logger().info(
+          '$_tag   → Audio track #${_audioTracks.length} added (muted)',
+        );
       }
 
-      dev.log(
+      Logger().info(
         '$_tag ──────────── Totals: V:${_videoTracks.length} A:${_audioTracks.length} ────────────',
       );
 
@@ -512,8 +516,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     pc.onIceGatheringState = _handleIceGatheringState;
     pc.onIceCandidate = (c) => _iceManager.handleLocalCandidate(c, _sessionId);
     pc.onDataChannel = _handleDataChannel;
-    pc.onSignalingState = (s) => dev.log('$_tag Signaling state: $s');
-    pc.onRenegotiationNeeded = () => dev.log('$_tag Renegotiation needed');
+    pc.onSignalingState = (s) => Logger().info('$_tag Signaling state: $s');
+    pc.onRenegotiationNeeded = () =>
+        Logger().info('$_tag Renegotiation needed');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -533,7 +538,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // Extract per-track codecs from the offer SDP
       _videoTrackCodecs.clear();
       _videoTrackCodecs.addAll(offerSdp.videoCodecsPerSection);
-      dev.log('$_tag Per-track codecs from SDP: $_videoTrackCodecs');
+      Logger().info('$_tag Per-track codecs from SDP: $_videoTrackCodecs');
 
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(offerSdp, offer.type),
@@ -556,7 +561,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // This forces Flutter to initiate DTLS handshake, fixing deadlocks
       // with IoT cameras that expect the client to send ClientHello first.
       final fixedSdp = finalAnswer!.sdp!.withAnswerFixes;
-      dev.log('$_tag Applied answer fixes (DTLS active role)');
+      Logger().info('$_tag Applied answer fixes (DTLS active role)');
 
       _setState(SessionConnectionState.sendingAnswer);
       await _signalRService.sendSignalInviteMessage(
@@ -569,7 +574,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // await _iceManager.drainQueuedCandidates(_peerConnection!);
       _cancelNegotiationTimer();
     } catch (e) {
-      dev.log('$_tag Negotiation failed: $e');
+      Logger().error('$_tag Negotiation failed: $e');
       _cancelNegotiationTimer();
       _setState(SessionConnectionState.failed);
     }
@@ -592,7 +597,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   // ═══════════════════════════════════════════════════════════════════════════
 
   void _handleIceConnectionState(RTCIceConnectionState state) async {
-    dev.log('$_tag ICE connection state: $state');
+    Logger().info('$_tag ICE connection state: $state');
 
     switch (state) {
       case RTCIceConnectionState.RTCIceConnectionStateChecking:
@@ -602,17 +607,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       case RTCIceConnectionState.RTCIceConnectionStateConnected:
       case RTCIceConnectionState.RTCIceConnectionStateCompleted:
         await _statsMonitor.logOnce(_peerConnection!);
-        dev.log('$_tag 🎉 ICE CONNECTION ESTABLISHED!');
+        Logger().info('$_tag 🎉 ICE CONNECTION ESTABLISHED!');
         _setState(SessionConnectionState.connected);
         _iceRestartAttempts = 0;
       case RTCIceConnectionState.RTCIceConnectionStateFailed:
         await _statsMonitor.logOnce(_peerConnection!);
-        dev.log('$_tag ❌ ICE FAILED');
+        Logger().error('$_tag ❌ ICE FAILED');
         await _attemptIceRestart();
       case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
         _statsMonitor.start(_peerConnection!);
         await _statsMonitor.logOnce(_peerConnection!);
-        dev.log('$_tag ❌ ICE DISCONNECTED');
+        Logger().warn('$_tag ❌ ICE DISCONNECTED');
         _setState(SessionConnectionState.disconnected);
         // Give it a few seconds to self-recover before attempting restart
         await Future.delayed(const Duration(seconds: 3));
@@ -625,23 +630,23 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   void _handleConnectionState(RTCPeerConnectionState state) {
-    dev.log('$_tag Peer connection state: $state');
+    Logger().info('$_tag Peer connection state: $state');
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-      dev.log('$_tag 🎉 PEER CONNECTION ESTABLISHED!');
+      Logger().info('$_tag 🎉 PEER CONNECTION ESTABLISHED!');
       onConnectionComplete?.call();
       _codecDetector.scheduleStatsDetection(_peerConnection!);
     }
   }
 
   Future<void> _handleIceGatheringState(RTCIceGatheringState state) async {
-    dev.log('$_tag ICE gathering state: $state');
+    Logger().info('$_tag ICE gathering state: $state');
     if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
       await _iceManager.sendAllEndOfCandidates(_peerConnection!);
     }
   }
 
   void _handleDataChannel(RTCDataChannel channel) {
-    dev.log('$_tag Data channel opened: ${channel.label}');
+    Logger().info('$_tag Data channel opened: ${channel.label}');
     _dataChannel = channel;
     _dataChannel!.onMessage = (msg) {
       if (msg.isBinary) {
@@ -651,7 +656,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       }
     };
     _dataChannel!.onDataChannelState = (state) {
-      dev.log('$_tag Data channel state: $state');
+      Logger().info('$_tag Data channel state: $state');
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
         onDataChannelReady?.call();
       }
@@ -664,7 +669,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   Future<void> _attemptIceRestart() async {
     if (!restartOnDisconnect) {
-      dev.log('$_tag ICE restart disabled');
+      Logger().warn('$_tag ICE restart disabled');
       _setState(SessionConnectionState.failed);
       return;
     }
@@ -681,12 +686,12 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     }
 
     if (!_state.canRestartIce) {
-      dev.log('$_tag Cannot restart ICE in state: $_state');
+      Logger().warn('$_tag Cannot restart ICE in state: $_state');
       return;
     }
 
     if (_iceRestartAttempts >= _maxIceRestartAttempts) {
-      dev.log('$_tag Max ICE restart attempts reached');
+      Logger().error('$_tag Max ICE restart attempts reached');
       _setState(SessionConnectionState.failed);
       return;
     }
@@ -695,7 +700,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _setState(SessionConnectionState.restarting);
 
     try {
-      dev.log(
+      Logger().info(
         '$_tag Attempting ICE restart (attempt $_iceRestartAttempts/$_maxIceRestartAttempts)',
       );
 
@@ -710,10 +715,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
           _sessionId!,
           SdpWrapper(type: localDesc.type!, sdp: localDesc.sdp!),
         );
-        dev.log('$_tag ICE restart offer sent');
+        Logger().info('$_tag ICE restart offer sent');
       }
     } catch (e) {
-      dev.log('$_tag ICE restart failed: $e');
+      Logger().error('$_tag ICE restart failed: $e');
       _setState(SessionConnectionState.failed);
     }
   }

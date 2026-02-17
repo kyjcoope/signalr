@@ -1,4 +1,4 @@
-import 'dart:developer' as dev;
+import '../utils/logger.dart';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -24,20 +24,20 @@ abstract final class PeerConnectionFactory {
     final servers = iceServers.map((e) => e.toJson()).toList();
 
     // DEBUG: Log servers after toJson to verify credentials are preserved
-    dev.log(
+    Logger().info(
       'PeerConnectionFactory: 🔍 Building config with ${servers.length} servers',
     );
     for (int i = 0; i < servers.length; i++) {
       final s = servers[i];
       final hasCredentials =
           s.containsKey('credential') && s.containsKey('username');
-      dev.log(
+      Logger().info(
         'PeerConnectionFactory: 🔍 Server[$i] urls=${(s["urls"] as List?)?.length}, hasCredentials=$hasCredentials',
       );
       if (hasCredentials) {
         final cred = s['credential'] as String?;
         final user = s['username'] as String?;
-        dev.log(
+        Logger().info(
           'PeerConnectionFactory: 🔍   credential=${cred?.substring(0, 8)}..., username=${user?.substring(0, 10)}...',
         );
       }
