@@ -204,8 +204,9 @@ class SignalRService {
     SdpWrapper sdp,
     String messageId,
   ) async {
-    Logger().info('SignalRService: Sending SDP answer for session: $sessionId');
-    Logger().info('SignalRService: Message ID: $messageId');
+    Logger().info(
+      'SignalRService: 📤 SDP answer session=$sessionId id=$messageId type=${sdp.type}',
+    );
 
     final message = InviteAnswerMessage(
       session: sessionId,
@@ -213,31 +214,21 @@ class SignalRService {
       id: messageId,
     );
 
-    final jsonPayload = message.toJson();
-    Logger().info('SignalRService: 📤 SDP ANSWER PAYLOAD:');
-    Logger().info('SignalRService:   session: $sessionId');
-    Logger().info('SignalRService:   id: $messageId');
-    Logger().info('SignalRService:   answer.type: ${sdp.type}');
-    Logger().info(
-      'SignalRService:   answer.sdp (first 500 chars): ${sdp.sdp.substring(0, sdp.sdp.length > 500 ? 500 : sdp.sdp.length)}',
-    );
-    Logger().info('SignalRService:   Full JSON: $jsonPayload');
-
-    await _sendMessage(jsonPayload);
+    await _sendMessage(message.toJson());
     Logger().info('SignalRService: ✅ SDP answer sent successfully');
   }
 
-  /// Send an ICE candidate.
-  Future<void> sendSignalTrickleMessage(
-    String sessionId,
-    RTCIceCandidate candidate,
-  ) async {
-    Logger().info(
-      'SignalRService: Sending ICE candidate for session: $sessionId, mid=${candidate.sdpMid}',
-    );
-
+  /// Send an ICE candidate (fire-and-forget).
+  ///
+  /// Does not await the hub response to avoid blocking the ICE exchange
+  /// with ~100 serial awaits during multi-camera connection bursts.
+  void sendSignalTrickleMessage(String sessionId, RTCIceCandidate candidate) {
     final message = TrickleMessage(session: sessionId, candidate: candidate);
-    await _sendMessage(message.toJson());
+    _sendMessage(message.toJson()).catchError((e) {
+      Logger().error(
+        'SignalRService: ICE candidate send error for $sessionId: $e',
+      );
+    });
   }
 
   /// Send an ICE restart offer.

@@ -23,7 +23,7 @@ class IceCandidateManager {
   });
 
   /// Called when a candidate needs to be sent to the remote peer.
-  final Future<void> Function(RTCIceCandidate candidate) onSendCandidate;
+  final void Function(RTCIceCandidate candidate) onSendCandidate;
 
   /// Called once when the first local ICE candidate is generated.
   final VoidCallback? onLocalIceStarted;

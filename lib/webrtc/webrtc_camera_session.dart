@@ -201,9 +201,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     );
   }
 
-  Future<void> _sendCandidate(RTCIceCandidate candidate) async {
+  void _sendCandidate(RTCIceCandidate candidate) {
     if (_sessionId != null) {
-      await _signalRService.sendSignalTrickleMessage(_sessionId!, candidate);
+      _signalRService.sendSignalTrickleMessage(_sessionId!, candidate);
     }
   }
 

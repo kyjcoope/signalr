@@ -17,7 +17,7 @@ abstract final class PeerConnectionFactory {
   static Map<String, dynamic> buildConfig({
     required List<IceServerConfig> iceServers,
     bool turnTcpOnly = false,
-    int iceCandidatePoolSize = 2,
+    int iceCandidatePoolSize = 4,
   }) {
     final servers = iceServers.map((e) => e.toJson()).toList();
 
@@ -77,7 +77,7 @@ abstract final class PeerConnectionFactory {
   static Future<RTCPeerConnection> create({
     required List<IceServerConfig> iceServers,
     bool turnTcpOnly = false,
-    int iceCandidatePoolSize = 2,
+    int iceCandidatePoolSize = 4,
   }) async {
     final config = buildConfig(
       iceServers: iceServers,

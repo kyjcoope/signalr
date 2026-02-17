@@ -19,7 +19,7 @@ Future<Store<AppState>> createAppStore() async {
       location: FlutterSaveLocation.sharedPreferences,
     ),
     serializer: JsonSerializer<AppState>(AppState.fromJson),
-    debug: true,
+    debug: false,
   );
 
   final initialState = await persistor.load();
@@ -44,14 +44,6 @@ Future<Store<AppState>> createAppStore() async {
     initialState: initialState ?? const AppState(),
     middleware: [thunkMiddleware, persistor.createMiddleware()],
   );
-
-  // Log whenever camera count changes so we know persistence should trigger
-  store.onChange.listen((state) {
-    debugPrint(
-      '[Store] State changed: ${state.cameras.cameras.length} cameras, '
-      'serverStatus=${state.auth.serverStatus}',
-    );
-  });
 
   return store;
 }
