@@ -50,10 +50,15 @@ class SignalRMessageRouter {
     final messageStr = args[0]?.toString();
     if (messageStr == null) return;
 
-    Logger().info('SignalRMessageRouter: Received: $messageStr');
-
     try {
       final parsed = jsonDecode(messageStr) as Map<String, dynamic>;
+
+      final method = parsed.method;
+      final session = parsed.param<String>('session');
+      final logLabel = method != null
+          ? 'method=$method${session != null ? ', session=$session' : ''}'
+          : 'response id=${parsed['id']}';
+      Logger().info('SignalRMessageRouter: Received $logLabel');
 
       if (parsed.isRequest) {
         _handleRequestMessage(parsed);

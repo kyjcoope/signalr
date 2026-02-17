@@ -37,6 +37,7 @@ class IceCandidateManager {
   final Queue<RTCIceCandidate> _pendingRemoteCandidates =
       Queue<RTCIceCandidate>();
   final Set<String> _eocSentForMid = {};
+  final Set<String> _seenRemoteCandidates = {};
   Map<int, String> _mlineToMid = {};
 
   bool _firedLocalIce = false;
@@ -58,6 +59,7 @@ class IceCandidateManager {
   void reset() {
     _pendingRemoteCandidates.clear();
     _eocSentForMid.clear();
+    _seenRemoteCandidates.clear();
     _mlineToMid.clear();
     _firedLocalIce = false;
     _firedRemoteIce = false;
@@ -136,6 +138,7 @@ class IceCandidateManager {
   ///
   /// If remote description is not set, queues for later.
   /// Otherwise, adds to peer connection immediately.
+  /// Duplicate candidates (same candidate string) are silently skipped.
   Future<void> handleRemoteCandidate(
     RTCIceCandidate candidate,
     RTCPeerConnection? pc,
@@ -145,6 +148,12 @@ class IceCandidateManager {
         '$tag Received end-of-candidates for mid=${candidate.sdpMid}',
       );
       return;
+    }
+
+    // Deduplicate: skip candidates we've already processed
+    final candidateStr = candidate.candidate!;
+    if (!_seenRemoteCandidates.add(candidateStr)) {
+      return; // Already seen, skip silently
     }
 
     if (pc == null || !_remoteDescSet) {
@@ -159,14 +168,15 @@ class IceCandidateManager {
   Future<void> drainQueuedCandidates(RTCPeerConnection pc) async {
     if (_pendingRemoteCandidates.isEmpty) return;
 
-    Logger().info(
-      '$tag Draining ${_pendingRemoteCandidates.length} queued candidates',
-    );
+    final count = _pendingRemoteCandidates.length;
+    Logger().info('$tag Draining $count queued candidates');
 
+    final futures = <Future<void>>[];
     while (_pendingRemoteCandidates.isNotEmpty) {
       final candidate = _pendingRemoteCandidates.removeFirst();
-      await _addCandidate(candidate, pc);
+      futures.add(_addCandidate(candidate, pc));
     }
+    await Future.wait(futures);
   }
 
   Future<void> _addCandidate(
@@ -195,7 +205,6 @@ class IceCandidateManager {
         candidate.sdpMLineIndex,
       );
       await pc.addCandidate(resolved);
-      Logger().info('$tag ✅ Added remote ICE: mid=$mid');
     } catch (e) {
       Logger().info('$tag Error adding ICE candidate: $e');
     }

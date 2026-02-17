@@ -62,6 +62,9 @@ class SignalRSessionHub {
   /// Active video track index per camera (0-based).
   final Map<String, int> _activeVideoTrack = {};
 
+  /// Cameras currently in the async connect flow (prevents double-press).
+  final Set<String> _connectingCameras = {};
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Getters
   // ═══════════════════════════════════════════════════════════════════════════
@@ -123,37 +126,60 @@ class SignalRSessionHub {
       return activeSessions[cameraId];
     }
 
-    // Create and initialize renderer
-    final renderer = RTCVideoRenderer();
-    await renderer.initialize();
-    _renderers[cameraId] = renderer;
+    // Prevent double-press: if already in the async connect flow, bail out
+    if (_connectingCameras.contains(cameraId)) {
+      Logger().info(
+        'SignalRSessionHub: Connect already in progress for $cameraId',
+      );
+      return null;
+    }
+    _connectingCameras.add(cameraId);
 
-    // Create new session
-    final session = WebRtcCameraSession(
-      cameraId: cameraId,
-      signalRService: _signalRService,
-    );
+    try {
+      // Create and initialize renderer
+      final renderer = RTCVideoRenderer();
+      await renderer.initialize();
+      _renderers[cameraId] = renderer;
 
-    // Wire renderer to receive tracks — bind to FIRST video track only
-    bool rendererBound = false;
-    session.onTrack = (event) {
-      if (event.track.kind == 'video' &&
-          event.streams.isNotEmpty &&
-          !rendererBound) {
-        rendererBound = true;
-        _activeVideoTrack[cameraId] = 0;
-        renderer.srcObject = event.streams[0];
-        Logger().info(
-          'SignalRSessionHub: Renderer srcObject set for $cameraId (track 1/${session.videoTrackCount})',
-        );
+      // Create new session
+      final session = WebRtcCameraSession(
+        cameraId: cameraId,
+        signalRService: _signalRService,
+      );
+
+      // Wire renderer to receive tracks — bind to FIRST video track only
+      bool rendererBound = false;
+      session.onTrack = (event) {
+        if (event.track.kind == 'video' &&
+            event.streams.isNotEmpty &&
+            !rendererBound) {
+          rendererBound = true;
+          _activeVideoTrack[cameraId] = 0;
+          renderer.srcObject = event.streams[0];
+          Logger().info(
+            'SignalRSessionHub: Renderer srcObject set for $cameraId (track 1/${session.videoTrackCount})',
+          );
+        }
+      };
+
+      activeSessions[cameraId] = session;
+      await session.connect();
+
+      Logger().info('SignalRSessionHub: Connected to $cameraId');
+      return session;
+    } catch (e) {
+      Logger().error('SignalRSessionHub: Failed to connect $cameraId: $e');
+      // Clean up on failure
+      activeSessions.remove(cameraId);
+      final renderer = _renderers.remove(cameraId);
+      if (renderer != null) {
+        renderer.srcObject = null;
+        await renderer.dispose();
       }
-    };
-
-    activeSessions[cameraId] = session;
-    await session.connect();
-
-    Logger().info('SignalRSessionHub: Connected to $cameraId');
-    return session;
+      return null;
+    } finally {
+      _connectingCameras.remove(cameraId);
+    }
   }
 
   /// Disconnect from a camera.

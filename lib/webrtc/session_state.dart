@@ -33,6 +33,9 @@ enum SessionConnectionState {
   /// ICE restart in progress.
   restarting,
 
+  /// Full connection teardown + reconnect in progress after ICE failure.
+  reconnecting,
+
   /// Fatal error or connection failed.
   failed,
 
@@ -55,14 +58,27 @@ extension SessionConnectionStateX on SessionConnectionState {
       this == SessionConnectionState.settingRemoteDescription ||
       this == SessionConnectionState.creatingAnswer ||
       this == SessionConnectionState.sendingAnswer ||
-      this == SessionConnectionState.restarting;
+      this == SessionConnectionState.restarting ||
+      this == SessionConnectionState.reconnecting;
 
   /// Whether the session has terminated (failed or closed).
   bool get isTerminal =>
       this == SessionConnectionState.failed ||
       this == SessionConnectionState.closed;
 
-  /// Whether ICE restart is allowed in this state.
+  /// Whether the session is in the process of connecting (between idle and connected).
+  /// Used to prevent double-connect and other race conditions.
+  bool get isConnecting =>
+      this == SessionConnectionState.waitingForSession ||
+      this == SessionConnectionState.initializingPeer ||
+      this == SessionConnectionState.settingRemoteDescription ||
+      this == SessionConnectionState.creatingAnswer ||
+      this == SessionConnectionState.sendingAnswer ||
+      this == SessionConnectionState.exchangingIce ||
+      this == SessionConnectionState.restarting ||
+      this == SessionConnectionState.reconnecting;
+
+  /// Whether ICE restart / reconnect is allowed in this state.
   bool get canRestartIce =>
       this == SessionConnectionState.connected ||
       this == SessionConnectionState.disconnected;

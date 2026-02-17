@@ -59,6 +59,7 @@ WebRtcConnectionState _mapConnectionState(SessionConnectionState state) {
       return WebRtcConnectionState.sessionConnected;
     case SessionConnectionState.disconnected:
     case SessionConnectionState.restarting:
+    case SessionConnectionState.reconnecting:
       return WebRtcConnectionState.sessionReconnecting;
     case SessionConnectionState.failed:
       return WebRtcConnectionState.sessionFailed;
@@ -207,15 +208,32 @@ ThunkAction<AppState> disconnectCamera(String slug) {
   };
 }
 
-/// Connect all currently visible cameras.
-ThunkAction<AppState> connectAllVisible() {
+/// Connect all currently visible cameras in batches.
+///
+/// Connects up to [batchSize] cameras in parallel, then waits for the
+/// batch to finish before starting the next. This avoids overwhelming
+/// the signaling server while still being much faster than sequential.
+ThunkAction<AppState> connectAllVisible({int batchSize = 10}) {
   return (Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
     final visible = selectVisibleCameras(store.state);
-    for (final slug in visible) {
-      if (!hub.isConnected(slug)) {
-        await store.dispatch(connectCamera(slug));
-      }
+    final toConnect = visible.where((s) => !hub.isConnected(s)).toList();
+
+    Logger().info(
+      '[Thunk] connectAllVisible: ${toConnect.length} cameras in batches of $batchSize',
+    );
+
+    for (var i = 0; i < toConnect.length; i += batchSize) {
+      final batch = toConnect.sublist(
+        i,
+        (i + batchSize).clamp(0, toConnect.length),
+      );
+      Logger().info(
+        '[Thunk] Batch ${(i ~/ batchSize) + 1}: connecting ${batch.length} cameras',
+      );
+      await Future.wait(
+        batch.map((slug) => store.dispatch(connectCamera(slug))),
+      );
     }
   };
 }

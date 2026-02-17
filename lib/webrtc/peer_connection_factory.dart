@@ -1,5 +1,3 @@
-import '../utils/logger.dart';
-
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../signalr/signalr_messages.dart';
@@ -22,26 +20,6 @@ abstract final class PeerConnectionFactory {
     int iceCandidatePoolSize = 2,
   }) {
     final servers = iceServers.map((e) => e.toJson()).toList();
-
-    // DEBUG: Log servers after toJson to verify credentials are preserved
-    Logger().info(
-      'PeerConnectionFactory: 🔍 Building config with ${servers.length} servers',
-    );
-    for (int i = 0; i < servers.length; i++) {
-      final s = servers[i];
-      final hasCredentials =
-          s.containsKey('credential') && s.containsKey('username');
-      Logger().info(
-        'PeerConnectionFactory: 🔍 Server[$i] urls=${(s["urls"] as List?)?.length}, hasCredentials=$hasCredentials',
-      );
-      if (hasCredentials) {
-        final cred = s['credential'] as String?;
-        final user = s['username'] as String?;
-        Logger().info(
-          'PeerConnectionFactory: 🔍   credential=${cred?.substring(0, 8)}..., username=${user?.substring(0, 10)}...',
-        );
-      }
-    }
 
     if (turnTcpOnly) {
       return _buildTcpOnlyConfig(servers, iceCandidatePoolSize);

@@ -22,18 +22,30 @@ class Logger {
   /// Returns the singleton instance.
   factory Logger() => _instance;
 
+  static const String _name = 'SignalR';
+
+  /// Format: HH:MM:SS.mmm
+  String get _ts {
+    final now = DateTime.now();
+    final h = now.hour.toString().padLeft(2, '0');
+    final m = now.minute.toString().padLeft(2, '0');
+    final s = now.second.toString().padLeft(2, '0');
+    final ms = now.millisecond.toString().padLeft(3, '0');
+    return '$h:$m:$s.$ms';
+  }
+
   /// Log an informational message.
   void info(String message) {
-    dev.log(message);
+    dev.log('$_ts $message', name: _name);
   }
 
   /// Log a warning message.
   void warn(String message) {
-    dev.log('[WARN] $message');
+    dev.log('$_ts $message', name: '$_name.WARN');
   }
 
   /// Log an error message.
   void error(String message) {
-    dev.log('[ERROR] $message');
+    dev.log('$_ts $message', name: '$_name.ERROR');
   }
 }
