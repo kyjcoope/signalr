@@ -39,12 +39,6 @@ class WebRtcSessionState {
     this.negotiatedCodec,
   });
 
-  /// Whether this session has more than one video track.
-  bool get hasMultipleVideoTracks => videoTrackCount > 1;
-
-  /// Whether this session has more than one audio track.
-  bool get hasMultipleAudioTracks => audioTrackCount > 1;
-
   WebRtcSessionState copyWith({
     WebRtcConnectionState? connectionState,
     int? textureId,
