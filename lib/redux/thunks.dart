@@ -58,7 +58,6 @@ WebRtcConnectionState _mapConnectionState(SessionConnectionState state) {
     case SessionConnectionState.connected:
       return WebRtcConnectionState.sessionConnected;
     case SessionConnectionState.disconnected:
-    case SessionConnectionState.restarting:
     case SessionConnectionState.reconnecting:
       return WebRtcConnectionState.sessionReconnecting;
     case SessionConnectionState.failed:

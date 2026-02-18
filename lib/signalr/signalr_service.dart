@@ -262,26 +262,6 @@ class SignalRService {
     });
   }
 
-  /// Send an ICE restart offer.
-  ///
-  /// This is used when the ICE connection fails and needs to be re-established.
-  Future<bool> sendIceRestartOffer(String sessionId, SdpWrapper offer) async {
-    Logger().info(
-      'SignalRService: Sending ICE restart offer for session: $sessionId',
-    );
-
-    if (!isPeerReady) return false;
-
-    try {
-      final message = IceRestartMessage(session: sessionId, offer: offer);
-      await _sendMessage(message.toJson());
-      return true;
-    } catch (e) {
-      Logger().error('SignalRService: ICE restart error: $e');
-      return false;
-    }
-  }
-
   /// Send a close message to the signaling server.
   ///
   /// Notifies the server that the client is intentionally closing the session.

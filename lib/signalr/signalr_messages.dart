@@ -42,7 +42,6 @@ enum SignalRMethod {
   connect('connect'),
   invite('invite'),
   trickle('trickle'),
-  restart('restart'),
   error('error');
 
   const SignalRMethod(this.json);
@@ -252,21 +251,6 @@ class TrickleMessage implements SignalRTypedMessage {
     this.id = '',
   });
 
-  factory TrickleMessage.fromJson(Map<String, dynamic> json) {
-    final params = json['params'] as Map<String, dynamic>? ?? {};
-    final candidateData = params['candidate'] as Map<String, dynamic>? ?? {};
-
-    return TrickleMessage(
-      session: params['session'] as String? ?? '',
-      candidate: RTCIceCandidate(
-        candidateData['candidate'] as String? ?? '',
-        candidateData['sdpMid'] as String?,
-        candidateData['sdpMLineIndex'] as int?,
-      ),
-      id: json['id']?.toString() ?? '',
-    );
-  }
-
   final String session;
   final RTCIceCandidate candidate;
 
@@ -336,30 +320,6 @@ class ErrorMessage implements SignalRTypedMessage {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ICE Restart Messages
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// ICE restart offer notification.
-class IceRestartMessage implements SignalRTypedMessage {
-  IceRestartMessage({required this.session, required this.offer});
-
-  final String session;
-  final SdpWrapper offer;
-
-  @override
-  String get id => '';
-
-  @override
-  SignalRMethod get method => SignalRMethod.restart;
-
-  @override
-  Map<String, dynamic> toJson() => JsonRpc.notification(
-    method: method.json,
-    params: {'session': session, 'offer': offer.toJson()},
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Close/Leave Messages
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -391,32 +351,4 @@ class CloseMessage implements SignalRTypedMessage {
       'session': session,
     },
   );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Message Parser
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// Parse incoming JSON-RPC messages to typed objects.
-class SignalRMessageParser {
-  /// Parse a request message (has method).
-  static dynamic parseRequest(Map<String, dynamic> json) {
-    final method = SignalRMethod.fromString(json['method'] as String?);
-
-    return switch (method) {
-      SignalRMethod.invite => InviteRequest.fromJson(json),
-      SignalRMethod.trickle => TrickleMessage.fromJson(json),
-      SignalRMethod.error => ErrorMessage.fromJson(json),
-      _ => json, // Return raw for unknown methods
-    };
-  }
-
-  /// Parse a response message (has result).
-  static dynamic parseResponse(Map<String, dynamic> json, String requestId) {
-    return switch (requestId) {
-      '1' => RegisterResponse.fromJson(json),
-      '2' => ConnectResponse.fromJson(json),
-      _ => json,
-    };
-  }
 }

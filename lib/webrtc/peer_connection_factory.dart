@@ -1,5 +1,3 @@
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-
 import '../signalr/signalr_messages.dart';
 
 /// Builds WebRTC peer connection configurations.
@@ -69,21 +67,5 @@ abstract final class PeerConnectionFactory {
       'rtcpMuxPolicy': 'require',
       'sdpSemantics': 'unified-plan',
     };
-  }
-
-  /// Create a preconfigured peer connection.
-  ///
-  /// Convenience method that combines config building and connection creation.
-  static Future<RTCPeerConnection> create({
-    required List<IceServerConfig> iceServers,
-    bool turnTcpOnly = false,
-    int iceCandidatePoolSize = 4,
-  }) async {
-    final config = buildConfig(
-      iceServers: iceServers,
-      turnTcpOnly: turnTcpOnly,
-      iceCandidatePoolSize: iceCandidatePoolSize,
-    );
-    return createPeerConnection(config);
   }
 }

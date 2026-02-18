@@ -91,7 +91,6 @@ class SignalRConnectionManager {
   /// Dispose of all resources.
   Future<void> dispose() async {
     await disconnect();
-    _unbindEventHandlers();
     _connection = null;
   }
 
@@ -222,10 +221,6 @@ class SignalRConnectionManager {
     _connection?.onclose(_handleClose);
     _connection?.onreconnecting(_handleReconnecting);
     _connection?.onreconnected(_handleReconnected);
-  }
-
-  void _unbindEventHandlers() {
-    // Note: signalr_netcore doesn't have unbind for lifecycle events
   }
 
   void _handleClose({Exception? error}) {

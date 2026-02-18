@@ -30,9 +30,6 @@ enum SessionConnectionState {
   /// ICE connection temporarily lost, may recover.
   disconnected,
 
-  /// ICE restart in progress.
-  restarting,
-
   /// Full connection teardown + reconnect in progress after ICE failure.
   reconnecting,
 
@@ -58,7 +55,6 @@ extension SessionConnectionStateX on SessionConnectionState {
       this == SessionConnectionState.settingRemoteDescription ||
       this == SessionConnectionState.creatingAnswer ||
       this == SessionConnectionState.sendingAnswer ||
-      this == SessionConnectionState.restarting ||
       this == SessionConnectionState.reconnecting;
 
   /// Whether the session has terminated (failed or closed).
@@ -75,7 +71,6 @@ extension SessionConnectionStateX on SessionConnectionState {
       this == SessionConnectionState.creatingAnswer ||
       this == SessionConnectionState.sendingAnswer ||
       this == SessionConnectionState.exchangingIce ||
-      this == SessionConnectionState.restarting ||
       this == SessionConnectionState.reconnecting;
 
   /// Whether ICE restart / reconnect is allowed in this state.
