@@ -173,6 +173,12 @@ class SignalRService {
   // Sending Messages
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /// Gate that blocks low-priority sends (ICE trickle) while a high-priority
+  /// send (SDP answer) is in-flight. This prevents the WebSocket invoke queue
+  /// from delaying critical answer messages behind dozens of fire-and-forget
+  /// ICE candidate sends.
+  Completer<void>? _answerGate;
+
   Future<void> _sendMessage(Map<String, dynamic> data) async {
     if (!isPeerReady) {
       Logger().warn('SignalRService: Cannot send - not connected');
@@ -199,6 +205,9 @@ class SignalRService {
   }
 
   /// Send an SDP answer for an invite.
+  ///
+  /// This is a high-priority send. While the answer is in-flight, ICE trickle
+  /// sends are gated so they don't queue ahead of answers on the WebSocket.
   Future<void> sendSignalInviteMessage(
     String sessionId,
     SdpWrapper sdp,
@@ -208,23 +217,45 @@ class SignalRService {
       'SignalRService: 📤 SDP answer session=$sessionId id=$messageId type=${sdp.type}',
     );
 
+    // Open the gate — ICE trickle sends will wait until this completes.
+    _answerGate = Completer<void>();
+
     final message = InviteAnswerMessage(
       session: sessionId,
       answerSdp: sdp,
       id: messageId,
     );
 
-    await _sendMessage(message.toJson());
-    Logger().info('SignalRService: ✅ SDP answer sent successfully');
+    try {
+      await _sendMessage(message.toJson());
+      Logger().info('SignalRService: ✅ SDP answer sent successfully');
+    } finally {
+      // Release the gate so buffered ICE trickle sends can proceed.
+      final gate = _answerGate;
+      _answerGate = null;
+      gate?.complete();
+    }
   }
 
-  /// Send an ICE candidate (fire-and-forget).
+  /// Send an ICE candidate (fire-and-forget, gated behind answer sends).
   ///
   /// Does not await the hub response to avoid blocking the ICE exchange
   /// with ~100 serial awaits during multi-camera connection bursts.
+  /// However, if an SDP answer is currently being sent, this will wait
+  /// for it to complete first to avoid WebSocket queue contention.
   void sendSignalTrickleMessage(String sessionId, RTCIceCandidate candidate) {
     final message = TrickleMessage(session: sessionId, candidate: candidate);
-    _sendMessage(message.toJson()).catchError((e) {
+
+    Future<void> send() async {
+      // Wait for any in-flight answer send to complete first.
+      final gate = _answerGate;
+      if (gate != null && !gate.isCompleted) {
+        await gate.future;
+      }
+      await _sendMessage(message.toJson());
+    }
+
+    send().catchError((e) {
       Logger().error(
         'SignalRService: ICE candidate send error for $sessionId: $e',
       );

@@ -93,6 +93,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   bool _isClosing = false;
   Timer? _disconnectRecoveryTimer;
 
+  // Connection timing
+  DateTime? _connectStartedAt;
+  DateTime? _inviteReceivedAt;
+  DateTime? _answerSentAt;
+
   // Track storage for external access (e.g., mute/unmute)
   final List<MediaStream> _remoteStreams = [];
   final List<MediaStreamTrack> _videoTracks = [];
@@ -434,6 +439,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     }
     _isClosing = false;
 
+    _connectStartedAt = DateTime.now();
     Logger().info('$_tag Connecting...');
     _setState(SessionConnectionState.waitingForSession);
     _signalRService.registerPlayer(this);
@@ -604,6 +610,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   Future<void> _negotiate(SdpWrapper offer) async {
     _isNegotiating = true;
+    _inviteReceivedAt = DateTime.now();
+    final waitMs = _connectStartedAt != null
+        ? _inviteReceivedAt!.difference(_connectStartedAt!).inMilliseconds
+        : 0;
+    Logger().info('$_tag ⏱ Invite received after ${waitMs}ms');
     _startNegotiationTimer();
     _setState(SessionConnectionState.settingRemoteDescription);
 
@@ -647,6 +658,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         SdpWrapper(type: finalAnswer.type!, sdp: fixedSdp),
         _lastInviteId ?? '',
       );
+      _answerSentAt = DateTime.now();
+      final negotiateMs = _inviteReceivedAt != null
+          ? _answerSentAt!.difference(_inviteReceivedAt!).inMilliseconds
+          : 0;
+      Logger().info('$_tag ⏱ Answer created+sent in ${negotiateMs}ms');
 
       _setState(SessionConnectionState.exchangingIce);
       _cancelNegotiationTimer();
@@ -688,7 +704,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         _disconnectRecoveryTimer?.cancel();
         _disconnectRecoveryTimer = null;
         await _statsMonitor.logOnce(_peerConnection!);
+        final iceMs = _answerSentAt != null
+            ? DateTime.now().difference(_answerSentAt!).inMilliseconds
+            : 0;
+        final totalMs = _connectStartedAt != null
+            ? DateTime.now().difference(_connectStartedAt!).inMilliseconds
+            : 0;
         Logger().info('$_tag 🎉 ICE CONNECTION ESTABLISHED!');
+        Logger().info(
+          '$_tag ⏱ ICE connected ${iceMs}ms after answer, ${totalMs}ms total',
+        );
         _setState(SessionConnectionState.connected);
         _iceRestartAttempts = 0;
       case RTCIceConnectionState.RTCIceConnectionStateFailed:
@@ -852,6 +877,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _iceRestartAttempts = 0;
     _disconnectRecoveryTimer?.cancel();
     _disconnectRecoveryTimer = null;
+    _connectStartedAt = null;
+    _inviteReceivedAt = null;
+    _answerSentAt = null;
     _remoteStreams.clear();
     _videoTracks.clear();
     _audioTracks.clear();

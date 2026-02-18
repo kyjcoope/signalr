@@ -136,29 +136,35 @@ class SignalRSessionHub {
     _connectingCameras.add(cameraId);
 
     try {
-      // Create and initialize renderer
-      final renderer = RTCVideoRenderer();
-      await renderer.initialize();
-      _renderers[cameraId] = renderer;
-
-      // Create new session
+      // Create new session (renderer is created lazily on first track)
       final session = WebRtcCameraSession(
         cameraId: cameraId,
         signalRService: _signalRService,
       );
 
-      // Wire renderer to receive tracks — bind to FIRST video track only
+      // Wire renderer to receive tracks — bind to FIRST video track only.
+      // Renderer is created lazily here to avoid exhausting EGL contexts
+      // when many cameras connect simultaneously in a batch.
       bool rendererBound = false;
-      session.onTrack = (event) {
+      session.onTrack = (event) async {
         if (event.track.kind == 'video' &&
             event.streams.isNotEmpty &&
             !rendererBound) {
           rendererBound = true;
           _activeVideoTrack[cameraId] = 0;
-          renderer.srcObject = event.streams[0];
-          Logger().info(
-            'SignalRSessionHub: Renderer srcObject set for $cameraId (track 1/${session.videoTrackCount})',
-          );
+          try {
+            final renderer = RTCVideoRenderer();
+            await renderer.initialize();
+            _renderers[cameraId] = renderer;
+            renderer.srcObject = event.streams[0];
+            Logger().info(
+              'SignalRSessionHub: Renderer initialized & bound for $cameraId (track 1/${session.videoTrackCount})',
+            );
+          } catch (e) {
+            Logger().error(
+              'SignalRSessionHub: Failed to create renderer for $cameraId: $e',
+            );
+          }
         }
       };
 
