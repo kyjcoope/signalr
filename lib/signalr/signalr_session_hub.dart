@@ -65,6 +65,10 @@ class SignalRSessionHub {
   /// Cameras currently in the async connect flow (prevents double-press).
   final Set<String> _connectingCameras = {};
 
+  /// Cameras marked for disconnect while still in the async connect flow.
+  /// Checked by `connectToCamera`'s finally-block to auto-cleanup.
+  final Set<String> _pendingDisconnects = {};
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Getters
   // ═══════════════════════════════════════════════════════════════════════════
@@ -185,6 +189,15 @@ class SignalRSessionHub {
       return null;
     } finally {
       _connectingCameras.remove(cameraId);
+
+      // If disconnect was requested while we were still connecting,
+      // tear down the session we just created.
+      if (_pendingDisconnects.remove(cameraId)) {
+        Logger().info(
+          'SignalRSessionHub: Deferred disconnect for $cameraId — cleaning up',
+        );
+        await disconnectCamera(cameraId);
+      }
     }
   }
 
@@ -193,6 +206,16 @@ class SignalRSessionHub {
   /// Properly leaves the session on the server, closes the session,
   /// and disposes the renderer.
   Future<void> disconnectCamera(String cameraId) async {
+    // If the camera is still in the async connect flow, mark it for
+    // deferred disconnect — connectToCamera's finally-block will clean up.
+    if (_connectingCameras.contains(cameraId)) {
+      Logger().info(
+        'SignalRSessionHub: $cameraId still connecting — marking for deferred disconnect',
+      );
+      _pendingDisconnects.add(cameraId);
+      return;
+    }
+
     final session = activeSessions.remove(cameraId);
     if (session != null) {
       // Leave session on server first (like old SignalRSessionHub)
@@ -348,6 +371,10 @@ class SignalRSessionHub {
   /// Shutdown the hub and close all sessions.
   Future<void> shutdown() async {
     Logger().info('SignalRSessionHub: Shutting down...');
+
+    // Mark all in-flight connections for deferred disconnect so they
+    // self-clean when their connectToCamera finally-block runs.
+    _pendingDisconnects.addAll(_connectingCameras);
 
     for (final session in activeSessions.values) {
       await session.close();

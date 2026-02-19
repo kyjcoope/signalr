@@ -245,6 +245,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     // Clear the connect timeout - we received a response
     _cancelConnectTimeout();
 
+    if (_isClosing) return;
+
     final session = detail['session'] as String?;
     if (session != null) {
       _sessionId = session;
@@ -256,8 +258,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   void _handleInvite(dynamic detail) {
-    if (_state.isTerminal) {
-      Logger().info('$_tag Ignoring invite in terminal state');
+    if (_state.isTerminal || _isClosing) {
+      Logger().info('$_tag Ignoring invite in terminal/closing state');
       return;
     }
 
@@ -609,6 +611,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   // ═══════════════════════════════════════════════════════════════════════════
 
   Future<void> _negotiate(SdpWrapper offer) async {
+    if (_isClosing) {
+      Logger().info('$_tag Skipping negotiate — session is closing');
+      return;
+    }
     _isNegotiating = true;
     _inviteReceivedAt = DateTime.now();
     final waitMs = _connectStartedAt != null
@@ -637,6 +643,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _iceManager.markRemoteDescSet();
       await _iceManager.drainQueuedCandidates(_peerConnection!);
 
+      if (_isClosing) {
+        Logger().info('$_tag Aborting negotiate — session closed mid-flight');
+        return;
+      }
+
       _setState(SessionConnectionState.creatingAnswer);
       final answer = await _peerConnection!.createAnswer();
       await _peerConnection!.setLocalDescription(answer);
@@ -651,6 +662,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // with IoT cameras that expect the client to send ClientHello first.
       final fixedSdp = finalAnswer!.sdp!.withAnswerFixes;
       Logger().info('$_tag Applied answer fixes (DTLS active role)');
+
+      if (_isClosing) {
+        Logger().info('$_tag Aborting negotiate — session closed before send');
+        return;
+      }
 
       _setState(SessionConnectionState.sendingAnswer);
       await _signalRService.sendSignalInviteMessage(

@@ -10,6 +10,7 @@ import '../utils/logger.dart';
 import '../webrtc/session_state.dart';
 import 'actions.dart';
 import 'app_state.dart';
+import 'camera_connection_controller.dart';
 import 'selectors.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -132,6 +133,7 @@ ThunkAction<AppState> loginAndInitHub({required AuthService authService}) {
 ThunkAction<AppState> disposeSignalRThunk() {
   return (Store<AppState> store) async {
     Logger().info('[Thunk] disposeSignalRThunk: shutting down');
+    CameraConnectionController.instance.cancelAll();
     final hub = SignalRSessionHub.instance;
     await hub.shutdown();
     store.dispatch(ClearAllSessions());
@@ -170,40 +172,27 @@ ThunkAction<AppState> fetchCameras({required AuthService authService}) {
 // Connection Thunks
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Connect to a single camera via the hub, wiring callbacks to sync Redux.
+/// Connect to a single camera.
+///
+/// Delegates to [CameraConnectionController] which handles debounce,
+/// intent tracking, and serialization. Connects execute immediately
+/// and cancel any pending disconnect debounce.
 ThunkAction<AppState> connectCamera(String slug) {
   return (Store<AppState> store) async {
-    final hub = SignalRSessionHub.instance;
-
     Logger().info('[Thunk] connectCamera: $slug');
-    final session = await hub.connectToCamera(slug);
-    if (session == null) {
-      Logger().error('[Thunk] connectCamera: FAILED for $slug');
-      return;
-    }
-
-    // Any state change → sync full snapshot to Redux
-    session.onStateChanged = (_) => syncSessionToRedux(store, slug);
-
-    // Connection established → sync (captures tracks, texture, etc.)
-    session.onConnectionComplete = () => syncSessionToRedux(store, slug);
-
-    // Codec resolved → sync
-    session.onVideoCodecResolved = (_) => syncSessionToRedux(store, slug);
-
-    // ICE candidates → sync (transitions to pending)
-    session.onLocalIceCandidate = () => syncSessionToRedux(store, slug);
-    session.onRemoteIceCandidate = () => syncSessionToRedux(store, slug);
+    await CameraConnectionController.instance.connect(slug, store);
   };
 }
 
 /// Disconnect a single camera.
+///
+/// Delegates to [CameraConnectionController] which debounces the
+/// disconnect by 500ms. If the user presses connect within that
+/// window, the disconnect is cancelled.
 ThunkAction<AppState> disconnectCamera(String slug) {
   return (Store<AppState> store) async {
     Logger().info('[Thunk] disconnectCamera: $slug');
-    final hub = SignalRSessionHub.instance;
-    await hub.disconnectCamera(slug);
-    store.dispatch(RemoveSession(slug));
+    CameraConnectionController.instance.disconnect(slug, store);
   };
 }
 
@@ -214,6 +203,7 @@ ThunkAction<AppState> disconnectCamera(String slug) {
 /// the signaling server while still being much faster than sequential.
 ThunkAction<AppState> connectAllVisible({int batchSize = 10}) {
   return (Store<AppState> store) async {
+    final ctrl = CameraConnectionController.instance;
     final hub = SignalRSessionHub.instance;
     final visible = selectVisibleCameras(store.state);
     final toConnect = visible.where((s) => !hub.isConnected(s)).toList();
@@ -230,20 +220,20 @@ ThunkAction<AppState> connectAllVisible({int batchSize = 10}) {
       Logger().info(
         '[Thunk] Batch ${(i ~/ batchSize) + 1}: connecting ${batch.length} cameras',
       );
-      await Future.wait(
-        batch.map((slug) => store.dispatch(connectCamera(slug))),
-      );
+      await Future.wait(batch.map((slug) => ctrl.connect(slug, store)));
     }
   };
 }
 
-/// Stop all connected cameras.
+/// Stop all connected cameras immediately (no debounce).
 ThunkAction<AppState> stopAll() {
   return (Store<AppState> store) async {
+    final ctrl = CameraConnectionController.instance;
     final hub = SignalRSessionHub.instance;
     final ids = hub.connectedCameraIds.toList();
+    Logger().info('[Thunk] stopAll: ${ids.length} cameras');
     for (final slug in ids) {
-      await store.dispatch(disconnectCamera(slug));
+      await ctrl.disconnectImmediate(slug, store);
     }
   };
 }
