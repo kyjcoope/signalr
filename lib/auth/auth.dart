@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'dart:developer' as dev;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart';
 import 'package:signalr/config.dart';
 import 'package:signalr/models/models.dart';
+import 'package:signalr/utils/logger.dart';
 
 // Top-level function for Isolate execution
 Map<String, Device> _parseDevices(String responseBody) {
@@ -25,7 +25,7 @@ class AuthService {
   String? get sessionId => _sessionId;
 
   Future<void> login(UserLogin login) async {
-    dev.log('Logging in: ${login.username}');
+    Logger().info('Logging in: ${login.username}');
     try {
       final request = MultipartRequest(
         'POST',
@@ -42,15 +42,22 @@ class AuthService {
       if (response.statusCode != 200) throw Exception('Login failed: $body');
 
       _sessionId = response.headers['session-id'];
-      dev.log('Session ID: $_sessionId');
+      Logger().info('Session ID: $_sessionId');
 
       if (_sessionId != null) {
         devices = await _fetchDevices(url, _sessionId!);
       }
     } catch (e) {
-      dev.log('Login error: $e');
+      Logger().error('Login error: $e');
       rethrow;
     }
+  }
+
+  /// Re-fetch devices from the API using the existing session.
+  Future<void> fetchDevices() async {
+    if (_sessionId == null) throw StateError('Not logged in');
+    devices = await _fetchDevices(url, _sessionId!);
+    Logger().info('Fetched ${devices.length} devices');
   }
 
   Future<Map<String, Device>> _fetchDevices(String host, String sid) async {
@@ -94,7 +101,7 @@ class AuthService {
           ? await response.stream.bytesToString()
           : null;
     } catch (e) {
-      dev.log('Fetch error: $e');
+      Logger().error('Fetch error: $e');
       return null;
     }
   }

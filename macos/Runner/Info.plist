@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSCameraUsageDescription</key>
+	<string>We need camera access to stream video.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>We need microphone access to stream audio.</string>
 </dict>
 </plist>

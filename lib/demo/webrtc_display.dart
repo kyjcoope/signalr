@@ -1,266 +1,405 @@
 import 'package:flutter/material.dart';
-import 'package:signalr/config.dart';
-import 'dart:developer' as dev;
+import 'package:flutter_redux/flutter_redux.dart';
+import 'package:redux/redux.dart';
 
-import 'package:signalr/models/models.dart';
+import 'package:signalr/auth/auth.dart';
 import 'package:signalr/signalr/signalr_session_hub.dart';
-import 'package:signalr/store/favorites_store.dart';
+import 'package:signalr/redux/app_state.dart';
+import 'package:signalr/redux/thunks.dart';
 import 'camera_list.dart';
 
+/// Main display widget for WebRTC camera streams.
 class WebRtcDisplay extends StatefulWidget {
   const WebRtcDisplay({super.key});
 
   @override
-  State<WebRtcDisplay> createState() => _WebRtcDisplay();
+  State<WebRtcDisplay> createState() => _WebRtcDisplayState();
 }
 
-class _WebRtcDisplay extends State<WebRtcDisplay> {
-  final sessionHub = SignalRSessionHub(signalRUrl: 'https://$url/SignalingHub');
-
-  bool _devicesRegistered = false;
-
-  final _store = FavoritesStore();
-  bool _favoritesOnly = false;
-  bool _workingOnly = false;
-  bool _pendingOnly = false;
+class _WebRtcDisplayState extends State<WebRtcDisplay> {
+  final _authService = AuthService();
 
   final GlobalKey<CameraListState> _cameraListKey =
       GlobalKey<CameraListState>();
+  final ScrollController _scrollController = ScrollController();
+  bool _showScrollToTop = false;
+
+  static const double _compactBreakpoint = 600;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _initialize();
-    _loadToggles();
   }
 
   @override
   void dispose() {
-    sessionHub.shutdown();
+    _scrollController.dispose();
+    SignalRSessionHub.instance.shutdown();
     super.dispose();
   }
 
+  void _onScroll() {
+    final show = _scrollController.offset > 200;
+    if (show != _showScrollToTop) {
+      setState(() => _showScrollToTop = show);
+    }
+  }
+
+  void _scrollToTop() {
+    _scrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
   Future<void> _initialize() async {
-    await sessionHub.initialize(
-      UserLogin(
-        username: username,
-        password: password,
-        clientName: 'driver',
-        clientID: 'fb2be96f-05a3-4fea-a151-6365feaaf30c',
-        clientVersion: '3.0',
-        grantType: 'password',
-        scopes: '[IdentityServerApi, rabbitmq-jci, api]',
-        clientId_: 'jci-authui-client',
-      ),
-    );
-    if (!mounted) return;
-    setState(() {
-      _devicesRegistered = true;
-    });
-    dev.log('SignalR session initialized');
-  }
-
-  Future<void> _loadToggles() async {
-    final favOnly = await _store.loadFavoritesOnly();
-    final workOnly = await _store.loadWorkingOnly();
-    final pendingOnly = await _store.loadPendingOnly();
-    if (!mounted) return;
-    setState(() {
-      _favoritesOnly = favOnly;
-      _workingOnly = workOnly;
-      _pendingOnly = pendingOnly;
-    });
-  }
-
-  Future<void> _setFavoritesOnly(bool v) async {
-    setState(() => _favoritesOnly = v);
-    await _store.saveFavoritesOnly(v);
-  }
-
-  Future<void> _setWorkingOnly(bool v) async {
-    setState(() => _workingOnly = v);
-    await _store.saveWorkingOnly(v);
-  }
-
-  Future<void> _setPendingOnly(bool v) async {
-    setState(() => _pendingOnly = v);
-    await _store.savePendingOnly(v);
-  }
-
-  Widget _buildStatusControls(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    final isCompact = width < 600; // breakpoint for vertical layout
-
-    final toggles = [
-      _StatusToggle(
-        icon: const Icon(Icons.star, color: Colors.amber, size: 18),
-        label: 'Favorites',
-        value: _favoritesOnly,
-        onChanged: _setFavoritesOnly,
-      ),
-      _StatusToggle(
-        icon: const Icon(Icons.hourglass_top, color: Colors.blue, size: 18),
-        label: 'Pending',
-        value: _pendingOnly,
-        onChanged: _setPendingOnly,
-      ),
-      _StatusToggle(
-        icon: const Icon(Icons.check_circle, color: Colors.green, size: 18),
-        label: 'Working',
-        value: _workingOnly,
-        onChanged: _setWorkingOnly,
-      ),
-    ];
-
-    if (!isCompact) {
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Status', style: Theme.of(context).textTheme.headlineSmall),
-          const Spacer(),
-          Wrap(
-            alignment: WrapAlignment.end,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 18,
-            runSpacing: 8,
-            children: toggles,
-          ),
-        ],
-      );
-    }
-
-    // Compact (mobile) layout: vertical
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('Status', style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (final t in toggles)
-              Padding(padding: const EdgeInsets.only(bottom: 8), child: t),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildActionsRow(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    final isCompact = width < 600;
-    final buttons = [
-      ElevatedButton.icon(
-        onPressed: () => _cameraListKey.currentState?.connectAll(),
-        icon: const Icon(Icons.play_circle_fill),
-        label: const Text('Connect all'),
-      ),
-      OutlinedButton.icon(
-        onPressed: () => _cameraListKey.currentState?.stopAll(),
-        icon: const Icon(Icons.stop_circle, color: Colors.red),
-        label: const Text('Stop all'),
-      ),
-      TextButton.icon(
-        onPressed:
-            () => _cameraListKey.currentState?.resetFavoritesAndWorking(),
-        icon: const Icon(Icons.refresh),
-        label: const Text('Reset'),
-      ),
-    ];
-
-    if (!isCompact) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [Wrap(spacing: 12, runSpacing: 8, children: buttons)],
-      );
-    }
-
-    // Vertical stack on compact
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final b in buttons)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Align(alignment: Alignment.centerLeft, child: b),
-          ),
-      ],
-    );
+    final store = StoreProvider.of<AppState>(context, listen: false);
+    store.dispatch(loginAndInitHub(authService: _authService));
   }
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (ctx, constraints) {
-        return Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Card(
-                clipBehavior: Clip.antiAlias,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: [
-                      _buildStatusControls(context),
-                      const SizedBox(height: 12),
-                      _buildActionsRow(context),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child:
-                    !_devicesRegistered
-                        ? const Center(
-                          child: Text('Waiting for device registration...'),
-                        )
-                        : CameraList(
-                          key: _cameraListKey,
-                          sessionHub: sessionHub,
-                          favoritesOnly: _favoritesOnly,
-                          workingOnly: _workingOnly,
-                          pendingOnly: _pendingOnly,
-                        ),
-              ),
-            ],
-          ),
+    final width = MediaQuery.of(context).size.width;
+    final isCompact = width < _compactBreakpoint;
+
+    return StoreConnector<AppState, bool>(
+      converter: (store) => store.state.cameras.isLoaded,
+      builder: (context, hasCameras) {
+        return Scaffold(
+          body: isCompact
+              ? _buildScrollingLayout()
+              : _buildFixedToolbarLayout(),
+          floatingActionButton: _showScrollToTop
+              ? FloatingActionButton.small(
+                  onPressed: _scrollToTop,
+                  child: const Icon(Icons.keyboard_arrow_up),
+                )
+              : null,
         );
       },
     );
   }
+
+  /// Layout for large screens: fixed toolbar + scrollable camera list
+  Widget _buildFixedToolbarLayout() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          _ControlsToolbar(
+            cameraListKey: _cameraListKey,
+            authService: _authService,
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: CameraList(
+              key: _cameraListKey,
+              authService: _authService,
+              scrollController: _scrollController,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Layout for compact screens: everything scrolls together
+  Widget _buildScrollingLayout() {
+    return CustomScrollView(
+      controller: _scrollController,
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+            child: _ControlsToolbar(
+              cameraListKey: _cameraListKey,
+              authService: _authService,
+            ),
+          ),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          sliver: CameraListSliver(
+            key: _cameraListKey,
+            authService: _authService,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
-class _StatusToggle extends StatelessWidget {
-  const _StatusToggle({
-    required this.icon,
-    required this.label,
-    required this.value,
-    required this.onChanged,
+/// Compact toolbar with toggles and action buttons — now Redux-connected.
+class _ControlsToolbar extends StatelessWidget {
+  const _ControlsToolbar({
+    required this.cameraListKey,
+    required this.authService,
   });
 
-  final Widget icon;
-  final String label;
-  final bool value;
-  final ValueChanged<bool> onChanged;
+  final GlobalKey<CameraListState> cameraListKey;
+  final AuthService authService;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        icon,
-        const SizedBox(width: 6),
-        Text(label),
-        const SizedBox(width: 6),
-        Switch(
-          value: value,
-          onChanged: onChanged,
-          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    final width = MediaQuery.of(context).size.width;
+    final isCompact = width < 600;
+
+    return StoreConnector<AppState, _ToolbarVM>(
+      converter: (store) => _ToolbarVM.fromStore(store, authService),
+      builder: (context, vm) {
+        if (isCompact) {
+          return _buildCompact(context, vm);
+        }
+        return _buildWide(context, vm);
+      },
+    );
+  }
+
+  /// Status dot: red=idle/error, amber=connecting, green=connected.
+  Widget _statusDot(ServerStatus status) {
+    final Color color;
+    final String tooltip;
+    switch (status) {
+      case ServerStatus.idle:
+        color = Colors.grey;
+        tooltip = 'Not connected';
+        break;
+      case ServerStatus.connecting:
+        color = Colors.amber;
+        tooltip = 'Connecting…';
+        break;
+      case ServerStatus.connected:
+        color = Colors.green;
+        tooltip = 'Connected';
+        break;
+      case ServerStatus.error:
+        color = Colors.red;
+        tooltip = 'Connection error';
+        break;
+    }
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        width: 12,
+        height: 12,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+      ),
+    );
+  }
+
+  Widget _buildWide(BuildContext context, _ToolbarVM vm) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            _statusDot(vm.serverStatus),
+            const SizedBox(width: 12),
+            _CompactToggle(
+              icon: Icons.star,
+              color: Colors.amber,
+              value: vm.favoritesOnly,
+              onChanged: vm.onFavoritesChanged,
+              tooltip: 'Favorites only',
+            ),
+            const SizedBox(width: 8),
+            _CompactToggle(
+              icon: Icons.hourglass_top,
+              color: Colors.blue,
+              value: vm.pendingOnly,
+              onChanged: vm.onPendingChanged,
+              tooltip: 'Pending only',
+            ),
+            const SizedBox(width: 8),
+            _CompactToggle(
+              icon: Icons.check_circle,
+              color: Colors.green,
+              value: vm.workingOnly,
+              onChanged: vm.onWorkingChanged,
+              tooltip: 'Working only',
+            ),
+            const Spacer(),
+            if (vm.isFetching)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12),
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            OutlinedButton.icon(
+              onPressed: vm.canFetch ? vm.onFetchCameras : null,
+              icon: const Icon(Icons.cloud_download, size: 18),
+              label: const Text('Fetch Cameras'),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton.icon(
+              onPressed: vm.canFetch
+                  ? () => cameraListKey.currentState?.connectAll()
+                  : null,
+              icon: const Icon(Icons.play_arrow, size: 18),
+              label: const Text('Connect All'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              onPressed: () => cameraListKey.currentState?.stopAll(),
+              icon: const Icon(Icons.stop, size: 18, color: Colors.red),
+              label: const Text('Stop All'),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: () =>
+                  cameraListKey.currentState?.resetFavoritesAndWorking(),
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Reset',
+            ),
+          ],
         ),
-      ],
+      ),
+    );
+  }
+
+  Widget _buildCompact(BuildContext context, _ToolbarVM vm) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(
+          children: [
+            _statusDot(vm.serverStatus),
+            const SizedBox(width: 8),
+            _CompactToggle(
+              icon: Icons.star,
+              color: Colors.amber,
+              value: vm.favoritesOnly,
+              onChanged: vm.onFavoritesChanged,
+              tooltip: 'Favorites',
+            ),
+            _CompactToggle(
+              icon: Icons.hourglass_top,
+              color: Colors.blue,
+              value: vm.pendingOnly,
+              onChanged: vm.onPendingChanged,
+              tooltip: 'Pending',
+            ),
+            _CompactToggle(
+              icon: Icons.check_circle,
+              color: Colors.green,
+              value: vm.workingOnly,
+              onChanged: vm.onWorkingChanged,
+              tooltip: 'Working',
+            ),
+            const Spacer(),
+            if (vm.isFetching)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            IconButton(
+              onPressed: vm.canFetch ? vm.onFetchCameras : null,
+              icon: const Icon(Icons.cloud_download),
+              tooltip: 'Fetch Cameras',
+              visualDensity: VisualDensity.compact,
+            ),
+            IconButton(
+              onPressed: vm.canFetch
+                  ? () => cameraListKey.currentState?.connectAll()
+                  : null,
+              icon: const Icon(Icons.play_arrow, color: Colors.green),
+              tooltip: 'Connect All',
+              visualDensity: VisualDensity.compact,
+            ),
+            IconButton(
+              onPressed: () => cameraListKey.currentState?.stopAll(),
+              icon: const Icon(Icons.stop, color: Colors.red),
+              tooltip: 'Stop All',
+              visualDensity: VisualDensity.compact,
+            ),
+            IconButton(
+              onPressed: () =>
+                  cameraListKey.currentState?.resetFavoritesAndWorking(),
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Reset',
+              visualDensity: VisualDensity.compact,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ToolbarVM {
+  final bool favoritesOnly;
+  final bool workingOnly;
+  final bool pendingOnly;
+  final ServerStatus serverStatus;
+  final bool isFetching;
+  final void Function(bool) onFavoritesChanged;
+  final void Function(bool) onWorkingChanged;
+  final void Function(bool) onPendingChanged;
+  final VoidCallback onFetchCameras;
+
+  /// Fetch/connect buttons enabled only when server is connected and not mid-fetch.
+  bool get canFetch => serverStatus == ServerStatus.connected && !isFetching;
+
+  _ToolbarVM({
+    required this.favoritesOnly,
+    required this.workingOnly,
+    required this.pendingOnly,
+    required this.serverStatus,
+    required this.isFetching,
+    required this.onFavoritesChanged,
+    required this.onWorkingChanged,
+    required this.onPendingChanged,
+    required this.onFetchCameras,
+  });
+
+  static _ToolbarVM fromStore(Store<AppState> store, AuthService authService) {
+    final filters = store.state.filters;
+    final auth = store.state.auth;
+    return _ToolbarVM(
+      favoritesOnly: filters.favoritesOnly,
+      workingOnly: filters.workingOnly,
+      pendingOnly: filters.pendingOnly,
+      serverStatus: auth.serverStatus,
+      isFetching: auth.isFetchingCameras,
+      onFavoritesChanged: (v) => store.dispatch(setFavoritesOnlyAndPersist(v)),
+      onWorkingChanged: (v) => store.dispatch(setWorkingOnlyAndPersist(v)),
+      onPendingChanged: (v) => store.dispatch(setPendingOnlyAndPersist(v)),
+      onFetchCameras: () =>
+          store.dispatch(fetchCameras(authService: authService)),
+    );
+  }
+}
+
+/// Compact toggle button (icon that lights up when active).
+class _CompactToggle extends StatelessWidget {
+  const _CompactToggle({
+    required this.icon,
+    required this.color,
+    required this.value,
+    required this.onChanged,
+    required this.tooltip,
+  });
+
+  final IconData icon;
+  final Color color;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final String tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: () => onChanged(!value),
+      icon: Icon(icon, color: value ? color : Colors.grey.shade400),
+      tooltip: tooltip,
+      visualDensity: VisualDensity.compact,
     );
   }
 }

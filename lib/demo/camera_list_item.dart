@@ -1,5 +1,8 @@
+import 'package:flutter/foundation.dart' show ValueNotifier, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+import '../webrtc/webrtc_stats_monitor.dart';
 
 class CameraListItem extends StatelessWidget {
   const CameraListItem({
@@ -12,11 +15,17 @@ class CameraListItem extends StatelessWidget {
     required this.isFav,
     required this.isPending,
     required this.isWorking,
+    required this.textureId,
     required this.renderer,
     required this.onConnect,
     required this.onDisconnect,
     required this.onToggleFavorite,
     required this.compact,
+    this.statsNotifier,
+    this.trackInfo,
+    this.videoTrackCount = 0,
+    this.activeVideoTrack = 0,
+    this.onSwitchTrack,
   });
 
   final String cameraId;
@@ -27,11 +36,17 @@ class CameraListItem extends StatelessWidget {
   final bool isFav;
   final bool isPending;
   final bool isWorking;
+  final int? textureId;
   final RTCVideoRenderer? renderer;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
   final VoidCallback onToggleFavorite;
   final bool compact;
+  final ValueNotifier<WebRtcVideoStats>? statsNotifier;
+  final String? trackInfo;
+  final int videoTrackCount;
+  final int activeVideoTrack;
+  final void Function(int trackIndex)? onSwitchTrack;
 
   static const double _videoWidth = 320;
   static const double _videoHeight = 180;
@@ -46,26 +61,123 @@ class CameraListItem extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             compact ? _buildCompactLayout() : _buildWideLayout(),
-            if (connected && renderer != null) ...[
+            if (connected && _hasVideo) ...[
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
                 child: SizedBox(
                   width: compact ? double.infinity : _videoWidth,
                   height: compact ? (_videoHeight * 0.75) : _videoHeight,
-                  child: Container(
-                    color: Colors.black,
-                    child: RTCVideoView(
-                      renderer!,
-                      mirror: false,
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                    ),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: Container(
+                          color: Colors.black,
+                          child: _buildVideoWidget(),
+                        ),
+                      ),
+                      // Track switching arrows
+                      if (videoTrackCount > 1)
+                        Positioned(
+                          bottom: 4,
+                          left: 0,
+                          right: 0,
+                          child: _buildTrackSwitcher(),
+                        ),
+                      if (statsNotifier != null)
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: _StatsOverlay(notifier: statsNotifier!),
+                        ),
+                    ],
                   ),
                 ),
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+
+  bool get _hasVideo => kIsWeb ? renderer != null : textureId != null;
+
+  Widget _buildVideoWidget() {
+    if (kIsWeb) {
+      // Web: use RTCVideoView which internally uses HtmlElementView
+      return RTCVideoView(
+        renderer!,
+        mirror: false,
+        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+      );
+    } else {
+      // Native: use Texture widget with aspect ratio preservation
+      return FittedBox(
+        fit: BoxFit.contain,
+        child: SizedBox(
+          width: 16,
+          height: 9,
+          child: Texture(textureId: textureId!),
+        ),
+      );
+    }
+  }
+
+  Widget _buildTrackSwitcher() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _trackArrow(
+          icon: Icons.chevron_left,
+          enabled: activeVideoTrack > 0,
+          onTap: () => onSwitchTrack?.call(activeVideoTrack - 1),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.65),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            '${activeVideoTrack + 1} / $videoTrackCount',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ),
+        _trackArrow(
+          icon: Icons.chevron_right,
+          enabled: activeVideoTrack < videoTrackCount - 1,
+          onTap: () => onSwitchTrack?.call(activeVideoTrack + 1),
+        ),
+      ],
+    );
+  }
+
+  Widget _trackArrow({
+    required IconData icon,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: enabled ? onTap : null,
+        child: Container(
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: enabled ? 0.5 : 0.2),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            icon,
+            color: enabled ? Colors.white : Colors.white38,
+            size: 18,
+          ),
         ),
       ),
     );
@@ -124,20 +236,24 @@ class CameraListItem extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         ),
+        if (trackInfo != null) ...[
+          const SizedBox(width: 6),
+          _chip(trackInfo!, Colors.teal, Icons.videocam),
+        ],
         const SizedBox(width: 8),
         _statusChip(),
         const SizedBox(width: 8),
         showStop
             ? OutlinedButton.icon(
-              onPressed: onDisconnect,
-              icon: const Icon(Icons.stop, color: Colors.red),
-              label: const Text('Stop'),
-            )
+                onPressed: onDisconnect,
+                icon: const Icon(Icons.stop, color: Colors.red),
+                label: const Text('Stop'),
+              )
             : ElevatedButton.icon(
-              onPressed: onConnect,
-              icon: const Icon(Icons.play_arrow),
-              label: const Text('Start'),
-            ),
+                onPressed: onConnect,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Start'),
+              ),
       ],
     );
   }
@@ -163,26 +279,26 @@ class CameraListItem extends StatelessWidget {
             const Spacer(),
             showStop
                 ? OutlinedButton(
-                  onPressed: onDisconnect,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
+                    onPressed: onDisconnect,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                     ),
-                  ),
-                  child: const Text('Stop'),
-                )
+                    child: const Text('Stop'),
+                  )
                 : ElevatedButton(
-                  onPressed: onConnect,
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
+                    onPressed: onConnect,
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                     ),
+                    child: const Text('Start'),
                   ),
-                  child: const Text('Start'),
-                ),
           ],
         ),
         const SizedBox(height: 4),
@@ -213,7 +329,7 @@ class CameraListItem extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(.12),
+        color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color),
       ),
@@ -257,6 +373,58 @@ class CameraListItem extends StatelessWidget {
           ],
         ),
         overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+}
+
+/// Semi-transparent overlay showing live WebRTC video stats.
+class _StatsOverlay extends StatelessWidget {
+  const _StatsOverlay({required this.notifier});
+
+  final ValueNotifier<WebRtcVideoStats> notifier;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<WebRtcVideoStats>(
+      valueListenable: notifier,
+      builder: (context, stats, _) {
+        // Don't show anything until we have real data.
+        if (stats.receivedFps <= 0 && stats.decodedFps <= 0) {
+          return const SizedBox.shrink();
+        }
+
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.65),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _line('Rx', '${stats.receivedFps.round()} fps'),
+              _line('Dec', '${stats.decodedFps.round()} fps'),
+              if (stats.width > 0 && stats.height > 0)
+                _line('Res', '${stats.width}x${stats.height}'),
+              if (stats.bitrateKbps > 0)
+                _line('Kbps', stats.bitrateKbps.round().toString()),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _line(String label, String value) {
+    return Text(
+      '$label: $value',
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 10,
+        fontFamily: 'monospace',
+        height: 1.4,
       ),
     );
   }
