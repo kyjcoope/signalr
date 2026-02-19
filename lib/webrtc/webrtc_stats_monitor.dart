@@ -55,19 +55,19 @@ String _pad(String s) => s.padRight(6);
 /// Snapshot of video stats for a single inbound WebRTC stream.
 class WebRtcVideoStats {
   const WebRtcVideoStats({
-    this.receivedFps = 0,
-    this.decodedFps = 0,
+    this.rfps = 0,
+    this.dfps = 0,
     this.width = 0,
     this.height = 0,
     this.bitrateKbps = 0,
     this.codec = '',
   });
 
-  /// Frames per second as reported by the browser / native stack.
-  final double receivedFps;
+  /// Received frames per second as reported by the browser / native stack.
+  final double rfps;
 
   /// Decoded frames per second (computed from framesDecoded delta).
-  final double decodedFps;
+  final double dfps;
 
   /// Frame width in pixels.
   final int width;
@@ -85,8 +85,8 @@ class WebRtcVideoStats {
 
   @override
   String toString() =>
-      'WebRtcVideoStats(rx=${receivedFps.toStringAsFixed(1)}fps, '
-      'dec=${decodedFps.toStringAsFixed(1)}fps, '
+      'WebRtcVideoStats(rx=${rfps.toStringAsFixed(1)}fps, '
+      'dec=${dfps.toStringAsFixed(1)}fps, '
       '${width}x$height, ${bitrateKbps.toStringAsFixed(0)}kbps, '
       'codec=$codec)';
 }
@@ -114,6 +114,9 @@ class WebRtcStatsMonitor {
   final ValueNotifier<WebRtcVideoStats> statsNotifier = ValueNotifier(
     WebRtcVideoStats.empty,
   );
+
+  /// Optional callback fired on each poll with the latest stats snapshot.
+  void Function(WebRtcVideoStats stats)? onStats;
 
   Timer? _timer;
   String _tag;
@@ -238,14 +241,16 @@ class WebRtcStatsMonitor {
     _lastPollTime = now;
     _lastFramesDecoded = framesDecoded;
 
-    statsNotifier.value = WebRtcVideoStats(
-      receivedFps: receivedFps.toDouble(),
-      decodedFps: decodedFps,
+    final newStats = WebRtcVideoStats(
+      rfps: receivedFps.toDouble(),
+      dfps: decodedFps,
       width: width,
       height: height,
       bitrateKbps: bitrateKbps,
       codec: codec,
     );
+    statsNotifier.value = newStats;
+    onStats?.call(newStats);
 
     return bytesReceived;
   }

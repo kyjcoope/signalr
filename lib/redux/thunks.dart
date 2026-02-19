@@ -38,6 +38,7 @@ void syncSessionToRedux(Store<AppState> store, String slug) {
     activeVideoTrack: hub.getActiveVideoTrack(slug),
     audioEnabled: hub.isAudioEnabled(slug) ?? true,
     negotiatedCodec: session.negotiatedVideoCodec,
+    videoStats: hub.getStatsNotifier(slug)?.value,
   );
 
   store.dispatch(SetSessionSnapshot(slug, snapshot));

@@ -390,7 +390,7 @@ class _StatsOverlay extends StatelessWidget {
       valueListenable: notifier,
       builder: (context, stats, _) {
         // Don't show anything until we have real data.
-        if (stats.receivedFps <= 0 && stats.decodedFps <= 0) {
+        if (stats.rfps <= 0 && stats.dfps <= 0) {
           return const SizedBox.shrink();
         }
 
@@ -404,8 +404,8 @@ class _StatsOverlay extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
             children: [
-              _line('Rx', '${stats.receivedFps.round()} fps'),
-              _line('Dec', '${stats.decodedFps.round()} fps'),
+              _line('Rx', '${stats.rfps.round()} fps'),
+              _line('Dec', '${stats.dfps.round()} fps'),
               if (stats.width > 0 && stats.height > 0)
                 _line('Res', '${stats.width}x${stats.height}'),
               if (stats.bitrateKbps > 0)

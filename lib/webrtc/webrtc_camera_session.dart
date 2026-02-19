@@ -61,6 +61,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void Function(String codec)? onVideoCodecResolved;
   void Function(SessionConnectionState state)? onStateChanged;
 
+  /// Set to receive video stats updates (forwarded to the internal monitor).
+  set onVideoStats(void Function(WebRtcVideoStats stats)? cb) =>
+      _statsMonitor.onStats = cb;
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Player Interface
   // ═══════════════════════════════════════════════════════════════════════════

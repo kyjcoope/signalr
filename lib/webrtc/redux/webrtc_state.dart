@@ -1,4 +1,5 @@
-/// Connection lifecycle states exposed to the UI layer.
+import '../webrtc_stats_monitor.dart';
+
 enum WebRtcConnectionState {
   /// No connection attempt — default state.
   sessionDisconnected,
@@ -28,6 +29,7 @@ class WebRtcSessionState {
   final int activeVideoTrack;
   final bool audioEnabled;
   final String? negotiatedCodec;
+  final WebRtcVideoStats? videoStats;
 
   const WebRtcSessionState({
     this.connectionState = WebRtcConnectionState.sessionDisconnected,
@@ -37,6 +39,7 @@ class WebRtcSessionState {
     this.activeVideoTrack = 0,
     this.audioEnabled = true,
     this.negotiatedCodec,
+    this.videoStats,
   });
 
   WebRtcSessionState copyWith({
@@ -47,6 +50,7 @@ class WebRtcSessionState {
     int? activeVideoTrack,
     bool? audioEnabled,
     String? negotiatedCodec,
+    WebRtcVideoStats? videoStats,
   }) {
     return WebRtcSessionState(
       connectionState: connectionState ?? this.connectionState,
@@ -56,6 +60,7 @@ class WebRtcSessionState {
       activeVideoTrack: activeVideoTrack ?? this.activeVideoTrack,
       audioEnabled: audioEnabled ?? this.audioEnabled,
       negotiatedCodec: negotiatedCodec ?? this.negotiatedCodec,
+      videoStats: videoStats ?? this.videoStats,
     );
   }
 }
