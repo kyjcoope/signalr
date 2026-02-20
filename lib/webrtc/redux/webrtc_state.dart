@@ -17,6 +17,20 @@ enum WebRtcConnectionState {
   sessionFailed,
 }
 
+/// Metadata for a single media track (video or audio).
+class TrackInfo {
+  /// MediaStreamTrack ID.
+  final String id;
+
+  /// Codec name (e.g. 'H264', 'opus'). Empty if unknown.
+  final String codec;
+
+  /// Whether the track is currently enabled.
+  final bool enabled;
+
+  const TrackInfo({required this.id, this.codec = '', this.enabled = true});
+}
+
 /// Per-camera WebRTC session snapshot for the UI layer.
 ///
 /// This is a plain value object — no references to RTCVideoRenderer or
@@ -24,42 +38,38 @@ enum WebRtcConnectionState {
 class WebRtcSessionState {
   final WebRtcConnectionState connectionState;
   final int? textureId;
-  final int videoTrackCount;
-  final int audioTrackCount;
+  final List<TrackInfo> videoTracks;
+  final List<TrackInfo> audioTracks;
   final int activeVideoTrack;
-  final bool audioEnabled;
-  final String? negotiatedCodec;
+  final int activeAudioTrack;
   final WebRtcVideoStats? videoStats;
 
   const WebRtcSessionState({
     this.connectionState = WebRtcConnectionState.sessionDisconnected,
     this.textureId,
-    this.videoTrackCount = 0,
-    this.audioTrackCount = 0,
+    this.videoTracks = const [],
+    this.audioTracks = const [],
     this.activeVideoTrack = 0,
-    this.audioEnabled = true,
-    this.negotiatedCodec,
+    this.activeAudioTrack = 0,
     this.videoStats,
   });
 
   WebRtcSessionState copyWith({
     WebRtcConnectionState? connectionState,
     int? textureId,
-    int? videoTrackCount,
-    int? audioTrackCount,
+    List<TrackInfo>? videoTracks,
+    List<TrackInfo>? audioTracks,
     int? activeVideoTrack,
-    bool? audioEnabled,
-    String? negotiatedCodec,
+    int? activeAudioTrack,
     WebRtcVideoStats? videoStats,
   }) {
     return WebRtcSessionState(
       connectionState: connectionState ?? this.connectionState,
       textureId: textureId ?? this.textureId,
-      videoTrackCount: videoTrackCount ?? this.videoTrackCount,
-      audioTrackCount: audioTrackCount ?? this.audioTrackCount,
+      videoTracks: videoTracks ?? this.videoTracks,
+      audioTracks: audioTracks ?? this.audioTracks,
       activeVideoTrack: activeVideoTrack ?? this.activeVideoTrack,
-      audioEnabled: audioEnabled ?? this.audioEnabled,
-      negotiatedCodec: negotiatedCodec ?? this.negotiatedCodec,
+      activeAudioTrack: activeAudioTrack ?? this.activeAudioTrack,
       videoStats: videoStats ?? this.videoStats,
     );
   }

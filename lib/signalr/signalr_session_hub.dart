@@ -62,6 +62,9 @@ class SignalRSessionHub {
   /// Active video track index per camera (0-based).
   final Map<String, int> _activeVideoTrack = {};
 
+  /// Active audio track index per camera (0-based).
+  final Map<String, int> _activeAudioTrack = {};
+
   /// Cameras currently in the async connect flow (prevents double-press).
   final Set<String> _connectingCameras = {};
 
@@ -156,6 +159,7 @@ class SignalRSessionHub {
             !rendererBound) {
           rendererBound = true;
           _activeVideoTrack[cameraId] = 0;
+          _activeAudioTrack[cameraId] = 0;
           try {
             final renderer = RTCVideoRenderer();
             await renderer.initialize();
@@ -234,6 +238,7 @@ class SignalRSessionHub {
     }
 
     _activeVideoTrack.remove(cameraId);
+    _activeAudioTrack.remove(cameraId);
 
     Logger().info('SignalRSessionHub: Disconnected $cameraId');
   }
@@ -281,6 +286,9 @@ class SignalRSessionHub {
   /// Currently active video track index (0-based).
   int getActiveVideoTrack(String cameraId) => _activeVideoTrack[cameraId] ?? 0;
 
+  /// Currently active audio track index (0-based).
+  int getActiveAudioTrack(String cameraId) => _activeAudioTrack[cameraId] ?? 0;
+
   /// Get codec for a specific video track index.
   String? getVideoTrackCodec(String cameraId, int trackIndex) =>
       activeSessions[cameraId]?.getVideoTrackCodec(trackIndex);
@@ -322,6 +330,43 @@ class SignalRSessionHub {
     return true;
   }
 
+  /// Switch the active audio track for a camera.
+  ///
+  /// Disables the old track and enables the new track only if audio
+  /// is not currently muted (preserves mute state across switches).
+  ///
+  /// Returns true if the switch was successful.
+  bool switchAudioTrack(String cameraId, int trackIndex) {
+    final session = activeSessions[cameraId];
+    if (session == null) return false;
+
+    final tracks = session.audioTracks;
+    if (trackIndex < 0 || trackIndex >= tracks.length) {
+      Logger().warn(
+        'SignalRSessionHub: Invalid audio track index $trackIndex for $cameraId (${tracks.length} audio tracks)',
+      );
+      return false;
+    }
+
+    final oldIndex = _activeAudioTrack[cameraId] ?? 0;
+    final wasMuted = oldIndex < tracks.length && !tracks[oldIndex].enabled;
+
+    // Disable old audio track
+    if (oldIndex < tracks.length) {
+      tracks[oldIndex].enabled = false;
+    }
+
+    _activeAudioTrack[cameraId] = trackIndex;
+
+    // Enable new track only if not muted
+    tracks[trackIndex].enabled = !wasMuted;
+
+    Logger().info(
+      'SignalRSessionHub: Switched $cameraId to audio track ${trackIndex + 1}/${tracks.length} (muted=$wasMuted)',
+    );
+    return true;
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Track Control
   // ═══════════════════════════════════════════════════════════════════════════
@@ -340,8 +385,17 @@ class SignalRSessionHub {
 
   bool? _toggleTrack(String cameraId, {required bool isAudio, bool? enable}) {
     final session = activeSessions[cameraId];
-    final track = isAudio ? session?.audioTrack : session?.videoTrack;
     final trackType = isAudio ? 'audio' : 'video';
+
+    // For audio, target the active track; for video, target the first track
+    MediaStreamTrack? track;
+    if (isAudio) {
+      final idx = _activeAudioTrack[cameraId] ?? 0;
+      final tracks = session?.audioTracks ?? [];
+      track = idx < tracks.length ? tracks[idx] : null;
+    } else {
+      track = session?.videoTrack;
+    }
 
     if (track == null) {
       Logger().warn('SignalRSessionHub: No $trackType track for $cameraId');
@@ -356,9 +410,15 @@ class SignalRSessionHub {
     return newEnabled;
   }
 
-  /// Get audio enabled state for a camera.
-  bool? isAudioEnabled(String cameraId) =>
-      activeSessions[cameraId]?.audioTrack?.enabled;
+  /// Get audio enabled state for a camera (from the active audio track).
+  bool? isAudioEnabled(String cameraId) {
+    final session = activeSessions[cameraId];
+    if (session == null) return null;
+    final idx = _activeAudioTrack[cameraId] ?? 0;
+    final tracks = session.audioTracks;
+    if (idx >= tracks.length) return null;
+    return tracks[idx].enabled;
+  }
 
   /// Get video enabled state for a camera.
   bool? isVideoEnabled(String cameraId) =>
@@ -388,6 +448,7 @@ class SignalRSessionHub {
     }
     _renderers.clear();
     _activeVideoTrack.clear();
+    _activeAudioTrack.clear();
 
     await _signalRService?.closeConnection(closeAllSessions: true);
     _signalRService = null;

@@ -200,12 +200,8 @@ class CameraListState extends State<StatefulWidget> {
     final name = device?.name ?? 'Unknown Camera';
     final type = device?.sourceType ?? 'Unknown Type';
 
-    // Codec — use the active track's codec
-    final activeTrack = _hub.getActiveVideoTrack(slug);
-    final codec =
-        _hub.getVideoTrackCodec(slug, activeTrack) ??
-        session?.negotiatedCodec ??
-        '—';
+    // Codec — use selector (derives from active video track's TrackInfo)
+    final codec = getWebRtcNegotiatedCodec(state, slug) ?? '—';
 
     // Renderer + textureId — still from hub (not in Redux)
     final renderer = _hub.getRenderer(slug);
@@ -232,7 +228,7 @@ class CameraListState extends State<StatefulWidget> {
       compact: compact,
       statsNotifier: _hub.getStatsNotifier(slug),
       trackInfo: trackInfo,
-      videoTrackCount: session?.videoTrackCount ?? 0,
+      videoTrackCount: session?.videoTracks.length ?? 0,
       activeVideoTrack: session?.activeVideoTrack ?? 0,
       onSwitchTrack: (index) =>
           store.dispatch(thunks.switchVideoTrack(slug, index)),

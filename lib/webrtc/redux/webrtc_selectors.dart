@@ -36,25 +36,38 @@ WebRtcConnectionState getWebRtcConnectionState(AppState state, String slug) =>
 int? getWebRtcTextureId(AppState state, String slug) =>
     state.webRtc.sessions[slug]?.textureId;
 
-/// Whether audio is enabled for a camera.
-bool isWebRtcAudioEnabled(AppState state, String slug) =>
-    state.webRtc.sessions[slug]?.audioEnabled ?? true;
+/// Whether audio is enabled for a camera (derived from active audio track).
+bool isWebRtcAudioEnabled(AppState state, String slug) {
+  final session = state.webRtc.sessions[slug];
+  if (session == null || session.audioTracks.isEmpty) return true;
+  final idx = session.activeAudioTrack.clamp(0, session.audioTracks.length - 1);
+  return session.audioTracks[idx].enabled;
+}
 
 /// Video track count for a camera.
 int getWebRtcVideoTrackCount(AppState state, String slug) =>
-    state.webRtc.sessions[slug]?.videoTrackCount ?? 0;
+    state.webRtc.sessions[slug]?.videoTracks.length ?? 0;
 
 /// Audio track count for a camera.
 int getWebRtcAudioTrackCount(AppState state, String slug) =>
-    state.webRtc.sessions[slug]?.audioTrackCount ?? 0;
+    state.webRtc.sessions[slug]?.audioTracks.length ?? 0;
 
 /// Active video track index for a camera.
 int getWebRtcActiveVideoTrack(AppState state, String slug) =>
     state.webRtc.sessions[slug]?.activeVideoTrack ?? 0;
 
-/// Negotiated codec for a camera.
-String? getWebRtcNegotiatedCodec(AppState state, String slug) =>
-    state.webRtc.sessions[slug]?.negotiatedCodec;
+/// Negotiated codec for a camera (from active video track).
+String? getWebRtcNegotiatedCodec(AppState state, String slug) {
+  final session = state.webRtc.sessions[slug];
+  if (session == null || session.videoTracks.isEmpty) return null;
+  final idx = session.activeVideoTrack.clamp(0, session.videoTracks.length - 1);
+  final codec = session.videoTracks[idx].codec;
+  return codec.isEmpty ? null : codec;
+}
+
+/// Active audio track index for a camera.
+int getWebRtcActiveAudioTrack(AppState state, String slug) =>
+    state.webRtc.sessions[slug]?.activeAudioTrack ?? 0;
 
 /// Formatted track info string (e.g. "V:2 A:0"), or null if not connected.
 String? selectTrackInfo(AppState state, String slug) {
@@ -63,7 +76,7 @@ String? selectTrackInfo(AppState state, String slug) {
       session.connectionState != WebRtcConnectionState.sessionConnected) {
     return null;
   }
-  return 'V:${session.videoTrackCount} A:${session.audioTrackCount}';
+  return 'V:${session.videoTracks.length} A:${session.audioTracks.length}';
 }
 
 /// All slugs with connected sessions (memoized — safe for shallow compare).

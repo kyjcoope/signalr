@@ -8,6 +8,7 @@ import '../signalr/signalr_session_hub.dart';
 import '../store/favorites_store.dart';
 import '../utils/logger.dart';
 import '../webrtc/session_state.dart';
+import '../webrtc/webrtc_camera_session.dart';
 import 'actions.dart';
 import 'app_state.dart';
 import 'camera_connection_controller.dart';
@@ -33,15 +34,37 @@ void syncSessionToRedux(Store<AppState> store, String slug) {
   final snapshot = WebRtcSessionState(
     connectionState: connectionState,
     textureId: hub.getTextureId(slug),
-    videoTrackCount: hub.getVideoTrackCount(slug),
-    audioTrackCount: hub.getAudioTrackCount(slug),
+    videoTracks: _buildVideoTrackInfos(session),
+    audioTracks: _buildAudioTrackInfos(session),
     activeVideoTrack: hub.getActiveVideoTrack(slug),
-    audioEnabled: hub.isAudioEnabled(slug) ?? true,
-    negotiatedCodec: session.negotiatedVideoCodec,
+    activeAudioTrack: hub.getActiveAudioTrack(slug),
     videoStats: hub.getStatsNotifier(slug)?.value,
   );
 
   store.dispatch(SetSessionSnapshot(slug, snapshot));
+}
+
+/// Build a [TrackInfo] list for video tracks from session data.
+List<TrackInfo> _buildVideoTrackInfos(WebRtcCameraSession session) {
+  final tracks = session.videoTracks;
+  final codecs = session.videoTrackCodecs;
+  return [
+    for (var i = 0; i < tracks.length; i++)
+      TrackInfo(
+        id: tracks[i].id ?? '',
+        codec: i < codecs.length ? codecs[i] : '',
+        enabled: tracks[i].enabled,
+      ),
+  ];
+}
+
+/// Build a [TrackInfo] list for audio tracks from session data.
+List<TrackInfo> _buildAudioTrackInfos(WebRtcCameraSession session) {
+  final tracks = session.audioTracks;
+  return [
+    for (var i = 0; i < tracks.length; i++)
+      TrackInfo(id: tracks[i].id ?? '', enabled: tracks[i].enabled),
+  ];
 }
 
 /// Map internal [SessionConnectionState] to Redux [WebRtcConnectionState].
@@ -248,6 +271,16 @@ ThunkAction<AppState> switchVideoTrack(String slug, int trackIndex) {
   return (Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
     if (hub.switchVideoTrack(slug, trackIndex)) {
+      syncSessionToRedux(store, slug);
+    }
+  };
+}
+
+/// Switch audio track for a camera (preserves mute state).
+ThunkAction<AppState> switchAudioTrack(String slug, int trackIndex) {
+  return (Store<AppState> store) async {
+    final hub = SignalRSessionHub.instance;
+    if (hub.switchAudioTrack(slug, trackIndex)) {
       syncSessionToRedux(store, slug);
     }
   };
