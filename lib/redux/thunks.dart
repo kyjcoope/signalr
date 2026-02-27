@@ -28,19 +28,30 @@ void syncSessionToRedux(Store<AppState> store, String slug) {
   final session = hub.getSession(slug);
   if (session == null) return;
 
-  // Map internal session state → Redux connection state
-  final connectionState = _mapConnectionState(session.state);
+  final existing = getWebRtcSession(store.state, slug);
+  final newVideoTracks = _buildVideoTrackInfos(session);
+  final newAudioTracks = _buildAudioTrackInfos(session);
+
+  // Reuse existing references when content hasn't changed, so downstream
+  // shallow/identical checks on individual fields don't see a spurious change.
+  final videoTracks = existing != null && newVideoTracks == existing.videoTracks
+      ? existing.videoTracks
+      : newVideoTracks;
+  final audioTracks = existing != null && newAudioTracks == existing.audioTracks
+      ? existing.audioTracks
+      : newAudioTracks;
 
   final snapshot = WebRtcSessionState(
-    connectionState: connectionState,
+    connectionState: _mapConnectionState(session.state),
     textureId: hub.getTextureId(slug),
-    videoTracks: _buildVideoTrackInfos(session),
-    audioTracks: _buildAudioTrackInfos(session),
+    videoTracks: videoTracks,
+    audioTracks: audioTracks,
     activeVideoTrack: hub.getActiveVideoTrack(slug),
     activeAudioTrack: hub.getActiveAudioTrack(slug),
     videoStats: hub.getStatsNotifier(slug)?.value,
   );
 
+  if (snapshot == existing) return;
   store.dispatch(SetSessionSnapshot(slug, snapshot));
 }
 

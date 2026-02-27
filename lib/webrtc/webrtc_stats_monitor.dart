@@ -3,6 +3,7 @@ import 'dart:async';
 import '../utils/logger.dart';
 
 import 'package:collection/collection.dart';
+import 'package:equatable/equatable.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -53,7 +54,7 @@ String _pad(String s) => s.padRight(6);
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Snapshot of video stats for a single inbound WebRTC stream.
-class WebRtcVideoStats {
+class WebRtcVideoStats extends Equatable {
   const WebRtcVideoStats({
     this.rfps = 0,
     this.dfps = 0,
@@ -89,6 +90,9 @@ class WebRtcVideoStats {
       'dec=${dfps.toStringAsFixed(1)}fps, '
       '${width}x$height, ${bitrateKbps.toStringAsFixed(0)}kbps, '
       'codec=$codec)';
+
+  @override
+  List<Object?> get props => [rfps, dfps, width, height, bitrateKbps, codec];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

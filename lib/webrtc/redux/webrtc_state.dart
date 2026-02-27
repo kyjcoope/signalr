@@ -1,3 +1,5 @@
+import 'package:equatable/equatable.dart';
+
 import '../webrtc_stats_monitor.dart';
 
 enum WebRtcConnectionState {
@@ -18,7 +20,7 @@ enum WebRtcConnectionState {
 }
 
 /// Metadata for a single media track (video or audio).
-class TrackInfo {
+class TrackInfo extends Equatable {
   /// MediaStreamTrack ID.
   final String id;
 
@@ -29,13 +31,16 @@ class TrackInfo {
   final bool enabled;
 
   const TrackInfo({required this.id, this.codec = '', this.enabled = true});
+
+  @override
+  List<Object?> get props => [id, codec, enabled];
 }
 
 /// Per-camera WebRTC session snapshot for the UI layer.
 ///
 /// This is a plain value object — no references to RTCVideoRenderer or
 /// WebRtcCameraSession. The hub remains the source of truth for those.
-class WebRtcSessionState {
+class WebRtcSessionState extends Equatable {
   final WebRtcConnectionState connectionState;
   final int? textureId;
   final List<TrackInfo> videoTracks;
@@ -73,21 +78,31 @@ class WebRtcSessionState {
       videoStats: videoStats ?? this.videoStats,
     );
   }
+
+  @override
+  List<Object?> get props => [
+    connectionState,
+    textureId,
+    videoTracks,
+    audioTracks,
+    activeVideoTrack,
+    activeAudioTrack,
+    videoStats,
+  ];
 }
 
 /// WebRTC state for all camera sessions. NOT persisted.
 ///
 /// Pure data container — all query logic lives in selectors.
-class WebRtcState {
-  final Map<String, WebRtcSessionState> _sessions;
+class WebRtcState extends Equatable {
+  final Map<String, WebRtcSessionState> sessions;
 
-  const WebRtcState({Map<String, WebRtcSessionState> sessions = const {}})
-    : _sessions = sessions;
-
-  /// All session entries (read-only).
-  Map<String, WebRtcSessionState> get sessions => Map.unmodifiable(_sessions);
+  const WebRtcState({this.sessions = const {}});
 
   WebRtcState copyWith({Map<String, WebRtcSessionState>? sessions}) {
-    return WebRtcState(sessions: sessions ?? _sessions);
+    return WebRtcState(sessions: sessions ?? this.sessions);
   }
+
+  @override
+  List<Object?> get props => [sessions];
 }

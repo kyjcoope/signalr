@@ -1,3 +1,5 @@
+import 'package:equatable/equatable.dart';
+
 import '../models/models.dart';
 import '../webrtc/redux/webrtc_state.dart';
 
@@ -8,7 +10,7 @@ export '../webrtc/redux/webrtc_state.dart';
 enum ServerStatus { idle, connecting, connected, error }
 
 /// Root application state.
-class AppState {
+class AppState extends Equatable {
   final AuthState auth;
   final CameraState cameras;
   final WebRtcState webRtc;
@@ -55,10 +57,13 @@ class AppState {
     'filters': filters.toJson(),
     'favorites': favorites.toJson(),
   };
+
+  @override
+  List<Object?> get props => [auth, cameras, webRtc, filters, favorites];
 }
 
 /// Auth/connection runtime state. NOT persisted.
-class AuthState {
+class AuthState extends Equatable {
   final ServerStatus serverStatus;
   final bool isFetchingCameras;
 
@@ -73,10 +78,13 @@ class AuthState {
       isFetchingCameras: isFetchingCameras ?? this.isFetchingCameras,
     );
   }
+
+  @override
+  List<Object?> get props => [serverStatus, isFetchingCameras];
 }
 
 /// Camera devices fetched from the API, keyed by slug (GUID).
-class CameraState {
+class CameraState extends Equatable {
   final Map<String, Device> cameras;
   final bool isLoaded;
 
@@ -110,10 +118,13 @@ class CameraState {
     'cameras': cameras.map((k, v) => MapEntry(k, v.toJson())),
     'isLoaded': isLoaded,
   };
+
+  @override
+  List<Object?> get props => [cameras, isLoaded];
 }
 
 /// UI filter toggles.
-class FilterState {
+class FilterState extends Equatable {
   final String searchQuery;
   final bool favoritesOnly;
   final bool workingOnly;
@@ -157,10 +168,18 @@ class FilterState {
     'workingOnly': workingOnly,
     'pendingOnly': pendingOnly,
   };
+
+  @override
+  List<Object?> get props => [
+    searchQuery,
+    favoritesOnly,
+    workingOnly,
+    pendingOnly,
+  ];
 }
 
 /// Favorite camera IDs.
-class FavoritesState {
+class FavoritesState extends Equatable {
   final Set<String> ids;
 
   const FavoritesState({this.ids = const {}});
@@ -181,4 +200,7 @@ class FavoritesState {
   }
 
   dynamic toJson() => {'ids': ids.toList()};
+
+  @override
+  List<Object?> get props => [ids];
 }
