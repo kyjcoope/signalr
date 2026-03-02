@@ -9,6 +9,7 @@ import 'signalr_config.dart';
 import 'signalr_connection_manager.dart';
 import 'signalr_message_router.dart';
 import 'signalr_messages.dart';
+import 'signalr_session_hub.dart';
 
 /// Singleton SignalR service for WebRTC signaling.
 ///
@@ -128,7 +129,9 @@ class SignalRService {
 
   void _onDisconnected(Exception? error) {
     Logger().warn('SignalRService: Disconnected: $error');
-    _notifyPlayers(SignalRMessageType.onSignalClosed, {'error': error});
+    // Do NOT broadcast onSignalClosed to sessions here.
+    // The transport may recover via our fallback retry loop.
+    // Sessions will be re-established by reconnectAllSessions().
   }
 
   void _onReconnecting(Exception? error) {
@@ -137,7 +140,13 @@ class SignalRService {
 
   void _onReconnected(String? connectionId) {
     Logger().info('SignalRService: Reconnected: $connectionId');
+    // Re-bind message handlers — critical when fallback reconnect
+    // creates a brand-new HubConnection.
+    _bindMessageHandlers();
     _sendRegisterRequest();
+
+    // Re-establish all camera sessions that died during the outage
+    Future.microtask(() => SignalRSessionHub.instance.reconnectAllSessions());
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -337,10 +346,6 @@ class SignalRService {
   /// Find a player by device ID.
   VideoWebRTCPlayer? findPlayerByDevice(String deviceId) =>
       _players.where((p) => p.deviceId == deviceId).firstOrNull;
-
-  void _notifyPlayers(SignalRMessageType type, dynamic detail) {
-    _messageController.add(SignalRMessage(method: type, detail: detail));
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Cleanup

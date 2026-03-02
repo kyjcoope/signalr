@@ -149,6 +149,88 @@ extension SdpUtils on String {
     return this;
   }
 
+  /// Reorder video codecs to prefer [preferredCodec].
+  ///
+  /// Moves all payload types for [preferredCodec] (and their RTX
+  /// retransmission PTs) to the front of the video m-line.
+  /// This tells the SFU which codec we prefer to receive,
+  /// avoiding transcoding when the camera natively sends that codec.
+  String withPreferredVideoCodec(String preferredCodec) {
+    final lineBreak = contains('\r\n') ? '\r\n' : '\n';
+    final lines = split(RegExp(r'\r?\n'));
+    final result = <String>[];
+    var i = 0;
+
+    while (i < lines.length) {
+      final line = lines[i];
+      if (!line.startsWith('m=video ')) {
+        result.add(line);
+        i++;
+        continue;
+      }
+
+      // Collect all lines in this m=video section
+      final sectionStart = i;
+      var sectionEnd = i + 1;
+      while (sectionEnd < lines.length && !lines[sectionEnd].startsWith('m=')) {
+        sectionEnd++;
+      }
+      final sectionLines = lines.sublist(sectionStart, sectionEnd);
+
+      // Parse m-line: "m=video 9 UDP/TLS/RTP/SAVPF 96 97 102 ..."
+      final parts = line.split(' ');
+      if (parts.length < 4) {
+        result.addAll(sectionLines);
+        i = sectionEnd;
+        continue;
+      }
+
+      final prefix = parts.sublist(0, 3).join(' ');
+      final allPts = parts.sublist(3);
+
+      // Build PT→codec and RTX PT→source PT maps from this section
+      final ptToCodec = <String, String>{};
+      final rtxToSource = <String, String>{};
+      for (final sl in sectionLines) {
+        final rm = RegExp(r'^a=rtpmap:(\d+)\s+(\S+)').firstMatch(sl);
+        if (rm != null) {
+          ptToCodec[rm.group(1)!] = rm.group(2)!.split('/').first.toUpperCase();
+        }
+        final fm = RegExp(r'^a=fmtp:(\d+)\s+apt=(\d+)').firstMatch(sl);
+        if (fm != null) {
+          rtxToSource[fm.group(1)!] = fm.group(2)!;
+        }
+      }
+
+      // Classify each PT as preferred or other
+      final preferred = <String>[];
+      final other = <String>[];
+      final prefUpper = preferredCodec.toUpperCase();
+
+      for (final pt in allPts) {
+        final codec = ptToCodec[pt];
+        final isPreferred = codec == prefUpper;
+        final isRtxForPreferred =
+            codec == 'RTX' &&
+            rtxToSource.containsKey(pt) &&
+            ptToCodec[rtxToSource[pt]!] == prefUpper;
+
+        if (isPreferred || isRtxForPreferred) {
+          preferred.add(pt);
+        } else {
+          other.add(pt);
+        }
+      }
+
+      // Rebuild m-line with preferred codecs first
+      result.add('$prefix ${[...preferred, ...other].join(' ')}');
+      result.addAll(sectionLines.sublist(1));
+      i = sectionEnd;
+    }
+
+    return result.join(lineBreak);
+  }
+
   /// Force DTLS active role in the answer SDP.
   ///
   /// This fixes "hanging DTLS" where both sides wait for the other to send

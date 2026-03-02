@@ -6,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../auth/auth.dart';
 import '../utils/logger.dart';
 import '../webrtc/webrtc_camera_session.dart';
+import '../webrtc/session_state.dart';
 import '../webrtc/webrtc_stats_monitor.dart';
 import 'signalr_service.dart';
 
@@ -241,6 +242,40 @@ class SignalRSessionHub {
     _activeAudioTrack.remove(cameraId);
 
     Logger().info('SignalRSessionHub: Disconnected $cameraId');
+  }
+
+  /// Re-establish all active sessions after SignalR transport reconnects.
+  ///
+  /// Sessions that are no longer in `connected` state (e.g. failed, closed,
+  /// reconnecting, disconnected) are torn down and reconnected fresh.
+  /// Called automatically when the SignalR transport recovers.
+  Future<void> reconnectAllSessions() async {
+    final staleIds = activeSessions.entries
+        .where((e) => e.value.state != SessionConnectionState.connected)
+        .map((e) => e.key)
+        .toList();
+
+    if (staleIds.isEmpty) {
+      Logger().info(
+        'SignalRSessionHub: All sessions healthy, nothing to reconnect',
+      );
+      return;
+    }
+
+    Logger().info(
+      'SignalRSessionHub: Reconnecting ${staleIds.length} stale sessions',
+    );
+
+    for (final cameraId in staleIds) {
+      try {
+        // Tear down the dead session
+        await disconnectCamera(cameraId);
+        // Reconnect fresh
+        await connectToCamera(cameraId);
+      } catch (e) {
+        Logger().error('SignalRSessionHub: Failed to reconnect $cameraId: $e');
+      }
+    }
   }
 
   /// Get session for a camera (if connected).

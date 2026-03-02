@@ -128,10 +128,25 @@ class CameraConnectionController {
   Future<void> _doConnect(String slug, Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
 
-    // Already connected — nothing to do
+    // Already connected — check if the session is actually healthy
     if (hub.isConnected(slug)) {
-      Logger().info('[ConnCtrl] $slug: already connected');
-      return;
+      final session = hub.getSession(slug);
+      final state = session?.state;
+
+      // If the session is in a terminal or stale state, tear it down
+      // and reconnect fresh. This handles the case where ICE failed,
+      // the reconnect stalled, or the session silently died.
+      if (state != null &&
+          (state.isTerminal || state == SessionConnectionState.disconnected)) {
+        Logger().info(
+          '[ConnCtrl] $slug: stale session (state=$state) — tearing down',
+        );
+        await _doDisconnect(slug, store);
+        // Fall through to reconnect below
+      } else {
+        Logger().info('[ConnCtrl] $slug: already connected (state=$state)');
+        return;
+      }
     }
 
     Logger().info('[ConnCtrl] $slug: connecting');

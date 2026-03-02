@@ -44,8 +44,11 @@ class SignalRConnectionManager {
   Timer? _retryTimer;
   int _retryCount = 0;
   bool _isConnecting = false;
+  bool _disposed = false;
+  int _closeRetryCount = 0;
 
   static const Duration _connectionTimeout = Duration(seconds: 15);
+  static const int _maxCloseRetryDelaySecs = 30;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Public API
@@ -90,6 +93,7 @@ class SignalRConnectionManager {
 
   /// Dispose of all resources.
   Future<void> dispose() async {
+    _disposed = true;
     await disconnect();
     _connection = null;
   }
@@ -224,8 +228,57 @@ class SignalRConnectionManager {
   }
 
   void _handleClose({Exception? error}) {
-    Logger().info('SignalRConnectionManager: Connection closed: $error');
+    Logger().warn(
+      'SignalRConnectionManager: Connection closed (built-in reconnect exhausted): $error',
+    );
     onDisconnected?.call(error);
+
+    // The built-in withAutomaticReconnect has given up.
+    // Start our own infinite retry loop with a fresh connection.
+    _reconnectAfterClose();
+  }
+
+  /// Retry connection indefinitely after the built-in reconnect gives up.
+  ///
+  /// Uses exponential backoff capped at [_maxCloseRetryDelaySecs].
+  /// Creates a brand-new HubConnection each time (the old one is dead).
+  void _reconnectAfterClose() {
+    if (_disposed) return;
+
+    _closeRetryCount++;
+    final delaySecs = math.min(
+      5 * math.pow(2, _closeRetryCount - 1).toInt(),
+      _maxCloseRetryDelaySecs,
+    );
+
+    Logger().info(
+      'SignalRConnectionManager: Fallback retry #$_closeRetryCount in ${delaySecs}s',
+    );
+
+    _retryTimer?.cancel();
+    _retryTimer = Timer(Duration(seconds: delaySecs), () async {
+      if (_disposed) return;
+
+      // Destroy the dead connection and create a fresh one
+      _connection = null;
+      _createConnection();
+
+      try {
+        await _connection!.start();
+        _closeRetryCount = 0;
+        _isConnecting = false;
+
+        Logger().info(
+          'SignalRConnectionManager: Fallback reconnect succeeded (${_connection!.connectionId})',
+        );
+        onReconnected?.call(_connection!.connectionId);
+      } catch (e) {
+        Logger().warn(
+          'SignalRConnectionManager: Fallback retry #$_closeRetryCount failed: $e',
+        );
+        _reconnectAfterClose();
+      }
+    });
   }
 
   void _handleReconnecting({Exception? error}) {

@@ -29,7 +29,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     SignalRService? signalRService,
     this.turnTcpOnly = false,
     this.restartOnDisconnect = true,
-    this.enableDetailedLogging = true,
+    this.enableDetailedLogging = false,
     this.negotiationTimeout = _negotiationTimeout,
   }) : _signalRService = signalRService ?? SignalRService.instance,
        _playerId = 'player_${DateTime.now().millisecondsSinceEpoch}_$cameraId' {
@@ -97,6 +97,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   bool _isClosing = false;
   Timer? _disconnectRecoveryTimer;
 
+  /// Completer that resolves when peer connection initialization finishes.
+  /// Used to defer invite handling until the PC is ready.
+  Completer<void>? _peerConnectionReady;
+
   // Connection timing
   DateTime? _connectStartedAt;
   DateTime? _inviteReceivedAt;
@@ -150,7 +154,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   late final IceCandidateManager _iceManager;
   late final CodecDetector _codecDetector;
-  final WebRtcStatsMonitor _statsMonitor = WebRtcStatsMonitor();
+  final WebRtcStatsMonitor _statsMonitor = WebRtcStatsMonitor(
+    interval: Duration(seconds: 5),
+  );
   final StreamController<String> _messageController =
       StreamController<String>.broadcast();
 
@@ -235,8 +241,15 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       case SignalRMessageType.onSignalIceServers:
         _handleIceServers(message.detail);
       case SignalRMessageType.onSignalClosed:
-        Logger().info('$_tag SignalR connection closed');
-        _setState(SessionConnectionState.closed);
+        Logger().warn('$_tag Server closed session — attempting reconnect');
+        // The server-side session is gone (e.g. peerdisconnected).
+        // Don't just die — try to reconnect if we were previously connected.
+        if (_state == SessionConnectionState.connected ||
+            _state == SessionConnectionState.exchangingIce) {
+          _attemptReconnect();
+        } else {
+          _setState(SessionConnectionState.closed);
+        }
       case SignalRMessageType.onSignalTimeout:
         Logger().warn('$_tag SignalR connection timeout');
         _setState(SessionConnectionState.failed);
@@ -256,18 +269,42 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _sessionId = session;
       Logger().info('$_tag Session started: $_sessionId');
       _setState(SessionConnectionState.initializingPeer);
-      await _initializePeerConnection();
+
+      // Signal that PC init is in progress — invites will wait on this.
+      _peerConnectionReady ??= Completer<void>();
+      try {
+        await _initializePeerConnection();
+        if (!_peerConnectionReady!.isCompleted) {
+          _peerConnectionReady!.complete();
+        }
+      } catch (e) {
+        if (!_peerConnectionReady!.isCompleted) {
+          _peerConnectionReady!.completeError(e);
+        }
+        rethrow;
+      }
       Logger().info('$_tag Peer connection ready, awaiting invite');
     }
   }
 
-  void _handleInvite(dynamic detail) {
+  Future<void> _handleInvite(dynamic detail) async {
     if (_state.isTerminal || _isClosing) {
       Logger().info('$_tag Ignoring invite in terminal/closing state');
       return;
     }
 
     try {
+      // Wait for peer connection init to finish if it's still in progress.
+      // This prevents a race where the invite arrives before
+      // _initializePeerConnection() completes (common on Android where
+      // the first PC load also loads the native JNI library).
+      // If the invite arrives even before ICE servers, initialize the completer.
+      _peerConnectionReady ??= Completer<void>();
+      if (!_peerConnectionReady!.isCompleted) {
+        Logger().info('$_tag Invite arrived early — waiting for PC init');
+        await _peerConnectionReady!.future;
+      }
+
       final params = detail['params'] as Map<String, dynamic>?;
       final offer = params?['offer'] as Map<String, dynamic>?;
       if (offer == null) return;
@@ -297,6 +334,12 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         Logger().info('$_tag Ignoring invite while connected (id=$inviteId)');
         return;
       }
+
+      // Log the raw SDP so we can verify the actual codec advertised
+      final rawSdp = offer['sdp'] as String? ?? '';
+      Logger().info('$_tag ──────── Remote SDP Offer ────────');
+      Logger().info(rawSdp);
+      Logger().info('$_tag ──────── End SDP ────────');
 
       final sdpWrapper = SdpWrapper.fromJson(offer);
 
@@ -544,7 +587,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     final config = PeerConnectionFactory.buildConfig(
       iceServers: _signalRService.iceServers,
       turnTcpOnly: turnTcpOnly,
-      iceCandidatePoolSize: 2,
+      iceCandidatePoolSize: 4,
     );
 
     Logger().info(
@@ -634,9 +677,12 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // Apply compatibility fixes
       final offerSdp = offer.sdp.withCompatibilityFixes;
 
-      // Extract per-track codecs from the offer SDP
+      // Extract per-track codecs using H264-preferred ordering
+      // (matches the preference we apply to the answer SDP)
       _videoTrackCodecs.clear();
-      _videoTrackCodecs.addAll(offerSdp.videoCodecsPerSection);
+      _videoTrackCodecs.addAll(
+        offerSdp.withPreferredVideoCodec('H264').videoCodecsPerSection,
+      );
       Logger().info('$_tag Per-track codecs from SDP: $_videoTrackCodecs');
 
       await _peerConnection!.setRemoteDescription(
@@ -654,7 +700,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
       _setState(SessionConnectionState.creatingAnswer);
       final answer = await _peerConnection!.createAnswer();
-      await _peerConnection!.setLocalDescription(answer);
+
+      // Prefer H264 — matches camera native codec, avoids SFU transcoding.
+      // Must be applied before setLocalDescription so WebRTC uses H264.
+      final preferredSdp = answer.sdp!.withPreferredVideoCodec('H264');
+      await _peerConnection!.setLocalDescription(
+        RTCSessionDescription(preferredSdp, answer.type),
+      );
 
       final finalAnswer = await _peerConnection!.getLocalDescription();
       if (finalAnswer?.sdp != null) {
@@ -716,9 +768,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
     switch (state) {
       case RTCIceConnectionState.RTCIceConnectionStateChecking:
-        _statsMonitor.setTag(_tag);
-        _statsMonitor.enableLogging = enableDetailedLogging;
-        _statsMonitor.start(_peerConnection!);
+        // Stats monitor is deferred to peer-connected state to avoid
+        // polling during DTLS handshake when all values are empty.
+        break;
       case RTCIceConnectionState.RTCIceConnectionStateConnected:
       case RTCIceConnectionState.RTCIceConnectionStateCompleted:
         _disconnectRecoveryTimer?.cancel();
@@ -762,6 +814,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     Logger().info('$_tag Peer connection state: $state');
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       Logger().info('$_tag 🎉 PEER CONNECTION ESTABLISHED!');
+      // Start stats monitor now that DTLS is complete and values are meaningful
+      _statsMonitor.setTag(_tag);
+      _statsMonitor.enableLogging = enableDetailedLogging;
+      _statsMonitor.start(_peerConnection!);
       onConnectionComplete?.call();
       _codecDetector.scheduleStatsDetection(_peerConnection!);
     }
@@ -888,12 +944,14 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     } catch (_) {}
 
     _peerConnection = null;
+    _peerConnectionReady = null;
   }
 
   void _resetState() {
     _sessionId = null;
     _lastInviteId = null;
     _isNegotiating = false;
+    _peerConnectionReady = null;
     _iceRestartAttempts = 0;
     _disconnectRecoveryTimer?.cancel();
     _disconnectRecoveryTimer = null;
