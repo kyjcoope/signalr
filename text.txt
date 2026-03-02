@@ -1,0 +1,127 @@
+If your backend expects a stream of mic audio, what you’re describing is usually raw PCM frames (most commonly PCM16 little-endian, mono), sent continuously in small chunks (e.g., 20–40ms) over a long-lived HTTP request.
+
+Below are the best “modern iOS + Android” ways to do this, with the knobs that matter for clean voice.
+
+What to stream (a sane default)
+
+PCM16LE, mono, with one of:
+
+48 kHz (best fidelity, simplest on-device because many devices naturally run 48k)
+
+16 kHz (often sufficient for voice and cheaper bandwidth, but you’ll likely resample on-device)
+
+Bandwidth reality (mono PCM16):
+
+48k: 48,000 samples/s × 2 bytes ≈ 96 KB/s
+
+16k: ≈ 32 KB/s
+
+iOS: AVAudioEngine tap → PCM frames
+
+Use:
+
+AVAudioSession configured for capture, with a voice-friendly mode
+
+Category: playAndRecord (typical for voice/VoIP)
+
+Mode: voiceChat (two-way voice) / videoChat depending on your use case
+
+Request buffer + sample rate preferences (actual hardware may differ):
+setPreferredIOBufferDuration and setPreferredSampleRate
+
+AVAudioEngine input capture with a tap
+
+Install a tap on the input node to receive mic buffers in realtime: installTap(onBus:bufferSize:format:block:)
+
+For cleaner voice in noisy/echoey environments, enable voice processing on the I/O node: setVoiceProcessingEnabled(true)
+(Apple notes voice processing enablement has constraints; it’s typically done while the engine is stopped.)
+
+Convert to your wire format
+
+The tap often gives you Float32 / non-interleaved; convert to PCM16LE mono and (optionally) resample to 16k using AVAudioConverter (common pattern in voice apps).
+
+Emit fixed chunk sizes (e.g., 20ms worth of samples) to simplify server decoding.
+
+Android: AudioRecord → PCM frames (+ optional AEC/NS/AGC)
+
+Use AudioRecord (not MediaRecorder) since you want PCM buffers:
+
+AudioRecord API
+
+Pick the right audio source (this impacts “clean”)
+
+Two common choices:
+
+VOICE_COMMUNICATION: tends to route through voice capture processing (echo cancel, etc.). Android specifically calls out AEC expectations for this source.
+
+VOICE_RECOGNITION: Android 10 CDD requires that it can capture at 44.1k/48k, and that by default it disables noise reduction and AGC (i.e., “less processed / more raw”).
+
+If you want “good and clean” for voice being sent remotely, many apps start with VOICE_COMMUNICATION (better echo handling), but if you want minimal processing because you’ll do server-side cleanup, VOICE_RECOGNITION is often preferable. (You can also offer a runtime toggle.)
+
+Enable capture effects when available
+
+Android exposes capture-path effects you can attach to the AudioRecord session:
+
+AcousticEchoCanceler
+
+AutomaticGainControl
+
+NoiseSuppressor (same audiofx family as above; availability varies by device)
+
+Also note Android’s platform guidance/requirements around preprocessing for VOICE_COMMUNICATION and discoverability via the SDK APIs.
+
+Buffering
+
+Use AudioRecord.getMinBufferSize(...), then read on a dedicated high-priority thread.
+
+Chunk into 20–40ms frames for transport.
+
+Flutter integration: stream bytes from native → Dart
+
+For a lightweight custom plugin:
+
+Use a MethodChannel for start/stop/config.
+
+Use an EventChannel to emit PCM byte chunks as a Dart Stream<Uint8List> (that’s the intended pattern for “streaming from native to Flutter”).
+
+At 48k mono PCM16, you’re sending ~96KB/s; if you batch into 20–40ms chunks, the platform-channel overhead is usually manageable.
+
+Sending to a REST “input stream”: long-lived POST with chunked body
+
+If your server truly accepts a streaming request body, you generally do an HTTP/1.1 request with Transfer-Encoding: chunked (i.e., no Content-Length). Chunked transfer coding is defined in HTTP/1.1.
+
+In Dart, the low-level HttpClient is the most reliable for writing an ongoing request body:
+
+You can control buffering (HttpClientRequest.bufferOutput)
+
+You can explicitly enable chunked transfer encoding on headers (HttpHeaders.chunkedTransferEncoding)
+
+Practical notes:
+
+Some servers/reverse proxies reject chunked uploads unless configured (common 411/length-required style issues). If that’s your situation, you’ll need either:
+
+a protocol change (WebSocket / gRPC streaming), or
+
+buffering to a known Content-Length (which defeats “live streaming”).
+
+The “clean voice” checklist (works across modern devices)
+
+iOS
+
+AVAudioSession playAndRecord + voiceChat/videoChat
+
+Enable voice processing on the engine I/O node when you want echo/noise help
+
+Use a stable buffer duration request, but verify actual ioBufferDuration
+
+Android
+
+Decide: VOICE_COMMUNICATION (more voice processing) vs VOICE_RECOGNITION (less processing by default per CDD)
+
+Attach AEC/NS/AGC effects when available
+
+Both
+
+Keep capture thread non-blocking; use a ring buffer so network hiccups don’t stall recording.
+
+Send fixed-duration frames (20–40ms) and include a sample counter / sequence number in your wire protocol so the server can detect drops/reorder.
