@@ -146,7 +146,11 @@ class SignalRService {
     _sendRegisterRequest();
 
     // Re-establish all camera sessions that died during the outage
-    Future.microtask(() => SignalRSessionHub.instance.reconnectAllSessions());
+    Future(() => SignalRSessionHub.instance.reconnectAllSessions()).catchError((
+      e,
+    ) {
+      Logger().error('SignalRService: Error while reconnecting sessions: $e');
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -156,6 +160,13 @@ class SignalRService {
   void _bindMessageHandlers() {
     final router = _messageRouter;
     if (router == null) return;
+
+    // Unbind first to prevent duplicate registrations.
+    _connectionManager?.off('ReceivedSignalingMessage');
+    _connectionManager?.off('register');
+    _connectionManager?.off('devicedisconnected');
+    _connectionManager?.off('peerdisconnected');
+    _connectionManager?.off('error');
 
     _connectionManager?.on(
       'ReceivedSignalingMessage',

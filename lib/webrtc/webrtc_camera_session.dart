@@ -421,7 +421,15 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _peerConnectionReady ??= Completer<void>();
       if (!_peerConnectionReady!.isCompleted) {
         Logger().info('$_tag Invite arrived early — waiting for PC init');
-        await _peerConnectionReady!.future;
+        try {
+          await _peerConnectionReady!.future.timeout(negotiationTimeout);
+        } on TimeoutException {
+          Logger().error(
+            '$_tag Timed out waiting for peer connection to be ready while handling invite',
+          );
+          _setState(SessionConnectionState.failed);
+          return;
+        }
       }
 
       final params = detail['params'] as Map<String, dynamic>?;
@@ -577,6 +585,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       final sdpMLineIndex = candidateData['sdpMLineIndex'] as int? ?? 0;
 
       final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
+      if (enableDetailedLogging) {
+        Logger().info('✅ $_tag ICE candidate -> $candidateStr');
+      }
       _iceManager.handleRemoteCandidate(candidate, _peerConnection);
     } catch (e) {
       Logger().error('$_tag Error processing candidate: $e');
@@ -889,7 +900,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   /// If no invite arrives, [_onInviteTimeout] fires and retries.
   void _startInviteTimer() {
     _cancelInviteTimer();
-    _inviteTimer = Timer(const Duration(seconds: 5), _onInviteTimeout);
+    _inviteTimer = Timer(
+      const Duration(seconds: 5),
+      () => unawaited(_onInviteTimeout()),
+    );
   }
 
   void _cancelInviteTimer() {
@@ -898,7 +912,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   /// No invite arrived within 5s — disconnect the stale session and retry.
-  void _onInviteTimeout() async {
+  Future<void> _onInviteTimeout() async {
     if (_isClosing || _state == SessionConnectionState.connected) return;
 
     _inviteRetryCount++;
