@@ -223,11 +223,6 @@ class SignalRSessionHub {
 
     final session = activeSessions.remove(cameraId);
     if (session != null) {
-      // Leave session on server first (like old SignalRSessionHub)
-      final sessionId = session.sessionId;
-      if (sessionId != null) {
-        await _signalRService?.leaveSession(sessionId, deviceId: cameraId);
-      }
       await session.close();
     }
 

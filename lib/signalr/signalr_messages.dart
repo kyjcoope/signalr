@@ -42,6 +42,7 @@ enum SignalRMethod {
   connect('connect'),
   invite('invite'),
   trickle('trickle'),
+  disconnect('disconnect'),
   error('error');
 
   const SignalRMethod(this.json);
@@ -290,9 +291,23 @@ class ErrorMessage implements SignalRTypedMessage {
   factory ErrorMessage.fromJson(Map<String, dynamic> json) {
     final params = json['params'] as Map<String, dynamic>? ?? {};
 
+    // Server sends errors in two formats:
+    // 1. Nested: params.error.{code, message, peer}
+    // 2. Flat:   params.{code, message}
+    final errorObj = params['error'] as Map<String, dynamic>?;
+    final int code;
+    final String message;
+    if (errorObj != null) {
+      code = errorObj['code'] as int? ?? 0;
+      message = errorObj['message'] as String? ?? '';
+    } else {
+      code = params['code'] as int? ?? 0;
+      message = params['message'] as String? ?? '';
+    }
+
     return ErrorMessage(
-      code: params['code'] as int? ?? 0,
-      message: params['message'] as String? ?? '',
+      code: code,
+      message: message,
       session: params['session'] as String?,
       id: json['id']?.toString() ?? '',
     );
@@ -323,32 +338,25 @@ class ErrorMessage implements SignalRTypedMessage {
 // Close/Leave Messages
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Close message sent when client disconnects.
+/// Disconnect message sent when client leaves a session.
+///
+/// Matches the web client's disconnect format:
+/// `{jsonrpc: '2.0', method: 'disconnect', params: {peer: '<deviceId>', session: '<sessionId>'}}`
 class CloseMessage implements SignalRTypedMessage {
-  CloseMessage({
-    required this.session,
-    required this.deviceId,
-    this.code = 1002,
-  });
+  CloseMessage({required this.session, required this.deviceId});
 
   final String session;
   final String deviceId;
-  final int code;
 
   @override
   String get id => '';
 
   @override
-  SignalRMethod get method => SignalRMethod.error;
+  SignalRMethod get method => SignalRMethod.disconnect;
 
   @override
   Map<String, dynamic> toJson() => JsonRpc.notification(
     method: method.json,
-    params: {
-      'code': code,
-      'message':
-          'Client $deviceId has closed its connection with the Signaling Server.',
-      'session': session,
-    },
+    params: {'peer': deviceId, 'session': session},
   );
 }

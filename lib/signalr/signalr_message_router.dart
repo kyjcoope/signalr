@@ -257,6 +257,11 @@ class SignalRMessageRouter {
 
   void _handleSignalError(Map<String, dynamic> message) {
     final session = message.param<String>('session');
+    final error = ErrorMessage.fromJson(message);
+    Logger().error(
+      'SignalRMessageRouter: Signal error: code=${error.code}, '
+      'message="${error.message}", session=$session',
+    );
     if (session != null) {
       findPlayerBySession(session)?.onSignalRMessage(
         SignalRMessage(

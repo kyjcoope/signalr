@@ -96,6 +96,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   bool _isNegotiating = false;
   bool _isClosing = false;
   Timer? _disconnectRecoveryTimer;
+  Timer? _inviteTimer;
+  int _inviteRetryCount = 0;
+  static const int _maxInviteRetries = 3;
 
   /// Completer that resolves when peer connection initialization finishes.
   /// Used to defer invite handling until the PC is ready.
@@ -210,6 +213,18 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       negotiationDuration: negotiationTimeout,
       onNegotiationTimeout: () => _setState(SessionConnectionState.failed),
       onConnectTimeout: () {
+        // Send disconnect for the stale session so the server cleans up
+        // (prevents error 101: Active Session Limit Exceeded)
+        final staleSession = _sessionId;
+        _sessionId = null;
+        _cancelInviteTimer();
+        if (staleSession != null) {
+          _signalRService
+              .sendCloseMessage(staleSession, cameraId)
+              .catchError(
+                (e) => Logger().warn('$_tag Disconnect on timeout failed: $e'),
+              );
+        }
         _signalRService.unregisterPlayer(this);
         _setState(SessionConnectionState.failed);
       },
@@ -254,13 +269,109 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         Logger().warn('$_tag SignalR connection timeout');
         _setState(SessionConnectionState.failed);
       case SignalRMessageType.onSignalError:
-        Logger().error('$_tag SignalR error: ${message.detail}');
+        _handleError(message.detail);
+    }
+  }
+
+  /// Handle a signaling error with structured parsing.
+  void _handleError(dynamic detail) {
+    final error = ErrorMessage.fromJson(detail as Map<String, dynamic>? ?? {});
+    Logger().error(
+      '$_tag SignalR error: code=${error.code}, message="${error.message}"',
+    );
+
+    switch (error.code) {
+      case 100: // Session Already Exist — stale session on the server
+        _recoverFromSessionAlreadyExists();
+      case 101: // Active Session Limit Exceeded
+        _recoverFromSessionLimitExceeded();
+      case 201: // WebRTC Session Error
+        Logger().error('$_tag WebRTC session error — marking as failed');
+        _sessionId = null;
+        _setState(SessionConnectionState.failed);
+      default:
+        Logger().warn('$_tag Unhandled error code: ${error.code}');
+        _sessionId = null;
+        _setState(SessionConnectionState.failed);
+    }
+  }
+
+  /// Recover from error 100 (Session Already Exist).
+  ///
+  /// Tells the server to clean up the stale session via LeaveSession,
+  /// then waits briefly and retries with a fresh connectConsumerSession.
+  Future<void> _recoverFromSessionAlreadyExists() async {
+    Logger().warn(
+      '$_tag Session already exists on server — cleaning up and retrying',
+    );
+
+    // Tell the server to clean up the stale session via disconnect message
+    final staleSession = _sessionId;
+    _sessionId = null;
+    if (staleSession != null) {
+      try {
+        await _signalRService.sendCloseMessage(staleSession, cameraId);
+      } catch (e) {
+        Logger().warn('$_tag Failed to disconnect stale session: $e');
+      }
+    }
+
+    // Brief delay to let the server finish cleanup
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    if (_isClosing || _state == SessionConnectionState.connected) return;
+
+    // Retry with a fresh session
+    _startConnectTimeout();
+    try {
+      await _signalRService.connectConsumerSession(cameraId);
+      Logger().info('$_tag Recovery: connect request sent, awaiting invite');
+    } catch (e) {
+      Logger().error('$_tag Recovery connect failed: $e');
+      _setState(SessionConnectionState.failed);
+    }
+  }
+
+  /// Recover from error 101 (Active Session Limit Exceeded).
+  ///
+  /// The server has too many active sessions. Send disconnect for ours,
+  /// wait for sessions to expire, then retry.
+  Future<void> _recoverFromSessionLimitExceeded() async {
+    Logger().warn(
+      '$_tag Active session limit exceeded — disconnecting and waiting',
+    );
+
+    // Disconnect our session so the server can free a slot
+    final staleSession = _sessionId;
+    _sessionId = null;
+    _cancelInviteTimer();
+    if (staleSession != null) {
+      try {
+        await _signalRService.sendCloseMessage(staleSession, cameraId);
+      } catch (e) {
+        Logger().warn('$_tag Failed to disconnect session: $e');
+      }
+    }
+
+    // Wait 5s for the server to free slots (error 101 needs extra time)
+    await Future.delayed(const Duration(seconds: 5));
+
+    if (_isClosing || _state == SessionConnectionState.connected) return;
+
+    // Retry
+    _startConnectTimeout();
+    try {
+      await _signalRService.connectConsumerSession(cameraId);
+      Logger().info('$_tag Retry after session limit: connect request sent');
+    } catch (e) {
+      Logger().error('$_tag Retry after session limit failed: $e');
+      _setState(SessionConnectionState.failed);
     }
   }
 
   Future<void> _handleIceServers(dynamic detail) async {
-    // Clear the connect timeout - we received a response
-    _cancelConnectTimeout();
+    // Don't cancel connect timeout here — it should cover the entire
+    // connect-to-invite phase. It's cancelled in _handleInvite instead.
 
     if (_isClosing) return;
 
@@ -284,10 +395,18 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         rethrow;
       }
       Logger().info('$_tag Peer connection ready, awaiting invite');
+
+      // Start invite timer — if no invite arrives in 5s, retry
+      _startInviteTimer();
     }
   }
 
   Future<void> _handleInvite(dynamic detail) async {
+    // Cancel connect timeout and invite timer — we got what we were waiting for
+    _cancelConnectTimeout();
+    _cancelInviteTimer();
+    _inviteRetryCount = 0;
+
     if (_state.isTerminal || _isClosing) {
       Logger().info('$_tag Ignoring invite in terminal/closing state');
       return;
@@ -523,14 +642,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _disconnectRecoveryTimer = null;
     _cancelNegotiationTimer();
     _cancelConnectTimeout();
+    _cancelInviteTimer();
     _statsMonitor.dispose();
 
-    // Send close message to signaling server before cleanup
+    // Send disconnect message to the server.
+    // The web client only sends a 'disconnect' via SendMessage — it never
+    // invokes the LeaveSession hub method (which errors on this server).
     if (_sessionId != null) {
       try {
         await _signalRService.sendCloseMessage(_sessionId!, cameraId);
       } catch (e) {
-        Logger().warn('$_tag Error sending close message: $e');
+        Logger().warn('$_tag Error sending disconnect: $e');
       }
     }
 
@@ -760,6 +882,69 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void _cancelConnectTimeout() => _timers.cancelConnect();
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // Invite Timeout with Retry
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Start a 5s timer waiting for the server's invite (SDP offer).
+  /// If no invite arrives, [_onInviteTimeout] fires and retries.
+  void _startInviteTimer() {
+    _cancelInviteTimer();
+    _inviteTimer = Timer(const Duration(seconds: 5), _onInviteTimeout);
+  }
+
+  void _cancelInviteTimer() {
+    _inviteTimer?.cancel();
+    _inviteTimer = null;
+  }
+
+  /// No invite arrived within 5s — disconnect the stale session and retry.
+  void _onInviteTimeout() async {
+    if (_isClosing || _state == SessionConnectionState.connected) return;
+
+    _inviteRetryCount++;
+
+    if (_inviteRetryCount > _maxInviteRetries) {
+      Logger().error(
+        '$_tag No invite after $_maxInviteRetries retries — giving up',
+      );
+      // The overall connect timeout will handle transitioning to failed
+      return;
+    }
+
+    // Exponential backoff: 500ms, 1s, 2s
+    final delay = Duration(milliseconds: 500 * (1 << (_inviteRetryCount - 1)));
+    Logger().warn(
+      '$_tag No invite received — retry $_inviteRetryCount/$_maxInviteRetries '
+      '(backoff ${delay.inMilliseconds}ms)',
+    );
+
+    // Disconnect the stale session so the server releases resources
+    final staleSession = _sessionId;
+    _sessionId = null;
+    if (staleSession != null) {
+      try {
+        await _signalRService.sendCloseMessage(staleSession, cameraId);
+      } catch (e) {
+        Logger().warn('$_tag Failed to disconnect stale session: $e');
+      }
+    }
+
+    await Future.delayed(delay);
+
+    if (_isClosing || _state == SessionConnectionState.connected) return;
+
+    // Re-request a session — this will trigger _handleIceServers again
+    // which starts a new invite timer
+    try {
+      await _signalRService.connectConsumerSession(cameraId);
+      Logger().info('$_tag Invite retry: connect request sent');
+    } catch (e) {
+      Logger().error('$_tag Invite retry failed: $e');
+      // Don't set failed — let the overall connect timeout handle it
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // WebRTC Event Handlers
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -897,12 +1082,23 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _lastInviteId = null;
       _isNegotiating = false;
 
-      // Keep the session ID — leave session alive on server
-      // Re-initialize peer connection and request a new offer
+      // Disconnect the old session on the server before requesting a new one.
+      // Without this, connectConsumerSession triggers error 100
+      // (Session Already Exist) because the stale session is still alive.
+      final oldSession = _sessionId;
+      _sessionId = null;
+      if (oldSession != null) {
+        try {
+          await _signalRService.sendCloseMessage(oldSession, cameraId);
+        } catch (e) {
+          Logger().warn('$_tag Failed to disconnect old session: $e');
+        }
+      }
+
+      // Re-initialize peer connection and request a fresh session/offer
       _setState(SessionConnectionState.initializingPeer);
       await _initializePeerConnection();
 
-      // Ask the server for a fresh session/offer
       _startConnectTimeout();
       await _signalRService.connectConsumerSession(cameraId);
 
