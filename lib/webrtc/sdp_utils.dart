@@ -141,12 +141,18 @@ extension SdpUtils on String {
     return result;
   }
 
-  /// Munge SDP for H264 compatibility if needed.
+  /// Apply all offer compatibility fixes before `setRemoteDescription`.
+  ///
+  /// Fixes known issues that cause `createAnswer()` to fail on Android
+  /// or other strict WebRTC implementations.
   String get withCompatibilityFixes {
-    if (containsH264) {
-      return withH264ProfileFix.withH264FmtpFix;
+    var sdp = this;
+    if (sdp.containsH264) {
+      sdp = sdp.withH264ProfileFix.withH264FmtpFix;
     }
-    return this;
+    sdp = sdp.withoutExtmapAllowMixed;
+    sdp = sdp.withRtcpMux;
+    return sdp;
   }
 
   /// Inject missing `a=fmtp` lines for H264 payload types.
@@ -280,6 +286,61 @@ extension SdpUtils on String {
     return result.join(lineBreak);
   }
 
+  /// Remove `a=extmap-allow-mixed` from SDP.
+  ///
+  /// This attribute (RFC 8285) indicates support for mixing one-byte and
+  /// two-byte RTP header extensions. Older Android WebRTC builds (pre-M87
+  /// libwebrtc) crash when parsing this attribute. Some IoT cameras also
+  /// can't parse it. Safe to strip — both sides fall back to one-byte only.
+  String get withoutExtmapAllowMixed {
+    return replaceAll(RegExp(r'a=extmap-allow-mixed\r?\n?'), '');
+  }
+
+  /// Ensure all audio/video m-lines have `a=rtcp-mux`.
+  ///
+  /// Required by unified-plan and some strict WebRTC implementations.
+  /// Without it, the peer connection may reject the m-line or fail to
+  /// multiplex RTP/RTCP on the same port.
+  String get withRtcpMux {
+    final lines = split(RegExp(r'\r?\n'));
+    final lineBreak = contains('\r\n') ? '\r\n' : '\n';
+    final result = <String>[];
+    var inMediaSection = false;
+    var hasRtcpMux = false;
+    var sectionStartIndex = -1;
+
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+
+      if (line.startsWith('m=')) {
+        // Before starting new section, inject rtcp-mux if previous section needed it
+        if (inMediaSection && !hasRtcpMux && sectionStartIndex >= 0) {
+          // Find where to insert (after c= line or after m= line)
+          final insertAt = sectionStartIndex + 1;
+          result.insert(insertAt, 'a=rtcp-mux');
+        }
+
+        inMediaSection = line.startsWith('m=audio') || line.startsWith('m=video');
+        hasRtcpMux = false;
+        sectionStartIndex = result.length;
+      }
+
+      if (line.startsWith('a=rtcp-mux')) {
+        hasRtcpMux = true;
+      }
+
+      result.add(line);
+    }
+
+    // Handle last section
+    if (inMediaSection && !hasRtcpMux && sectionStartIndex >= 0) {
+      final insertAt = sectionStartIndex + 1;
+      result.insert(insertAt, 'a=rtcp-mux');
+    }
+
+    return result.join(lineBreak);
+  }
+
   /// Force DTLS active role in the answer SDP.
   ///
   /// This fixes "hanging DTLS" where both sides wait for the other to send
@@ -303,6 +364,8 @@ extension SdpUtils on String {
     if (sdp.containsH264) {
       sdp = sdp.withH264ProfileFix;
     }
+    // Strip extmap-allow-mixed for IoT camera compatibility
+    sdp = sdp.withoutExtmapAllowMixed;
     return sdp;
   }
 }
