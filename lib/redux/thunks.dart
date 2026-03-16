@@ -130,7 +130,7 @@ ThunkAction<AppState> initializeSignalRThunk({
         ),
       );
 
-      // Initialize SignalR hub
+      // Initialize SignalR hub (cameras loaded from persistence)
       final hub = SignalRSessionHub.instance;
       await hub.initialize(signalRUrl, authService);
       Logger().info('[Thunk] initializeSignalRThunk: hub initialized');
@@ -191,10 +191,15 @@ ThunkAction<AppState> fetchCameras({required AuthService authService}) {
 
     try {
       await authService.fetchDevices();
-      store.dispatch(SetCameras(authService.devices));
-      Logger().info(
-        '[Thunk] fetchCameras: ${authService.devices.length} cameras loaded',
-      );
+      // Only replace the cache if we actually got cameras back
+      if (authService.devices.isNotEmpty) {
+        store.dispatch(SetCameras(authService.devices));
+        Logger().info(
+          '[Thunk] fetchCameras: ${authService.devices.length} cameras loaded',
+        );
+      } else {
+        Logger().warn('[Thunk] fetchCameras: empty response, keeping cache');
+      }
     } catch (e) {
       Logger().error('[Thunk] fetchCameras: ERROR $e');
     } finally {

@@ -107,9 +107,7 @@ class SignalRSessionHub {
     await _signalRService!.initService(signalRUrl);
     _initialized = true;
 
-    Logger().info(
-      'SignalRSessionHub: Initialized with ${authService.devices.length} cameras',
-    );
+    Logger().info('SignalRSessionHub: Initialized');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

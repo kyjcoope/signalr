@@ -44,10 +44,6 @@ class AuthService {
 
       _sessionId = response.headers['session-id'];
       Logger().info('Session ID: $_sessionId');
-
-      if (_sessionId != null) {
-        devices = await _fetchDevices(url, _sessionId!);
-      }
     } catch (e) {
       Logger().error('Login error: $e');
       rethrow;
@@ -65,14 +61,18 @@ class AuthService {
     const cloudPayload = ObjectRequest(
       typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSCloudCamera',
       loadCollection: false,
-      pageSize: 1,
+      pageSize: 4,
       pageNumber: 1,
+      whereClause: 'Name LIKE ?',
+      arguments: ['%adam%'],
     );
     const gatewayPayload = ObjectRequest(
       typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSGatewayCamera',
       loadCollection: false,
-      pageSize: 1,
+      pageSize: 4,
       pageNumber: 1,
+      whereClause: 'Name LIKE ?',
+      arguments: ['%adam%'],
     );
 
     // Fetch both camera types in parallel
@@ -95,7 +95,6 @@ class AuthService {
     // Parse each response on an isolate and merge
     Logger().info('Parsing camera responses...');
     final merged = <String, Device>{};
-
 
     if (results[0] != null) {
       final cloudDevices = await compute(_parseDevices, results[0]!);
