@@ -10,11 +10,12 @@ Map<String, Device> _parseDevices(String responseBody) {
   final List list = jsonDecode(responseBody);
   return {
     for (var d in list)
-      d['GUID']: Device(
-        guid: d['GUID'],
-        sourceType: d['SourceType'],
-        name: d['Name'],
-      ),
+      if (d['GUID'] != null)
+        d['GUID']: Device(
+          guid: d['GUID'],
+          sourceType: d['DeviceType'] ?? d['ClassType'] ?? 'Unknown',
+          name: d['Name'] ?? d['DisplayName'] ?? 'Unnamed',
+        ),
   };
 }
 
@@ -61,16 +62,54 @@ class AuthService {
   }
 
   Future<Map<String, Device>> _fetchDevices(String host, String sid) async {
-    const payload = ObjectRequest(
-      typeFullName:
-          'Jci.Osp.Objects.DeviceFleetManagement.UnifiedDeviceDataView',
+    const cloudPayload = ObjectRequest(
+      typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSCloudCamera',
       loadCollection: false,
-      pageSize: 5000,
+      pageSize: 1,
+      pageNumber: 1,
+    );
+    const gatewayPayload = ObjectRequest(
+      typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSGatewayCamera',
+      loadCollection: false,
+      pageSize: 1,
       pageNumber: 1,
     );
 
-    final body = await _fetchCollection(host, sid, payload);
-    return body != null ? await compute(_parseDevices, body) : {};
+    // Fetch both camera types in parallel
+    Logger().info('Fetching cloud + gateway cameras...');
+    final results = await Future.wait([
+      _fetchCollection(host, sid, cloudPayload).then((v) {
+        Logger().info(
+          'Cloud cameras response: ${v != null ? "${v.length} chars" : "null"}',
+        );
+        return v;
+      }),
+      _fetchCollection(host, sid, gatewayPayload).then((v) {
+        Logger().info(
+          'Gateway cameras response: ${v != null ? "${v.length} chars" : "null"}',
+        );
+        return v;
+      }),
+    ]);
+
+    // Parse each response on an isolate and merge
+    Logger().info('Parsing camera responses...');
+    final merged = <String, Device>{};
+
+
+    if (results[0] != null) {
+      final cloudDevices = await compute(_parseDevices, results[0]!);
+      Logger().info('Parsed ${cloudDevices.length} cloud cameras');
+      merged.addAll(cloudDevices);
+    }
+    if (results[1] != null) {
+      final gatewayDevices = await compute(_parseDevices, results[1]!);
+      Logger().info('Parsed ${gatewayDevices.length} gateway cameras');
+      merged.addAll(gatewayDevices);
+    }
+
+    Logger().info('Total cameras: ${merged.length}');
+    return merged;
   }
 
   Future<String?> _fetchCollection(
