@@ -3,206 +3,43 @@ library;
 
 /// Extension methods for SDP string manipulation.
 extension SdpUtils on String {
-  /// Check if this SDP contains H264 codec.
-  bool get containsH264 =>
-      RegExp(r'\bH264/90000\b', caseSensitive: false).hasMatch(this);
-
-  /// Apply H264 profile fix for compatibility.
-  ///
-  /// Normalizes profile-level-id to baseline and adds level-asymmetry-allowed.
-  String get withH264ProfileFix {
-    var sdp = replaceAllMapped(
-      RegExp(r'profile-level-id=([0-9A-Fa-f]{6})'),
-      (_) => 'profile-level-id=42e01f',
-    );
-
-    if (!sdp.toLowerCase().contains('level-asymmetry-allowed')) {
-      sdp = sdp.replaceFirst(
-        'packetization-mode=1;',
-        'level-asymmetry-allowed=1;packetization-mode=1;',
-      );
-    }
-
-    return sdp;
-  }
-
-  /// Build mapping from m-line index to mid attribute.
-  Map<int, String> get mlineToMidMapping {
-    final lines = split(RegExp(r'\r?\n'));
-    final map = <int, String>{};
-    var mIndex = -1;
-
-    for (final line in lines) {
-      if (line.startsWith('m=')) mIndex++;
-      if (line.startsWith('a=mid:')) {
-        final mid = line.substring('a=mid:'.length).trim();
-        if (mIndex >= 0) map[mIndex] = mid;
-      }
-    }
-
-    return map;
-  }
-
-  /// Extract the primary video codec from this SDP.
-  ///
-  /// Returns the first non-helper codec (excludes RTX, ULPFEC, RED, etc).
-  String? get primaryVideoCodec {
-    // Find video section
-    final sections = split(RegExp(r'\r?\nm='));
-    String? videoSection;
-
-    for (final raw in sections) {
-      final sec = raw.startsWith('m=') ? raw : 'm=$raw';
-      if (sec.startsWith(RegExp(r'm=video'))) {
-        videoSection = sec;
-        break;
-      }
-    }
-
-    if (videoSection == null) return null;
-
-    // Get payload types from m-line
-    final mLine = videoSection.split(RegExp(r'\r?\n')).first;
-    final parts = mLine.split(' ');
-    if (parts.length < 4) return null;
-
-    final pts = parts
-        .skip(3)
-        .where((p) => RegExp(r'^\d+$').hasMatch(p))
-        .toList();
-    if (pts.isEmpty) return null;
-
-    // Find codec for first non-helper payload type
-    final lines = split(RegExp(r'\r?\n'));
-    const helperCodecs = {'RTX', 'ULPFEC', 'RED', 'FLEXFEC-03'};
-
-    for (final pt in pts) {
-      final rtpmapLine = lines.firstWhere(
-        (l) => l.startsWith('a=rtpmap:$pt '),
-        orElse: () => '',
-      );
-      if (rtpmapLine.isEmpty) continue;
-
-      final codecPart = rtpmapLine.split(' ').skip(1).firstOrNull ?? '';
-      final codecName = codecPart.split('/').first.toUpperCase();
-
-      if (!helperCodecs.contains(codecName)) {
-        return codecName;
-      }
-    }
-
-    return null;
-  }
-
-  /// Extract the primary video codec from each video m-section.
-  ///
-  /// Returns a list where index 0 = codec of the 1st video m-line, etc.
-  List<String> get videoCodecsPerSection {
-    final sections = split(RegExp(r'\r?\nm='));
-    final result = <String>[];
-    const helperCodecs = {'RTX', 'ULPFEC', 'RED', 'FLEXFEC-03'};
-
-    for (final raw in sections) {
-      final sec = raw.startsWith('m=') ? raw : 'm=$raw';
-      if (!sec.startsWith(RegExp(r'm=video'))) continue;
-
-      final secLines = sec.split(RegExp(r'\r?\n'));
-      final mLine = secLines.first;
-      final parts = mLine.split(' ');
-      if (parts.length < 4) {
-        result.add('?');
-        continue;
-      }
-
-      final pts = parts
-          .skip(3)
-          .where((p) => RegExp(r'^\d+$').hasMatch(p))
-          .toList();
-
-      String codec = '?';
-      for (final pt in pts) {
-        final rtpmapLine = secLines.firstWhere(
-          (l) => l.startsWith('a=rtpmap:$pt '),
-          orElse: () => '',
-        );
-        if (rtpmapLine.isEmpty) continue;
-
-        final codecPart = rtpmapLine.split(' ').skip(1).firstOrNull ?? '';
-        final codecName = codecPart.split('/').first.toUpperCase();
-
-        if (!helperCodecs.contains(codecName)) {
-          codec = codecName;
-          break;
-        }
-      }
-      result.add(codec);
-    }
-
-    return result;
-  }
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SDP Fix Pipelines
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /// Apply all offer compatibility fixes before `setRemoteDescription`.
   ///
   /// Fixes known issues that cause `createAnswer()` to fail on Android
-  /// or other strict WebRTC implementations.
+  /// or other strict WebRTC implementations:
+  /// - Normalizes H264 profile + injects missing fmtp parameters
+  /// - Strips `a=extmap-allow-mixed` (crashes older Android WebRTC)
+  /// - Ensures `a=rtcp-mux` on audio/video m-lines (required by unified-plan)
   String get withCompatibilityFixes {
     var sdp = this;
-    if (sdp.containsH264) {
-      sdp = sdp.withH264ProfileFix.withH264FmtpFix;
-    }
-    sdp = sdp.withoutExtmapAllowMixed;
-    sdp = sdp.withRtcpMux;
+    if (sdp._containsH264) sdp = sdp._withH264Fixes;
+    sdp = sdp._withoutExtmapAllowMixed;
+    sdp = sdp._withRtcpMux;
     return sdp;
   }
 
-  /// Inject missing `a=fmtp` lines for H264 payload types.
+  /// Apply all answer-specific compatibility fixes before sending to server.
   ///
-  /// Some servers send H264 offers without an fmtp line (no profile-level-id).
-  /// Android's native WebRTC requires fmtp with profile-level-id to determine
-  /// H264 compatibility — without it, `createAnswer()` rejects the video
-  /// m-line entirely (m=video 0). Web/Windows are lenient and assume defaults.
-  ///
-  /// This adds a baseline profile fmtp for any H264 PT missing one.
-  String get withH264FmtpFix {
-    final lines = split(RegExp(r'\r?\n'));
-    final lineBreak = contains('\r\n') ? '\r\n' : '\n';
-    final result = <String>[];
-
-    // Find all H264 payload types
-    final h264Pts = <String>{};
-    final existingFmtpPts = <String>{};
-
-    for (final line in lines) {
-      final rtpMatch = RegExp(r'^a=rtpmap:(\d+)\s+H264/90000', caseSensitive: false)
-          .firstMatch(line);
-      if (rtpMatch != null) {
-        h264Pts.add(rtpMatch.group(1)!);
-      }
-      final fmtpMatch = RegExp(r'^a=fmtp:(\d+)\s+').firstMatch(line);
-      if (fmtpMatch != null) {
-        existingFmtpPts.add(fmtpMatch.group(1)!);
-      }
-    }
-
-    // Find H264 PTs that are missing fmtp lines
-    final missingFmtp = h264Pts.difference(existingFmtpPts);
-    if (missingFmtp.isEmpty) return this;
-
-    // Insert fmtp lines after their corresponding rtpmap lines
-    for (final line in lines) {
-      result.add(line);
-      for (final pt in missingFmtp) {
-        if (line.startsWith('a=rtpmap:$pt ') &&
-            RegExp(r'H264/90000', caseSensitive: false).hasMatch(line)) {
-          result.add(
-            'a=fmtp:$pt profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1',
-          );
-        }
-      }
-    }
-
-    return result.join(lineBreak);
+  /// - Forces DTLS active role (Flutter initiates handshake)
+  /// - Normalizes H264 profile for cross-platform compatibility
+  /// - Strips `a=extmap-allow-mixed` for IoT camera compatibility
+  String get withAnswerFixes {
+    var sdp = this;
+    // Force DTLS active role — fixes deadlocks with IoT cameras that
+    // expect the client to send ClientHello first.
+    sdp = sdp.replaceAll('a=setup:actpass', 'a=setup:active');
+    if (sdp._containsH264) sdp = sdp._withH264ProfileFix;
+    sdp = sdp._withoutExtmapAllowMixed;
+    return sdp;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Codec Preference
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /// Reorder video codecs to prefer [preferredCodec].
   ///
@@ -286,22 +123,197 @@ extension SdpUtils on String {
     return result.join(lineBreak);
   }
 
-  /// Remove `a=extmap-allow-mixed` from SDP.
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SDP Parsing
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Build mapping from m-line index to mid attribute.
+  Map<int, String> get mlineToMidMapping {
+    final lines = split(RegExp(r'\r?\n'));
+    final map = <int, String>{};
+    var mIndex = -1;
+
+    for (final line in lines) {
+      if (line.startsWith('m=')) mIndex++;
+      if (line.startsWith('a=mid:')) {
+        final mid = line.substring('a=mid:'.length).trim();
+        if (mIndex >= 0) map[mIndex] = mid;
+      }
+    }
+
+    return map;
+  }
+
+  /// Extract the primary video codec from this SDP.
   ///
-  /// This attribute (RFC 8285) indicates support for mixing one-byte and
-  /// two-byte RTP header extensions. Older Android WebRTC builds (pre-M87
-  /// libwebrtc) crash when parsing this attribute. Some IoT cameras also
-  /// can't parse it. Safe to strip — both sides fall back to one-byte only.
-  String get withoutExtmapAllowMixed {
-    return replaceAll(RegExp(r'a=extmap-allow-mixed\r?\n?'), '');
+  /// Returns the first non-helper codec (excludes RTX, ULPFEC, RED, etc).
+  String? get primaryVideoCodec {
+    final sections = split(RegExp(r'\r?\nm='));
+    String? videoSection;
+
+    for (final raw in sections) {
+      final sec = raw.startsWith('m=') ? raw : 'm=$raw';
+      if (sec.startsWith(RegExp(r'm=video'))) {
+        videoSection = sec;
+        break;
+      }
+    }
+
+    if (videoSection == null) return null;
+
+    final mLine = videoSection.split(RegExp(r'\r?\n')).first;
+    final parts = mLine.split(' ');
+    if (parts.length < 4) return null;
+
+    final pts = parts
+        .skip(3)
+        .where((p) => RegExp(r'^\d+$').hasMatch(p))
+        .toList();
+    if (pts.isEmpty) return null;
+
+    final lines = split(RegExp(r'\r?\n'));
+    const helperCodecs = {'RTX', 'ULPFEC', 'RED', 'FLEXFEC-03'};
+
+    for (final pt in pts) {
+      final rtpmapLine = lines.firstWhere(
+        (l) => l.startsWith('a=rtpmap:$pt '),
+        orElse: () => '',
+      );
+      if (rtpmapLine.isEmpty) continue;
+
+      final codecPart = rtpmapLine.split(' ').skip(1).firstOrNull ?? '';
+      final codecName = codecPart.split('/').first.toUpperCase();
+
+      if (!helperCodecs.contains(codecName)) {
+        return codecName;
+      }
+    }
+
+    return null;
+  }
+
+  /// Extract the primary video codec from each video m-section.
+  ///
+  /// Returns a list where index 0 = codec of the 1st video m-line, etc.
+  List<String> get videoCodecsPerSection {
+    final sections = split(RegExp(r'\r?\nm='));
+    final result = <String>[];
+    const helperCodecs = {'RTX', 'ULPFEC', 'RED', 'FLEXFEC-03'};
+
+    for (final raw in sections) {
+      final sec = raw.startsWith('m=') ? raw : 'm=$raw';
+      if (!sec.startsWith(RegExp(r'm=video'))) continue;
+
+      final secLines = sec.split(RegExp(r'\r?\n'));
+      final mLine = secLines.first;
+      final parts = mLine.split(' ');
+      if (parts.length < 4) {
+        result.add('?');
+        continue;
+      }
+
+      final pts = parts
+          .skip(3)
+          .where((p) => RegExp(r'^\d+$').hasMatch(p))
+          .toList();
+
+      String codec = '?';
+      for (final pt in pts) {
+        final rtpmapLine = secLines.firstWhere(
+          (l) => l.startsWith('a=rtpmap:$pt '),
+          orElse: () => '',
+        );
+        if (rtpmapLine.isEmpty) continue;
+
+        final codecPart = rtpmapLine.split(' ').skip(1).firstOrNull ?? '';
+        final codecName = codecPart.split('/').first.toUpperCase();
+
+        if (!helperCodecs.contains(codecName)) {
+          codec = codecName;
+          break;
+        }
+      }
+      result.add(codec);
+    }
+
+    return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Private Fix Helpers
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  bool get _containsH264 =>
+      RegExp(r'\bH264/90000\b', caseSensitive: false).hasMatch(this);
+
+  /// Strip `a=extmap-allow-mixed` — crashes older Android WebRTC (pre-M87).
+  String get _withoutExtmapAllowMixed =>
+      replaceAll(RegExp(r'a=extmap-allow-mixed\r?\n?'), '');
+
+  /// All H264 fixes: normalize profile + inject missing fmtp.
+  String get _withH264Fixes => _withH264ProfileFix._withH264FmtpFix;
+
+  /// Normalize profile-level-id to Constrained Baseline (42e01f).
+  String get _withH264ProfileFix {
+    var sdp = replaceAllMapped(
+      RegExp(r'profile-level-id=([0-9A-Fa-f]{6})'),
+      (_) => 'profile-level-id=42e01f',
+    );
+
+    if (!sdp.toLowerCase().contains('level-asymmetry-allowed')) {
+      sdp = sdp.replaceFirst(
+        'packetization-mode=1;',
+        'level-asymmetry-allowed=1;packetization-mode=1;',
+      );
+    }
+
+    return sdp;
+  }
+
+  /// Inject missing `a=fmtp` lines for H264 payload types.
+  ///
+  /// Android's native WebRTC requires fmtp with profile-level-id to determine
+  /// codec compatibility. Without it, `createAnswer()` rejects the video
+  /// m-line entirely (m=video 0). Web/Windows assume baseline defaults.
+  String get _withH264FmtpFix {
+    final lines = split(RegExp(r'\r?\n'));
+    final lineBreak = contains('\r\n') ? '\r\n' : '\n';
+
+    // Find H264 PTs and existing fmtp PTs
+    final h264Pts = <String>{};
+    final existingFmtpPts = <String>{};
+
+    for (final line in lines) {
+      final rtpMatch = RegExp(r'^a=rtpmap:(\d+)\s+H264/90000', caseSensitive: false)
+          .firstMatch(line);
+      if (rtpMatch != null) h264Pts.add(rtpMatch.group(1)!);
+
+      final fmtpMatch = RegExp(r'^a=fmtp:(\d+)\s+').firstMatch(line);
+      if (fmtpMatch != null) existingFmtpPts.add(fmtpMatch.group(1)!);
+    }
+
+    final missingFmtp = h264Pts.difference(existingFmtpPts);
+    if (missingFmtp.isEmpty) return this;
+
+    // Insert fmtp after corresponding rtpmap lines
+    final result = <String>[];
+    for (final line in lines) {
+      result.add(line);
+      for (final pt in missingFmtp) {
+        if (line.startsWith('a=rtpmap:$pt ') &&
+            RegExp(r'H264/90000', caseSensitive: false).hasMatch(line)) {
+          result.add(
+            'a=fmtp:$pt profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1',
+          );
+        }
+      }
+    }
+
+    return result.join(lineBreak);
   }
 
   /// Ensure all audio/video m-lines have `a=rtcp-mux`.
-  ///
-  /// Required by unified-plan and some strict WebRTC implementations.
-  /// Without it, the peer connection may reject the m-line or fail to
-  /// multiplex RTP/RTCP on the same port.
-  String get withRtcpMux {
+  String get _withRtcpMux {
     final lines = split(RegExp(r'\r?\n'));
     final lineBreak = contains('\r\n') ? '\r\n' : '\n';
     final result = <String>[];
@@ -313,60 +325,23 @@ extension SdpUtils on String {
       final line = lines[i];
 
       if (line.startsWith('m=')) {
-        // Before starting new section, inject rtcp-mux if previous section needed it
         if (inMediaSection && !hasRtcpMux && sectionStartIndex >= 0) {
-          // Find where to insert (after c= line or after m= line)
-          final insertAt = sectionStartIndex + 1;
-          result.insert(insertAt, 'a=rtcp-mux');
+          result.insert(sectionStartIndex + 1, 'a=rtcp-mux');
         }
-
         inMediaSection = line.startsWith('m=audio') || line.startsWith('m=video');
         hasRtcpMux = false;
         sectionStartIndex = result.length;
       }
 
-      if (line.startsWith('a=rtcp-mux')) {
-        hasRtcpMux = true;
-      }
-
+      if (line.startsWith('a=rtcp-mux')) hasRtcpMux = true;
       result.add(line);
     }
 
-    // Handle last section
     if (inMediaSection && !hasRtcpMux && sectionStartIndex >= 0) {
-      final insertAt = sectionStartIndex + 1;
-      result.insert(insertAt, 'a=rtcp-mux');
+      result.insert(sectionStartIndex + 1, 'a=rtcp-mux');
     }
 
     return result.join(lineBreak);
-  }
-
-  /// Force DTLS active role in the answer SDP.
-  ///
-  /// This fixes "hanging DTLS" where both sides wait for the other to send
-  /// ClientHello. By forcing 'active', Flutter will initiate the handshake.
-  ///
-  /// Only apply this to ANSWER SDPs, not offers.
-  String get withDtlsActiveRole {
-    // Replace actpass with active to force Flutter to be the DTLS client
-    // This is critical for IoT cameras that expect the client to initiate
-    return replaceAll('a=setup:actpass', 'a=setup:active');
-  }
-
-  /// Apply all answer-specific compatibility fixes.
-  ///
-  /// Use this for local answer SDP before sending to remote peer.
-  String get withAnswerFixes {
-    var sdp = this;
-    // Force active DTLS role
-    sdp = sdp.withDtlsActiveRole;
-    // Apply H264 fixes if needed
-    if (sdp.containsH264) {
-      sdp = sdp.withH264ProfileFix;
-    }
-    // Strip extmap-allow-mixed for IoT camera compatibility
-    sdp = sdp.withoutExtmapAllowMixed;
-    return sdp;
   }
 }
 
