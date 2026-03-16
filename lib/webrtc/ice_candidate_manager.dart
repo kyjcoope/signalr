@@ -36,8 +36,6 @@ class IceCandidateManager {
 
   final Queue<RTCIceCandidate> _pendingRemoteCandidates =
       Queue<RTCIceCandidate>();
-  final Queue<RTCIceCandidate> _pendingLocalCandidates =
-      Queue<RTCIceCandidate>();
   final Set<String> _eocSentForMid = {};
   final Set<String> _seenRemoteCandidates = {};
   Map<int, String> _mlineToMid = {};
@@ -45,7 +43,6 @@ class IceCandidateManager {
   bool _firedLocalIce = false;
   bool _firedRemoteIce = false;
   bool _remoteDescSet = false;
-  bool _holdLocal = false;
   Completer<void>? _gatheringCompleter;
 
   /// Set the mline-to-mid mapping (usually from remote SDP).
@@ -58,39 +55,15 @@ class IceCandidateManager {
     _remoteDescSet = true;
   }
 
-  /// Hold local candidates — queue them instead of sending.
-  ///
-  /// Call this before `setLocalDescription` to prevent candidates from
-  /// being sent to the server before the SDP answer arrives.
-  void holdLocalCandidates() {
-    _holdLocal = true;
-  }
-
-  /// Release all held local candidates, sending them in order.
-  ///
-  /// Call this after the SDP answer has been sent successfully.
-  void releaseLocalCandidates() {
-    _holdLocal = false;
-    final count = _pendingLocalCandidates.length;
-    if (count > 0) {
-      Logger().info('$tag Releasing $count held local candidates');
-    }
-    while (_pendingLocalCandidates.isNotEmpty) {
-      onSendCandidate(_pendingLocalCandidates.removeFirst());
-    }
-  }
-
   /// Reset state for a new negotiation.
   void reset() {
     _pendingRemoteCandidates.clear();
-    _pendingLocalCandidates.clear();
     _eocSentForMid.clear();
     _seenRemoteCandidates.clear();
     _mlineToMid.clear();
     _firedLocalIce = false;
     _firedRemoteIce = false;
     _remoteDescSet = false;
-    _holdLocal = false;
     _gatheringCompleter = null;
   }
 
@@ -119,11 +92,7 @@ class IceCandidateManager {
 
     if (sessionId == null) return;
 
-    if (_holdLocal) {
-      _pendingLocalCandidates.addLast(candidate);
-    } else {
-      onSendCandidate(candidate);
-    }
+    onSendCandidate(candidate);
   }
 
   /// Send end-of-candidates for a mid.

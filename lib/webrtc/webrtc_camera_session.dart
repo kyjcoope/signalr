@@ -153,12 +153,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   int _iceRestartAttempts = 0;
 
-  /// The primary mid from the BUNDLE group in the offer SDP.
-  /// On Android, candidates are incorrectly attributed to 'application1'
-  /// instead of the bundle primary ('video0'). We remap them when sending.
-  String? _bundlePrimaryMid;
-  int _bundlePrimaryMLineIndex = 0;
-
   late final SessionTimers _timers;
 
   late final IceCandidateManager _iceManager;
@@ -239,21 +233,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   void _sendCandidate(RTCIceCandidate candidate) {
     if (_sessionId == null) return;
-
-    // Remap candidate mid to the BUNDLE primary.
-    // Android WebRTC incorrectly sets sdpMid to 'application1' (data channel)
-    // instead of 'video0' (video/bundle primary). Servers ignore candidates
-    // for bundle-only m-lines, so we remap to the bundle primary.
-    final remapped = _bundlePrimaryMid != null &&
-            candidate.sdpMid != _bundlePrimaryMid
-        ? RTCIceCandidate(
-            candidate.candidate,
-            _bundlePrimaryMid,
-            _bundlePrimaryMLineIndex,
-          )
-        : candidate;
-
-    _signalRService.sendSignalTrickleMessage(_sessionId!, remapped);
+    _signalRService.sendSignalTrickleMessage(_sessionId!, candidate);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -829,22 +809,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // Apply compatibility fixes
       final offerSdp = offer.sdp.withCompatibilityFixes;
 
-      // Extract BUNDLE primary mid — first mid in the BUNDLE group.
-      // Android WebRTC incorrectly assigns candidates to 'application1'
-      // so we need this to remap them to the correct mid (usually 'video0').
-      final bundleMatch = RegExp(r'a=group:BUNDLE\s+(\S+)')
-          .firstMatch(offerSdp);
-      _bundlePrimaryMid = bundleMatch?.group(1);
-      // Find the m-line index for the bundle primary mid
-      final midMapping = offerSdp.mlineToMidMapping;
-      _bundlePrimaryMLineIndex = midMapping.entries
-          .where((e) => e.value == _bundlePrimaryMid)
-          .map((e) => e.key)
-          .firstOrNull ?? 0;
-      Logger().info(
-        '$_tag Bundle primary: mid=$_bundlePrimaryMid mline=$_bundlePrimaryMLineIndex',
-      );
-
       // Extract per-track codecs using H264-preferred ordering
       // (matches the preference we apply to the answer SDP)
       _videoTrackCodecs.clear();
@@ -857,7 +821,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         RTCSessionDescription(offerSdp, offer.type),
       );
 
-      _iceManager.setMlineMapping(midMapping);
+      _iceManager.setMlineMapping(offerSdp.mlineToMidMapping);
       _iceManager.markRemoteDescSet();
       await _iceManager.drainQueuedCandidates(_peerConnection!);
 
@@ -872,12 +836,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // Prefer H264 — matches camera native codec, avoids SFU transcoding.
       // Must be applied before setLocalDescription so WebRTC uses H264.
       final preferredSdp = answer.sdp!.withPreferredVideoCodec('H264');
-
-      // Hold local candidates — setLocalDescription triggers ICE gathering
-      // which fires onIceCandidate callbacks. On Android, these fire before
-      // the answer is sent, causing the server to reject them. Queue them
-      // until after the answer arrives at the server.
-      _iceManager.holdLocalCandidates();
 
       await _peerConnection!.setLocalDescription(
         RTCSessionDescription(preferredSdp, answer.type),
@@ -913,9 +871,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
       _setState(SessionConnectionState.exchangingIce);
       _cancelNegotiationTimer();
-
-      // Release held local candidates — answer is at the server now.
-      _iceManager.releaseLocalCandidates();
     } catch (e) {
       Logger().error('$_tag Negotiation failed: $e');
       _cancelNegotiationTimer();
