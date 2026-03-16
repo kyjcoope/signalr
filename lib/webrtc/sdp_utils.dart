@@ -144,9 +144,58 @@ extension SdpUtils on String {
   /// Munge SDP for H264 compatibility if needed.
   String get withCompatibilityFixes {
     if (containsH264) {
-      return withH264ProfileFix;
+      return withH264ProfileFix.withH264FmtpFix;
     }
     return this;
+  }
+
+  /// Inject missing `a=fmtp` lines for H264 payload types.
+  ///
+  /// Some servers send H264 offers without an fmtp line (no profile-level-id).
+  /// Android's native WebRTC requires fmtp with profile-level-id to determine
+  /// H264 compatibility — without it, `createAnswer()` rejects the video
+  /// m-line entirely (m=video 0). Web/Windows are lenient and assume defaults.
+  ///
+  /// This adds a baseline profile fmtp for any H264 PT missing one.
+  String get withH264FmtpFix {
+    final lines = split(RegExp(r'\r?\n'));
+    final lineBreak = contains('\r\n') ? '\r\n' : '\n';
+    final result = <String>[];
+
+    // Find all H264 payload types
+    final h264Pts = <String>{};
+    final existingFmtpPts = <String>{};
+
+    for (final line in lines) {
+      final rtpMatch = RegExp(r'^a=rtpmap:(\d+)\s+H264/90000', caseSensitive: false)
+          .firstMatch(line);
+      if (rtpMatch != null) {
+        h264Pts.add(rtpMatch.group(1)!);
+      }
+      final fmtpMatch = RegExp(r'^a=fmtp:(\d+)\s+').firstMatch(line);
+      if (fmtpMatch != null) {
+        existingFmtpPts.add(fmtpMatch.group(1)!);
+      }
+    }
+
+    // Find H264 PTs that are missing fmtp lines
+    final missingFmtp = h264Pts.difference(existingFmtpPts);
+    if (missingFmtp.isEmpty) return this;
+
+    // Insert fmtp lines after their corresponding rtpmap lines
+    for (final line in lines) {
+      result.add(line);
+      for (final pt in missingFmtp) {
+        if (line.startsWith('a=rtpmap:$pt ') &&
+            RegExp(r'H264/90000', caseSensitive: false).hasMatch(line)) {
+          result.add(
+            'a=fmtp:$pt profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1',
+          );
+        }
+      }
+    }
+
+    return result.join(lineBreak);
   }
 
   /// Reorder video codecs to prefer [preferredCodec].
