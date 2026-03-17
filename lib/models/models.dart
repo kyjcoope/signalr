@@ -87,18 +87,17 @@ class ObjectRequest {
   Map<String, Object?> toJson() => {
     'TypeFullName': typeFullName,
     'LoadCollection': loadCollection,
-    if (whereClause != null) 'WhereClause': whereClause,
-    if (argsTypes != null) 'ArgsTypes': argsTypes,
-    if (arguments != null) 'Arguments': arguments,
-    if (displayProperties != null) 'DisplayProperties': displayProperties,
-    if (sortColumnName != null) 'SortColumnName': sortColumnName,
-    if (pageSize != null) 'PageSize': pageSize,
+    'WhereClause': whereClause,
+    'ArgsTypes': argsTypes,
+    'arguments': arguments,
+    'DisplayProperties': displayProperties,
+    'SortColumnName': sortColumnName,
+    'PageSize': pageSize,
     'PageNumber': pageNumber,
     'CountOnly': countOnly,
-    if (sort != null) 'Sort': sort,
-    if (inStatementOperator != null) 'InStatementOperator': inStatementOperator,
-    if (inStatementPropertyName != null)
-      'InStatementPropertyName': inStatementPropertyName,
-    if (inStatementValues != null) 'InStatementValues': inStatementValues,
+    'Sort': sort,
+    'InStatementOperator': inStatementOperator,
+    'InStatementPropertyName': inStatementPropertyName,
+    'InStatementValues': inStatementValues,
   };
 }

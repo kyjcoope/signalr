@@ -61,19 +61,24 @@ class AuthService {
     const cloudPayload = ObjectRequest(
       typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSCloudCamera',
       loadCollection: false,
-      pageSize: 4,
+      pageSize: 1000,
       pageNumber: 1,
-      whereClause: 'Name LIKE ?',
-      arguments: ['%adam%'],
+      // whereClause: 'Name LIKE ?',
+      // arguments: ['%adam%'],
+      displayProperties: ['GUID', 'Name', 'ClassType'],
     );
     const gatewayPayload = ObjectRequest(
       typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSGatewayCamera',
       loadCollection: false,
-      pageSize: 4,
+      pageSize: 1000,
       pageNumber: 1,
-      whereClause: 'Name LIKE ?',
-      arguments: ['%adam%'],
+      displayProperties: ['GUID', 'Name', 'ClassType'],
+      // whereClause: 'Name LIKE ?',
+      // arguments: ['%adam%'],
     );
+
+    Logger().info('Cloud payload: ${cloudPayload.toJson()}');
+    Logger().info('Gateway payload: ${gatewayPayload.toJson()}');
 
     // Fetch both camera types in parallel
     Logger().info('Fetching cloud + gateway cameras...');
