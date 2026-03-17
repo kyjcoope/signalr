@@ -809,12 +809,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       // Apply compatibility fixes
       final offerSdp = offer.sdp.withCompatibilityFixes;
 
-      // Extract per-track codecs using H264-preferred ordering
-      // (matches the preference we apply to the answer SDP)
+      // Extract per-track codecs from the same offer SDP used for negotiation
       _videoTrackCodecs.clear();
-      _videoTrackCodecs.addAll(
-        offerSdp.withPreferredVideoCodec('H264').videoCodecsPerSection,
-      );
+      _videoTrackCodecs.addAll(offerSdp.videoCodecsPerSection);
       Logger().info('$_tag Per-track codecs from SDP: $_videoTrackCodecs');
 
       await _peerConnection!.setRemoteDescription(
@@ -833,12 +830,15 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _setState(SessionConnectionState.creatingAnswer);
       final answer = await _peerConnection!.createAnswer();
 
-      // Prefer H264 — matches camera native codec, avoids SFU transcoding.
-      // Must be applied before setLocalDescription so WebRTC uses H264.
-      final preferredSdp = answer.sdp!.withPreferredVideoCodec('H264');
+      final answerSdp = answer.sdp;
+      if (answerSdp == null) {
+        throw StateError(
+          '$_tag Failed to create answer: RTCSessionDescription.sdp was null',
+        );
+      }
 
       await _peerConnection!.setLocalDescription(
-        RTCSessionDescription(preferredSdp, answer.type),
+        RTCSessionDescription(answerSdp, answer.type),
       );
 
       final finalAnswer = await _peerConnection!.getLocalDescription();

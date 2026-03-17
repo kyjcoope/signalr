@@ -38,92 +38,6 @@ extension SdpUtils on String {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Codec Preference
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /// Reorder video codecs to prefer [preferredCodec].
-  ///
-  /// Moves all payload types for [preferredCodec] (and their RTX
-  /// retransmission PTs) to the front of the video m-line.
-  /// This tells the SFU which codec we prefer to receive,
-  /// avoiding transcoding when the camera natively sends that codec.
-  String withPreferredVideoCodec(String preferredCodec) {
-    final lineBreak = contains('\r\n') ? '\r\n' : '\n';
-    final lines = split(RegExp(r'\r?\n'));
-    final result = <String>[];
-    var i = 0;
-
-    while (i < lines.length) {
-      final line = lines[i];
-      if (!line.startsWith('m=video ')) {
-        result.add(line);
-        i++;
-        continue;
-      }
-
-      // Collect all lines in this m=video section
-      final sectionStart = i;
-      var sectionEnd = i + 1;
-      while (sectionEnd < lines.length && !lines[sectionEnd].startsWith('m=')) {
-        sectionEnd++;
-      }
-      final sectionLines = lines.sublist(sectionStart, sectionEnd);
-
-      // Parse m-line: "m=video 9 UDP/TLS/RTP/SAVPF 96 97 102 ..."
-      final parts = line.split(' ');
-      if (parts.length < 4) {
-        result.addAll(sectionLines);
-        i = sectionEnd;
-        continue;
-      }
-
-      final prefix = parts.sublist(0, 3).join(' ');
-      final allPts = parts.sublist(3);
-
-      // Build PT→codec and RTX PT→source PT maps from this section
-      final ptToCodec = <String, String>{};
-      final rtxToSource = <String, String>{};
-      for (final sl in sectionLines) {
-        final rm = RegExp(r'^a=rtpmap:(\d+)\s+(\S+)').firstMatch(sl);
-        if (rm != null) {
-          ptToCodec[rm.group(1)!] = rm.group(2)!.split('/').first.toUpperCase();
-        }
-        final fm = RegExp(r'^a=fmtp:(\d+)\s+apt=(\d+)').firstMatch(sl);
-        if (fm != null) {
-          rtxToSource[fm.group(1)!] = fm.group(2)!;
-        }
-      }
-
-      // Classify each PT as preferred or other
-      final preferred = <String>[];
-      final other = <String>[];
-      final prefUpper = preferredCodec.toUpperCase();
-
-      for (final pt in allPts) {
-        final codec = ptToCodec[pt];
-        final isPreferred = codec == prefUpper;
-        final isRtxForPreferred =
-            codec == 'RTX' &&
-            rtxToSource.containsKey(pt) &&
-            ptToCodec[rtxToSource[pt]!] == prefUpper;
-
-        if (isPreferred || isRtxForPreferred) {
-          preferred.add(pt);
-        } else {
-          other.add(pt);
-        }
-      }
-
-      // Rebuild m-line with preferred codecs first
-      result.add('$prefix ${[...preferred, ...other].join(' ')}');
-      result.addAll(sectionLines.sublist(1));
-      i = sectionEnd;
-    }
-
-    return result.join(lineBreak);
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
   // SDP Parsing
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -272,39 +186,71 @@ extension SdpUtils on String {
 
   /// Inject missing `a=fmtp` lines for H264 payload types.
   ///
+  /// Scans and patches per media section (between `m=` boundaries) so each
+  /// video m-line gets its own H264 fmtp. Payload type numbers are scoped
+  /// per m-line in SDP, so global scanning would mis-inject when multiple
+  /// `m=video` sections reuse the same PT numbers.
+  ///
   /// Android's native WebRTC requires fmtp with profile-level-id to determine
   /// codec compatibility. Without it, `createAnswer()` rejects the video
   /// m-line entirely (m=video 0). Web/Windows assume baseline defaults.
   String get _withH264FmtpFix {
     final lines = split(RegExp(r'\r?\n'));
     final lineBreak = contains('\r\n') ? '\r\n' : '\n';
-
-    // Find H264 PTs and existing fmtp PTs
-    final h264Pts = <String>{};
-    final existingFmtpPts = <String>{};
-
-    for (final line in lines) {
-      final rtpMatch = RegExp(r'^a=rtpmap:(\d+)\s+H264/90000', caseSensitive: false)
-          .firstMatch(line);
-      if (rtpMatch != null) h264Pts.add(rtpMatch.group(1)!);
-
-      final fmtpMatch = RegExp(r'^a=fmtp:(\d+)\s+').firstMatch(line);
-      if (fmtpMatch != null) existingFmtpPts.add(fmtpMatch.group(1)!);
-    }
-
-    final missingFmtp = h264Pts.difference(existingFmtpPts);
-    if (missingFmtp.isEmpty) return this;
-
-    // Insert fmtp after corresponding rtpmap lines
     final result = <String>[];
+
+    // Collect lines into media sections
+    final sections = <List<String>>[];
+    var current = <String>[];
+
     for (final line in lines) {
-      result.add(line);
-      for (final pt in missingFmtp) {
-        if (line.startsWith('a=rtpmap:$pt ') &&
-            RegExp(r'H264/90000', caseSensitive: false).hasMatch(line)) {
-          result.add(
-            'a=fmtp:$pt profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1',
-          );
+      if (line.startsWith('m=') && current.isNotEmpty) {
+        sections.add(current);
+        current = <String>[];
+      }
+      current.add(line);
+    }
+    if (current.isNotEmpty) sections.add(current);
+
+    for (final section in sections) {
+      // Only patch video/audio sections that contain H264
+      final isMedia = section.first.startsWith('m=');
+      if (!isMedia) {
+        result.addAll(section);
+        continue;
+      }
+
+      // Find H264 PTs and existing fmtp PTs within this section
+      final h264Pts = <String>{};
+      final existingFmtpPts = <String>{};
+
+      for (final line in section) {
+        final rtpMatch = RegExp(
+          r'^a=rtpmap:(\d+)\s+H264/90000',
+          caseSensitive: false,
+        ).firstMatch(line);
+        if (rtpMatch != null) h264Pts.add(rtpMatch.group(1)!);
+
+        final fmtpMatch = RegExp(r'^a=fmtp:(\d+)\s+').firstMatch(line);
+        if (fmtpMatch != null) existingFmtpPts.add(fmtpMatch.group(1)!);
+      }
+
+      final missingFmtp = h264Pts.difference(existingFmtpPts);
+      if (missingFmtp.isEmpty) {
+        result.addAll(section);
+        continue;
+      }
+
+      // Insert fmtp after corresponding rtpmap lines within this section
+      for (final line in section) {
+        result.add(line);
+        for (final pt in missingFmtp) {
+          if (line.startsWith('a=rtpmap:$pt ') &&
+              RegExp(r'H264/90000', caseSensitive: false).hasMatch(line)) {
+            result.add(
+              'a=fmtp:$pt profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1',
+            );
+          }
         }
       }
     }
@@ -328,7 +274,8 @@ extension SdpUtils on String {
         if (inMediaSection && !hasRtcpMux && sectionStartIndex >= 0) {
           result.insert(sectionStartIndex + 1, 'a=rtcp-mux');
         }
-        inMediaSection = line.startsWith('m=audio') || line.startsWith('m=video');
+        inMediaSection =
+            line.startsWith('m=audio') || line.startsWith('m=video');
         hasRtcpMux = false;
         sectionStartIndex = result.length;
       }
