@@ -155,20 +155,17 @@ class IceCandidateManager {
     RTCIceCandidate candidate,
     RTCPeerConnection? pc,
   ) async {
-    // End-of-candidates: relay to the peer connection so ICE can
-    // transition to completed/failed. Queue if remote desc not set yet.
+    // End-of-candidates: do NOT relay to pc.addCandidate() — Android's
+    // native WebRTC JNI crashes with NullPointerException when sdpMid
+    // is null (which it typically is for EOC markers). The ICE stack
+    // transitions to completed/failed on its own once all candidates
+    // have been exchanged. Just complete the gathering completer.
     if ((candidate.candidate ?? '').isEmpty) {
       Logger().info(
         '$tag Received remote end-of-candidates (mid=${candidate.sdpMid})',
       );
-      if (pc == null || !_remoteDescSet) {
-        _pendingRemoteCandidates.addLast(candidate);
-        return;
-      }
-      try {
-        await pc.addCandidate(candidate);
-      } catch (e) {
-        Logger().info('$tag EOC addCandidate: $e');
+      if (_gatheringCompleter != null && !_gatheringCompleter!.isCompleted) {
+        _gatheringCompleter!.complete();
       }
       return;
     }
@@ -197,6 +194,12 @@ class IceCandidateManager {
     final futures = <Future<void>>[];
     while (_pendingRemoteCandidates.isNotEmpty) {
       final candidate = _pendingRemoteCandidates.removeFirst();
+      // Skip end-of-candidates markers — they must not be passed to
+      // pc.addCandidate() as Android's native JNI crashes on null sdpMid.
+      if ((candidate.candidate ?? '').isEmpty) {
+        Logger().info('$tag Skipping queued end-of-candidates marker');
+        continue;
+      }
       futures.add(_addCandidate(candidate, pc));
     }
     await Future.wait(futures);
