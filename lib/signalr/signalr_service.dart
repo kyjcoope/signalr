@@ -420,6 +420,13 @@ class SignalRService {
     _connectionManager = null;
     // Always reset so initService() recreates everything cleanly.
     _serviceInitialized = false;
+    // Unblock any callers stuck on `await ready` — they'll hit their
+    // catch block and clean up via the finally-block.
+    if (!_readyCompleter.isCompleted) {
+      _readyCompleter.completeError(
+        StateError('SignalR service closed while waiting for connection'),
+      );
+    }
     // Reset the readiness signal so callers that queue up during restart
     // properly wait for the next connection.
     _readyCompleter = Completer<void>();
