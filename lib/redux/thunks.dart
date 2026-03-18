@@ -287,7 +287,7 @@ ThunkAction<AppState> stopAll() {
 ThunkAction<AppState> switchVideoTrack(String slug, int trackIndex) {
   return (Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
-    if (hub.switchVideoTrack(slug, trackIndex)) {
+    if (await hub.switchVideoTrack(slug, trackIndex)) {
       syncSessionToRedux(store, slug);
     }
   };

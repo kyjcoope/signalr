@@ -329,12 +329,13 @@ class SignalRSessionHub {
 
   /// Switch the displayed video track for a camera.
   ///
-  /// Creates a new MediaStream containing only the target video track
-  /// and assigns it to the renderer. Each video m-line in the SDP
-  /// produces a separate track, so we select the track directly.
+  /// Creates a new isolated [MediaStream] containing only the target video
+  /// track and assigns it to the renderer. This handles the case where
+  /// multiple video tracks share the same underlying stream — assigning the
+  /// parent stream would render the wrong track.
   ///
   /// Returns true if the switch was successful.
-  bool switchVideoTrack(String cameraId, int trackIndex) {
+  Future<bool> switchVideoTrack(String cameraId, int trackIndex) async {
     final session = activeSessions[cameraId];
     final renderer = _renderers[cameraId];
     if (session == null || renderer == null) return false;
@@ -349,17 +350,17 @@ class SignalRSessionHub {
 
     _activeVideoTrack[cameraId] = trackIndex;
 
-    // Find the stream that contains this track, or use the first stream
+    // Create an isolated MediaStream containing only the target track.
     final targetTrack = tracks[trackIndex];
-    final ownerStream = session.remoteStreams.firstWhere(
-      (s) => s.getVideoTracks().any((t) => t.id == targetTrack.id),
-      orElse: () => session.remoteStreams.first,
+    final isolatedStream = await createLocalMediaStream(
+      'isolated_${cameraId}_$trackIndex',
     );
-    renderer.srcObject = ownerStream;
+    isolatedStream.addTrack(targetTrack);
+    renderer.srcObject = isolatedStream;
 
     final codec = session.getVideoTrackCodec(trackIndex) ?? '?';
     Logger().info(
-      'SignalRSessionHub: Switched $cameraId to video track ${trackIndex + 1}/${tracks.length} (codec=$codec, streamId=${ownerStream.id})',
+      'SignalRSessionHub: Switched $cameraId to video track ${trackIndex + 1}/${tracks.length} (codec=$codec)',
     );
     return true;
   }
@@ -394,6 +395,9 @@ class SignalRSessionHub {
 
     // Enable new track only if not muted
     tracks[trackIndex].enabled = !wasMuted;
+
+    // Cache audio state for reconnect resilience
+    session.updateAudioEnabledCache();
 
     Logger().info(
       'SignalRSessionHub: Switched $cameraId to audio track ${trackIndex + 1}/${tracks.length} (muted=$wasMuted)',
@@ -438,6 +442,12 @@ class SignalRSessionHub {
 
     final newEnabled = enable ?? !track.enabled;
     track.enabled = newEnabled;
+
+    // Cache audio state for reconnect resilience
+    if (isAudio) {
+      session?.updateAudioEnabledCache();
+    }
+
     Logger().info(
       'SignalRSessionHub: ${trackType.substring(0, 1).toUpperCase()}${trackType.substring(1)} ${newEnabled ? "enabled" : "disabled"} for $cameraId',
     );

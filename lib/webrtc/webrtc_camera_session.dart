@@ -115,6 +115,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   final List<MediaStream> _remoteStreams = [];
   final List<MediaStreamTrack> _videoTracks = [];
   final List<MediaStreamTrack> _audioTracks = [];
+
+  /// Cached audio track enabled state (by track index).
+  /// Persists across reconnects so the user's mute/unmute choice is preserved
+  /// when the peer connection is rebuilt.
+  final Map<int, bool> _audioEnabledState = {};
   final List<String> _videoTrackCodecs = [];
 
   /// All remote media streams from the camera.
@@ -143,6 +148,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   /// Number of audio tracks received.
   int get audioTrackCount => _audioTracks.length;
+
+  /// Snapshot the current audio track enabled states into the cache.
+  ///
+  /// Called by [SignalRSessionHub] after toggling or switching audio tracks
+  /// so the user's mute/unmute choice is preserved across reconnects.
+  void updateAudioEnabledCache() {
+    for (var i = 0; i < _audioTracks.length; i++) {
+      _audioEnabledState[i] = _audioTracks[i].enabled;
+    }
+  }
 
   /// Codec names per video track (parallel to videoTracks).
   List<String> get videoTrackCodecs => List.unmodifiable(_videoTrackCodecs);
@@ -817,10 +832,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         Logger().info('$_tag   codec     : $codec');
         Logger().info('$_tag   → Video track #${trackIdx + 1} added');
       } else if (track.kind == 'audio') {
-        track.enabled = false; // Default muted
+        final audioIdx = _audioTracks.length;
+        // Restore cached mute state from before reconnect, or default muted.
+        final restored = _audioEnabledState[audioIdx] ?? false;
+        track.enabled = restored;
         _audioTracks.add(track);
         Logger().info(
-          '$_tag   → Audio track #${_audioTracks.length} added (muted)',
+          '$_tag   → Audio track #${audioIdx + 1} added (enabled=$restored)',
         );
       }
 
