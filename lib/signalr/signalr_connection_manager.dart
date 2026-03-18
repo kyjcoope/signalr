@@ -183,7 +183,6 @@ class SignalRConnectionManager {
 
     if (isConnected) {
       Logger().info('SignalRConnectionManager: Already connected');
-      onConnected?.call();
       return true;
     }
 
@@ -314,9 +313,17 @@ class SignalRConnectionManager {
   // ═══════════════════════════════════════════════════════════════════════════
 
   void _startTimeout() {
-    _connectTimeout = Timer(_connectionTimeout, () {
+    _connectTimeout = Timer(_connectionTimeout, () async {
       Logger().warn('SignalRConnectionManager: Connection timeout');
       _isConnecting = false;
+      // Tear down the hung connection attempt before retrying.
+      // Without this, the late start() success fires onConnected a second
+      // time, causing a duplicate register send.
+      try {
+        await _connection?.stop();
+      } catch (_) {}
+      _connection = null;
+      _createConnection();
       _scheduleRetry();
     });
   }

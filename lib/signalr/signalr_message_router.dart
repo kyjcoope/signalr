@@ -22,6 +22,7 @@ class SignalRMessageRouter {
     required this.findPlayerForConnection,
     this.onIceServers,
     this.onClientId,
+    this.onSessionAssigned,
   });
 
   /// Find a player by session ID.
@@ -38,6 +39,10 @@ class SignalRMessageRouter {
 
   /// Called when client ID is received from registration.
   final ClientIdCallback? onClientId;
+
+  /// Called when a session is assigned to a player (for session index updates).
+  final void Function(String sessionId, VideoWebRTCPlayer player)?
+      onSessionAssigned;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Hub Method Handlers
@@ -168,10 +173,13 @@ class SignalRMessageRouter {
     final session = result['session'] as String?;
     final peer = result['peer'] as String?;
 
-    // Parse ICE servers
+    // Parse ICE servers — treat missing as empty list so session assignment
+    // always happens even if the server omits iceServers.
     final iceList = result['iceServers'] as List?;
-    if (iceList != null) {
-      final servers = iceList.map((e) => IceServerConfig.fromJson(e)).toList();
+    final servers =
+        (iceList ?? []).map((e) => IceServerConfig.fromJson(e)).toList();
+
+    if (servers.isNotEmpty) {
       Logger().info(
         'SignalRMessageRouter: Received ${servers.length} ICE servers',
       );
@@ -183,21 +191,23 @@ class SignalRMessageRouter {
         );
       }
       onIceServers?.call(servers);
+    }
 
-      // Notify the player
-      final player = findPlayerForConnection(peer);
-      if (player != null && session != null) {
-        player.sessionId = session;
-        player.onSignalRMessage(
-          SignalRMessage(
-            method: SignalRMessageType.onSignalIceServers,
-            detail: {
-              'session': session,
-              'iceServers': servers.map((e) => e.toJson()).toList(),
-            },
-          ),
-        );
-      }
+    // Always notify the player if we have a session — don't gate on
+    // iceServers presence.
+    final player = findPlayerForConnection(peer);
+    if (player != null && session != null) {
+      player.sessionId = session;
+      onSessionAssigned?.call(session, player);
+      player.onSignalRMessage(
+        SignalRMessage(
+          method: SignalRMessageType.onSignalIceServers,
+          detail: {
+            'session': session,
+            'iceServers': servers.map((e) => e.toJson()).toList(),
+          },
+        ),
+      );
     }
   }
 

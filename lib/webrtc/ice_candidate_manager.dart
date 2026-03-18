@@ -155,10 +155,21 @@ class IceCandidateManager {
     RTCIceCandidate candidate,
     RTCPeerConnection? pc,
   ) async {
+    // End-of-candidates: relay to the peer connection so ICE can
+    // transition to completed/failed. Queue if remote desc not set yet.
     if ((candidate.candidate ?? '').isEmpty) {
       Logger().info(
-        '$tag Received end-of-candidates for mid=${candidate.sdpMid}',
+        '$tag Received remote end-of-candidates (mid=${candidate.sdpMid})',
       );
+      if (pc == null || !_remoteDescSet) {
+        _pendingRemoteCandidates.addLast(candidate);
+        return;
+      }
+      try {
+        await pc.addCandidate(candidate);
+      } catch (e) {
+        Logger().info('$tag EOC addCandidate: $e');
+      }
       return;
     }
 

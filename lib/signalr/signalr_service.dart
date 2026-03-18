@@ -53,6 +53,7 @@ class SignalRService {
 
   final List<VideoWebRTCPlayer> _players = [];
   final Map<String, VideoWebRTCPlayer> _playersByDevice = {};
+  final Map<String, VideoWebRTCPlayer> _playersBySession = {};
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Getters
@@ -92,6 +93,7 @@ class SignalRService {
       findPlayerForConnection: _findPlayerForConnection,
       onIceServers: (servers) => iceServers = servers,
       onClientId: (id) => _signalRClientId = id,
+      onSessionAssigned: updateSessionIndex,
     );
 
     // Create connection manager
@@ -180,10 +182,14 @@ class SignalRService {
 
   VideoWebRTCPlayer? _findPlayerForConnection(String? peer) {
     if (peer != null) {
-      final player = findPlayerByDevice(peer);
-      if (player != null) return player;
+      return findPlayerByDevice(peer);
     }
-    return _players.where((p) => p.sessionId == null).firstOrNull;
+    // Don't blindly grab the first null-session player — in multi-camera
+    // bursts that can bind the session to the wrong camera.
+    Logger().warn(
+      'SignalRService: Connect response missing peer — cannot route',
+    );
+    return null;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -350,17 +356,25 @@ class SignalRService {
   void unregisterPlayer(VideoWebRTCPlayer player) {
     _players.removeWhere((p) => p.playerId == player.playerId);
     _playersByDevice.remove(player.deviceId);
+    if (player.sessionId != null) {
+      _playersBySession.remove(player.sessionId);
+    }
     Logger().info(
       'SignalRService: Unregistered player. Remaining: ${_players.length}',
     );
   }
 
-  /// Find a player by session ID.
+  /// Update the session index after the message router assigns a sessionId.
   ///
-  /// Uses linear scan because sessionId is assigned after registration
-  /// by the message router, so a pre-built index would be stale.
+  /// Called by [SignalRMessageRouter._handleConnectResponse] so the
+  /// [findPlayerBySession] lookup stays O(1).
+  void updateSessionIndex(String sessionId, VideoWebRTCPlayer player) {
+    _playersBySession[sessionId] = player;
+  }
+
+  /// Find a player by session ID (O(1) indexed lookup).
   VideoWebRTCPlayer? findPlayerBySession(String sessionId) =>
-      _players.where((p) => p.sessionId == sessionId).firstOrNull;
+      _playersBySession[sessionId];
 
   /// Find a player by device ID.
   VideoWebRTCPlayer? findPlayerByDevice(String deviceId) =>
@@ -377,13 +391,15 @@ class SignalRService {
     if (closeAllSessions) {
       _players.clear();
       _playersByDevice.clear();
-      _serviceInitialized = false;
+      _playersBySession.clear();
+      _messageRouter = null;
     }
 
     await _connectionManager?.dispose();
-    if (closeAllSessions) {
-      _connectionManager = null;
-      _messageRouter = null;
-    }
+    // Always null out the disposed manager — calling methods on a disposed
+    // manager silently suppresses reconnect. Recreated by initService().
+    _connectionManager = null;
+    // Always reset so initService() recreates everything cleanly.
+    _serviceInitialized = false;
   }
 }
