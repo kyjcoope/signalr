@@ -96,6 +96,7 @@ class SignalRSessionHub {
   /// Initialize the hub with SignalR URL and authentication.
   ///
   /// This should be called once at app startup after user authentication.
+  /// Camera requests that arrive before this call will block until it completes.
   Future<void> initialize(String signalRUrl, AuthService authService) async {
     if (_initialized) {
       Logger().info('SignalRSessionHub: Already initialized');
@@ -104,8 +105,13 @@ class SignalRSessionHub {
 
     _authService = authService;
     _signalRService = SignalRService.instance;
-    await _signalRService!.initService(signalRUrl);
     _initialized = true;
+
+    // initService starts the connection; the service's ready future
+    // will complete once the transport is up. We don't await ready here
+    // so that initialize() returns quickly and camera requests queue
+    // via _signalRService.ready.
+    await _signalRService!.initService(signalRUrl);
 
     Logger().info('SignalRSessionHub: Initialized');
   }
@@ -118,9 +124,16 @@ class SignalRSessionHub {
   ///
   /// Automatically creates and initializes renderer, and wires it to receive
   /// tracks. Returns existing session if already connected.
+  ///
+  /// If SignalR is not yet connected, this call **blocks** until the transport
+  /// is ready rather than returning null. This allows the UI to request video
+  /// before the signaling layer finishes initialization. If the user navigates
+  /// away while waiting, calling [disconnectCamera] marks the camera for
+  /// deferred disconnect (via [_pendingDisconnects]) and the finally-block
+  /// auto-cleans up.
   Future<WebRtcCameraSession?> connectToCamera(String cameraId) async {
-    if (!_initialized || _signalRService == null) {
-      Logger().warn('SignalRSessionHub: Not initialized');
+    if (_signalRService == null) {
+      Logger().warn('SignalRSessionHub: Not initialized — cannot connect');
       return null;
     }
 
@@ -142,6 +155,16 @@ class SignalRSessionHub {
     _connectingCameras.add(cameraId);
 
     try {
+      // Wait for SignalR transport to be connected before creating the
+      // session. This defers early requests instead of silently failing.
+      Logger().info(
+        'SignalRSessionHub: Waiting for SignalR readiness ($cameraId)',
+      );
+      await _signalRService!.ready;
+      Logger().info(
+        'SignalRSessionHub: SignalR ready — creating session for $cameraId',
+      );
+
       // Create new session (renderer is created lazily on first track)
       final session = WebRtcCameraSession(
         cameraId: cameraId,

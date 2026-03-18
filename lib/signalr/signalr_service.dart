@@ -44,6 +44,17 @@ class SignalRService {
   bool _serviceInitialized = false;
   String _signalRClientId = '';
 
+  /// Completes when the SignalR transport connects and registration succeeds.
+  /// `connectToCamera` callers await this so early requests are deferred
+  /// instead of silently failing.
+  Completer<void> _readyCompleter = Completer<void>();
+
+  /// A future that completes when the service is connected and ready.
+  ///
+  /// Callers can `await` this to defer work until SignalR is available.
+  /// Completes immediately if already connected.
+  Future<void> get ready => _readyCompleter.future;
+
   /// ICE server configuration received from the signaling server.
   List<IceServerConfig> iceServers = [];
 
@@ -123,6 +134,9 @@ class SignalRService {
 
   void _onConnected() {
     Logger().info('SignalRService: Connected');
+    if (!_readyCompleter.isCompleted) {
+      _readyCompleter.complete();
+    }
     _sendRegisterRequest();
   }
 
@@ -139,6 +153,11 @@ class SignalRService {
 
   void _onReconnected(String? connectionId) {
     Logger().info('SignalRService: Reconnected: $connectionId');
+    // Complete the readiness signal for any callers that queued up
+    // during the outage.
+    if (!_readyCompleter.isCompleted) {
+      _readyCompleter.complete();
+    }
     // Re-bind message handlers — critical when fallback reconnect
     // creates a brand-new HubConnection.
     _bindMessageHandlers();
@@ -401,5 +420,8 @@ class SignalRService {
     _connectionManager = null;
     // Always reset so initService() recreates everything cleanly.
     _serviceInitialized = false;
+    // Reset the readiness signal so callers that queue up during restart
+    // properly wait for the next connection.
+    _readyCompleter = Completer<void>();
   }
 }
