@@ -62,8 +62,10 @@ class SignalRMessageRouter {
 
       if (parsed.isRequest) {
         _handleRequestMessage(parsed);
-      } else if (parsed.isResponse) {
-        _handleResponseMessage(parsed);
+      } else if (parsed.isSuccessResponse) {
+        _handleSuccessResponse(parsed);
+      } else if (parsed.isErrorResponse) {
+        _handleErrorResponse(parsed);
       }
     } catch (e) {
       Logger().error('SignalRMessageRouter: Parse error: $e');
@@ -134,7 +136,7 @@ class SignalRMessageRouter {
     }
   }
 
-  void _handleResponseMessage(Map<String, dynamic> message) {
+  void _handleSuccessResponse(Map<String, dynamic> message) {
     switch (message.id) {
       case '1': // Register response
         _handleRegisterResponse(message);
@@ -206,6 +208,45 @@ class SignalRMessageRouter {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // Error Handlers
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Handle a JSON-RPC error response (top-level `error` field, no `method`).
+  void _handleErrorResponse(Map<String, dynamic> message) {
+    final error = ErrorMessage.fromJson(message);
+    Logger().error(
+      'SignalRMessageRouter: Error response: '
+      'code=${error.code}, message="${error.message}", peer=${error.peer}',
+    );
+    _notifyPlayerOfError(error);
+  }
+
+  /// Handle a JSON-RPC request with method="error".
+  void _handleSignalError(Map<String, dynamic> message) {
+    final error = ErrorMessage.fromJson(message);
+    Logger().error(
+      'SignalRMessageRouter: Signal error: '
+      'code=${error.code}, message="${error.message}", session=${error.session}',
+    );
+    _notifyPlayerOfError(error);
+  }
+
+  /// Notify the appropriate player of an error.
+  ///
+  /// Looks up the player by session first, then by peer (device) ID.
+  void _notifyPlayerOfError(ErrorMessage error) {
+    VideoWebRTCPlayer? player;
+    if (error.session != null) {
+      player = findPlayerBySession(error.session!);
+    }
+    player ??= error.peer != null ? findPlayerByDevice(error.peer!) : null;
+
+    player?.onSignalRMessage(
+      SignalRMessage(method: SignalRMessageType.onSignalError, detail: error),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Request Handlers
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -253,22 +294,5 @@ class SignalRMessageRouter {
         },
       ),
     );
-  }
-
-  void _handleSignalError(Map<String, dynamic> message) {
-    final session = message.param<String>('session');
-    final error = ErrorMessage.fromJson(message);
-    Logger().error(
-      'SignalRMessageRouter: Signal error: code=${error.code}, '
-      'message="${error.message}", session=$session',
-    );
-    if (session != null) {
-      findPlayerBySession(session)?.onSignalRMessage(
-        SignalRMessage(
-          method: SignalRMessageType.onSignalError,
-          detail: message,
-        ),
-      );
-    }
   }
 }

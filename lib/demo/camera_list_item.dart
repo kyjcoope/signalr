@@ -26,6 +26,7 @@ class CameraListItem extends StatelessWidget {
     this.videoTrackCount = 0,
     this.activeVideoTrack = 0,
     this.onSwitchTrack,
+    this.errorMessage,
   });
 
   final String cameraId;
@@ -47,6 +48,7 @@ class CameraListItem extends StatelessWidget {
   final int videoTrackCount;
   final int activeVideoTrack;
   final void Function(int trackIndex)? onSwitchTrack;
+  final String? errorMessage;
 
   static const double _videoWidth = 320;
   static const double _videoHeight = 180;
@@ -316,6 +318,12 @@ class CameraListItem extends StatelessWidget {
   }
 
   Widget _statusChip() {
+    if (errorMessage != null) {
+      return Tooltip(
+        message: errorMessage!,
+        child: _chip(errorMessage!, Colors.red, Icons.error_outline),
+      );
+    }
     if (isWorking) {
       return _chip('Working', Colors.green, Icons.check_circle);
     }

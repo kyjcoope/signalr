@@ -79,6 +79,12 @@ extension JsonRpcParsing on Map<String, dynamic> {
   bool get isResponse =>
       (containsKey('result') || containsKey('error')) && !containsKey('method');
 
+  /// Check if this is a success response (has result, no error).
+  bool get isSuccessResponse => containsKey('result') && !containsKey('method');
+
+  /// Check if this is an error response (has error, no method).
+  bool get isErrorResponse => containsKey('error') && !containsKey('method');
+
   /// Get the method name (for requests/notifications).
   String? get method => this['method'] as String?;
 
@@ -88,8 +94,11 @@ extension JsonRpcParsing on Map<String, dynamic> {
   /// Get the params (for requests/notifications).
   Map<String, dynamic>? get params => this['params'] as Map<String, dynamic>?;
 
-  /// Get the result (for responses).
+  /// Get the result (for success responses).
   Map<String, dynamic>? get result => this['result'] as Map<String, dynamic>?;
+
+  /// Get the error object (for error responses).
+  Map<String, dynamic>? get error => this['error'] as Map<String, dynamic>?;
 
   /// Get nested param value safely.
   T? param<T>(String key) => params?[key] as T?;

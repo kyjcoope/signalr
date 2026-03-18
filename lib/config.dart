@@ -7,7 +7,7 @@ enum Environment {
   ),
   qa(
     url: 'jci-osp-api-gateway-qa.nonprod.highspansecurity.com',
-    username: 'edgecity.JCI.COM',
+    username: 'HIGHSECURITY.JCI.COM',
     password: 'Highspan@2026',
   );
 

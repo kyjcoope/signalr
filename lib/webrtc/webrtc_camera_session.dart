@@ -7,6 +7,7 @@ import '../signalr/signalr_messages.dart';
 import '../signalr/signalr_service.dart';
 import '../utils/logger.dart';
 import 'codec_detector.dart';
+import 'connection_error.dart';
 import 'ice_candidate_manager.dart';
 import 'peer_connection_factory.dart';
 import 'session_state.dart';
@@ -169,6 +170,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   /// Get the current connection state.
   SessionConnectionState get state => _state;
 
+  /// The reason for the most recent failure, or `null` if healthy.
+  ///
+  /// Set whenever the session transitions to [SessionConnectionState.failed].
+  /// Cleared on connect/reconnect. Read by `syncSessionToRedux` to expose
+  /// the error to the UI layer.
+  ConnectionError? lastError;
+
   String get _tag => '[$cameraId]';
 
   /// Get the SignalR service.
@@ -195,6 +203,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     onStateChanged?.call(newState);
   }
 
+  /// Transition to [SessionConnectionState.failed] with a specific error.
+  void _fail(ConnectionError error) {
+    lastError = error;
+    Logger().error('$_tag Failed: ${error.displayMessage}');
+    _setState(SessionConnectionState.failed);
+  }
+
   void _initManagers() {
     _iceManager = IceCandidateManager(
       tag: _tag,
@@ -211,7 +226,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _timers = SessionTimers(
       tag: _tag,
       negotiationDuration: negotiationTimeout,
-      onNegotiationTimeout: () => _setState(SessionConnectionState.failed),
+      onNegotiationTimeout: () => _fail(ConnectionError.negotiationTimeout),
       onConnectTimeout: () {
         // Send disconnect for the stale session so the server cleans up
         // (prevents error 101: Active Session Limit Exceeded)
@@ -226,7 +241,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
               );
         }
         _signalRService.unregisterPlayer(this);
-        _setState(SessionConnectionState.failed);
+        _fail(ConnectionError.connectTimeout);
       },
     );
   }
@@ -266,32 +281,29 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         }
       case SignalRMessageType.onSignalTimeout:
         Logger().warn('$_tag SignalR connection timeout');
-        _setState(SessionConnectionState.failed);
+        _fail(ConnectionError.connectTimeout);
       case SignalRMessageType.onSignalError:
         _handleError(message.detail);
     }
   }
 
-  /// Handle a signaling error with structured parsing.
+  /// Handle a signaling error.
   void _handleError(dynamic detail) {
-    final error = ErrorMessage.fromJson(detail as Map<String, dynamic>? ?? {});
+    final error = detail as ErrorMessage;
+    final connectionError = ConnectionError.fromServerCode(error.code);
+
     Logger().error(
       '$_tag SignalR error: code=${error.code}, message="${error.message}"',
     );
 
-    switch (error.code) {
-      case 100: // Session Already Exist — stale session on the server
+    switch (connectionError) {
+      case ConnectionError.sessionAlreadyExists:
         _recoverFromSessionAlreadyExists();
-      case 101: // Active Session Limit Exceeded
+      case ConnectionError.sessionLimitExceeded:
         _recoverFromSessionLimitExceeded();
-      case 201: // WebRTC Session Error
-        Logger().error('$_tag WebRTC session error — marking as failed');
-        _sessionId = null;
-        _setState(SessionConnectionState.failed);
       default:
-        Logger().warn('$_tag Unhandled error code: ${error.code}');
         _sessionId = null;
-        _setState(SessionConnectionState.failed);
+        _fail(connectionError);
     }
   }
 
@@ -327,7 +339,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       Logger().info('$_tag Recovery: connect request sent, awaiting invite');
     } catch (e) {
       Logger().error('$_tag Recovery connect failed: $e');
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.sessionAlreadyExists);
     }
   }
 
@@ -364,7 +376,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       Logger().info('$_tag Retry after session limit: connect request sent');
     } catch (e) {
       Logger().error('$_tag Retry after session limit failed: $e');
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.sessionLimitExceeded);
     }
   }
 
@@ -426,7 +438,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
           Logger().error(
             '$_tag Timed out waiting for peer connection to be ready while handling invite',
           );
-          _setState(SessionConnectionState.failed);
+          _fail(ConnectionError.connectTimeout);
           return;
         }
       }
@@ -487,7 +499,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       }
     } catch (e) {
       Logger().error('$_tag Error handling invite: $e');
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.negotiationFailed);
     }
   }
 
@@ -517,7 +529,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       await _negotiate(offer);
     } catch (e) {
       Logger().error('$_tag Restart failed: $e');
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.negotiationFailed);
     }
   }
 
@@ -874,7 +886,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     } catch (e) {
       Logger().error('$_tag Negotiation failed: $e');
       _cancelNegotiationTimer();
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.negotiationFailed);
     } finally {
       _isNegotiating = false;
     }
@@ -1059,7 +1071,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   Future<void> _attemptReconnect() async {
     if (!restartOnDisconnect) {
       Logger().warn('$_tag Reconnect disabled');
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.reconnectFailed);
       return;
     }
 
@@ -1072,7 +1084,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       Logger().error(
         '$_tag Max reconnect attempts reached ($_maxIceRestartAttempts)',
       );
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.reconnectFailed);
       return;
     }
 
@@ -1119,7 +1131,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       Logger().info('$_tag Reconnect request sent, awaiting invite');
     } catch (e) {
       Logger().error('$_tag Reconnect failed: $e');
-      _setState(SessionConnectionState.failed);
+      _fail(ConnectionError.reconnectFailed);
     }
   }
 
@@ -1168,6 +1180,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _connectStartedAt = null;
     _inviteReceivedAt = null;
     _answerSentAt = null;
+    lastError = null;
     _remoteStreams.clear();
     _videoTracks.clear();
     _audioTracks.clear();

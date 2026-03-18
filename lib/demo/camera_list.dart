@@ -232,6 +232,7 @@ class CameraListState extends State<StatefulWidget> {
       activeVideoTrack: session?.activeVideoTrack ?? 0,
       onSwitchTrack: (index) =>
           store.dispatch(thunks.switchVideoTrack(slug, index)),
+      errorMessage: session?.error?.displayMessage,
     );
   }
 }

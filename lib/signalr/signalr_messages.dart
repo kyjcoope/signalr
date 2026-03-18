@@ -279,36 +279,60 @@ class TrickleMessage implements SignalRTypedMessage {
 // Error Messages
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Error notification message.
+/// Error message parsed from any server error format.
+///
+/// The server sends errors in three formats, all handled by [fromJson]:
+///
+/// | Format | Shape |
+/// |--------|-------|
+/// | Response error | `{"error": {"code":480, "message":"...", "peer":"..."}, "id":"2"}` |
+/// | Request error (nested) | `{"method":"error", "params": {"error": {"code":100, ...}}}` |
+/// | Request error (flat) | `{"method":"error", "params": {"code":100, ...}}` |
 class ErrorMessage implements SignalRTypedMessage {
   ErrorMessage({
     required this.code,
     required this.message,
     this.session,
+    this.peer,
     this.id = '',
   });
 
   factory ErrorMessage.fromJson(Map<String, dynamic> json) {
-    final params = json['params'] as Map<String, dynamic>? ?? {};
+    // Format 1: JSON-RPC error response — top-level "error" object
+    final topError = json['error'] as Map<String, dynamic>?;
+    if (topError != null && !json.containsKey('method')) {
+      return ErrorMessage(
+        code: topError['code'] as int? ?? 0,
+        message: topError['message'] as String? ?? '',
+        peer: topError['peer'] as String?,
+        id: json['id']?.toString() ?? '',
+      );
+    }
 
-    // Server sends errors in two formats:
-    // 1. Nested: params.error.{code, message, peer}
-    // 2. Flat:   params.{code, message}
+    // Format 2 & 3: JSON-RPC request/notification with params
+    final params = json['params'] as Map<String, dynamic>? ?? {};
     final errorObj = params['error'] as Map<String, dynamic>?;
+
     final int code;
     final String message;
+    final String? peer;
     if (errorObj != null) {
+      // Format 2: nested — params.error.{code, message, peer}
       code = errorObj['code'] as int? ?? 0;
       message = errorObj['message'] as String? ?? '';
+      peer = errorObj['peer'] as String?;
     } else {
+      // Format 3: flat — params.{code, message}
       code = params['code'] as int? ?? 0;
       message = params['message'] as String? ?? '';
+      peer = params['peer'] as String?;
     }
 
     return ErrorMessage(
       code: code,
       message: message,
       session: params['session'] as String?,
+      peer: peer,
       id: json['id']?.toString() ?? '',
     );
   }
@@ -316,6 +340,7 @@ class ErrorMessage implements SignalRTypedMessage {
   final int code;
   final String message;
   final String? session;
+  final String? peer;
 
   @override
   final String id;
@@ -330,6 +355,7 @@ class ErrorMessage implements SignalRTypedMessage {
       'code': code,
       'message': message,
       if (session != null) 'session': session,
+      if (peer != null) 'peer': peer,
     },
   );
 }

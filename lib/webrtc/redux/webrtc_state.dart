@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import '../connection_error.dart';
 import '../webrtc_stats_monitor.dart';
 
 enum WebRtcConnectionState {
@@ -42,6 +43,7 @@ class TrackInfo extends Equatable {
 /// WebRtcCameraSession. The hub remains the source of truth for those.
 class WebRtcSessionState extends Equatable {
   final WebRtcConnectionState connectionState;
+  final ConnectionError? error;
   final int? textureId;
   final List<TrackInfo> videoTracks;
   final List<TrackInfo> audioTracks;
@@ -51,6 +53,7 @@ class WebRtcSessionState extends Equatable {
 
   const WebRtcSessionState({
     this.connectionState = WebRtcConnectionState.sessionDisconnected,
+    this.error,
     this.textureId,
     this.videoTracks = const [],
     this.audioTracks = const [],
@@ -61,6 +64,8 @@ class WebRtcSessionState extends Equatable {
 
   WebRtcSessionState copyWith({
     WebRtcConnectionState? connectionState,
+    ConnectionError? error,
+    bool clearError = false,
     int? textureId,
     List<TrackInfo>? videoTracks,
     List<TrackInfo>? audioTracks,
@@ -70,6 +75,7 @@ class WebRtcSessionState extends Equatable {
   }) {
     return WebRtcSessionState(
       connectionState: connectionState ?? this.connectionState,
+      error: clearError ? null : (error ?? this.error),
       textureId: textureId ?? this.textureId,
       videoTracks: videoTracks ?? this.videoTracks,
       audioTracks: audioTracks ?? this.audioTracks,
@@ -82,6 +88,7 @@ class WebRtcSessionState extends Equatable {
   @override
   List<Object?> get props => [
     connectionState,
+    error,
     textureId,
     videoTracks,
     audioTracks,

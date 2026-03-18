@@ -61,7 +61,7 @@ class AuthService {
     const cloudPayload = ObjectRequest(
       typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSCloudCamera',
       loadCollection: false,
-      pageSize: 1000,
+      pageSize: 2000,
       pageNumber: 1,
       // whereClause: 'Name LIKE ?',
       // arguments: ['%adam%'],
@@ -70,7 +70,7 @@ class AuthService {
     const gatewayPayload = ObjectRequest(
       typeFullName: 'Jci.Osp.Objects.OspVideo.OSPVMSGatewayCamera',
       loadCollection: false,
-      pageSize: 1000,
+      pageSize: 2000,
       pageNumber: 1,
       displayProperties: ['GUID', 'Name', 'ClassType'],
       // whereClause: 'Name LIKE ?',

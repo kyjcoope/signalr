@@ -43,6 +43,7 @@ void syncSessionToRedux(Store<AppState> store, String slug) {
 
   final snapshot = WebRtcSessionState(
     connectionState: _mapConnectionState(session.state),
+    error: session.lastError,
     textureId: hub.getTextureId(slug),
     videoTracks: videoTracks,
     audioTracks: audioTracks,
