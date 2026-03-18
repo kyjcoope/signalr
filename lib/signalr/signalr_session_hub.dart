@@ -162,6 +162,12 @@ class SignalRSessionHub {
           try {
             final renderer = RTCVideoRenderer();
             await renderer.initialize();
+            // User may have disconnected while we were initializing
+            // the native EGL/Metal texture — dispose to prevent leak.
+            if (!activeSessions.containsKey(cameraId)) {
+              await renderer.dispose();
+              return;
+            }
             _renderers[cameraId] = renderer;
             renderer.srcObject = event.streams[0];
             Logger().info(

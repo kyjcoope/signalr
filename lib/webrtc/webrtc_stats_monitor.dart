@@ -129,6 +129,7 @@ class WebRtcStatsMonitor {
   DateTime? _lastPollTime;
   int? _lastFramesDecoded;
   int? _lastVidRxBytes, _lastVidTxBytes, _lastAudRxBytes, _lastAudTxBytes;
+  bool _pollInProgress = false;
 
   /// Set the debug‑log tag.
   void setTag(String tag) => _tag = tag;
@@ -154,6 +155,7 @@ class WebRtcStatsMonitor {
     _lastVidTxBytes = null;
     _lastAudRxBytes = null;
     _lastAudTxBytes = null;
+    _pollInProgress = false;
     statsNotifier.value = WebRtcVideoStats.empty;
   }
 
@@ -165,6 +167,10 @@ class WebRtcStatsMonitor {
   // ═══════════════════════════════════════════════════════════════════════════
 
   Future<void> _poll(RTCPeerConnection pc) async {
+    // Guard: skip if a previous poll is still in progress (can happen on
+    // slower devices where getStats() takes longer than the timer interval).
+    if (_pollInProgress) return;
+    _pollInProgress = true;
     try {
       final reports = await pc.getStats();
       if (reports.isEmpty) return;
@@ -185,8 +191,11 @@ class WebRtcStatsMonitor {
 
       // Update _lastVidRxBytes AFTER logging so dKbps sees the correct delta.
       _lastVidRxBytes = vidRxBytes ?? _lastVidRxBytes;
-    } catch (_) {
-      // Peer connection may have been disposed — silently ignore.
+    } catch (e) {
+      // Peer connection may have been disposed — log and move on.
+      Logger().warn('$_tag Stats poll error: $e');
+    } finally {
+      _pollInProgress = false;
     }
   }
 

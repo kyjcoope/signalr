@@ -176,10 +176,17 @@ class IceServerConfig {
   IceServerConfig({required this.urls, this.credential, this.username});
 
   factory IceServerConfig.fromJson(dynamic json) => IceServerConfig(
-    urls: (json['urls'] as List?)?.map((r) => r.toString()).toList() ?? [],
+    urls: _parseUrls(json['urls']),
     credential: json['credential'] as String?,
     username: json['username'] as String?,
   );
+
+  /// Parse `urls` which may be a single string or a list (per WebRTC spec).
+  static List<String> _parseUrls(dynamic urls) {
+    if (urls is String) return [urls];
+    if (urls is List) return urls.map((r) => r.toString()).toList();
+    return [];
+  }
 
   final List<String> urls;
   final String? credential;

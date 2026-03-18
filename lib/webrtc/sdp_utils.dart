@@ -258,7 +258,14 @@ extension SdpUtils on String {
     return result.join(lineBreak);
   }
 
-  /// Ensure all audio/video m-lines have `a=rtcp-mux`.
+  /// Ensure all audio/video m-lines have `a=rtcp-mux` in the offer.
+  ///
+  /// Per RFC 8035, both sides must agree on rtcp-mux. Most modern WebRTC
+  /// implementations require it; missing it from the offer causes
+  /// `createAnswer()` to reject the m-line on strict implementations.
+  ///
+  /// This is only applied to incoming offers via [withCompatibilityFixes],
+  /// never to outgoing answers — the answerer will naturally mirror it.
   String get _withRtcpMux {
     final lines = split(RegExp(r'\r?\n'));
     final lineBreak = contains('\r\n') ? '\r\n' : '\n';

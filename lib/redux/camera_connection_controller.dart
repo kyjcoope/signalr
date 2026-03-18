@@ -171,7 +171,7 @@ class CameraConnectionController {
     session.onVideoCodecResolved = (_) => syncSessionToRedux(store, slug);
     session.onLocalIceCandidate = () => syncSessionToRedux(store, slug);
     session.onRemoteIceCandidate = () => syncSessionToRedux(store, slug);
-    session.onVideoStats = (_) => syncSessionToRedux(store, slug);
+    session.statsNotifier.addListener(() => syncSessionToRedux(store, slug));
 
     Logger().info('[ConnCtrl] $slug: connected and wired');
   }

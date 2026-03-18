@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import '../signalr/signalr_messages.dart';
 
 /// Interface for WebRTC players that receive SignalR messages.
@@ -18,7 +16,4 @@ abstract class VideoWebRTCPlayer {
 
   /// Handle incoming SignalR message.
   void onSignalRMessage(SignalRMessage message);
-
-  /// Subscription to the SignalR message stream.
-  StreamSubscription<SignalRMessage>? subscription;
 }

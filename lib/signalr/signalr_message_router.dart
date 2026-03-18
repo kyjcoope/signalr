@@ -175,18 +175,12 @@ class SignalRMessageRouter {
       Logger().info(
         'SignalRMessageRouter: Received ${servers.length} ICE servers',
       );
-      // DEBUG: Log credential details
       for (int i = 0; i < servers.length; i++) {
         final s = servers[i];
-        final hasCredentials = s.credential != null && s.username != null;
         Logger().info(
-          'SignalRMessageRouter: 🔍 Server[$i] urls=${s.urls.length}, hasCredentials=$hasCredentials',
+          'SignalRMessageRouter: Server[$i] urls=${s.urls.length}, '
+          'hasCredentials=${s.credential != null && s.username != null}',
         );
-        if (hasCredentials) {
-          Logger().info(
-            'SignalRMessageRouter: 🔍   credential=${s.credential?.substring(0, 8)}..., username=${s.username?.substring(0, 10)}...',
-          );
-        }
       }
       onIceServers?.call(servers);
 

@@ -45,6 +45,7 @@ class SignalRConnectionManager {
   int _retryCount = 0;
   bool _isConnecting = false;
   bool _disposed = false;
+  bool _manualStop = false;
   int _closeRetryCount = 0;
 
   static const Duration _connectionTimeout = Duration(seconds: 15);
@@ -70,18 +71,30 @@ class SignalRConnectionManager {
   bool get isConnecting => _isConnecting;
 
   /// Start the connection.
-  Future<bool> connect() async {
+  ///
+  /// [onConnectionCreated] is called after the hub connection object exists
+  /// but before `start()` — this is the right moment to bind message handlers
+  /// so they're active before any server responses arrive.
+  Future<bool> connect({VoidCallback? onConnectionCreated}) async {
+    _manualStop = false;
     _createConnection();
+    onConnectionCreated?.call();
     return _startConnection();
   }
 
-  /// Stop the connection.
+  /// Stop the connection intentionally.
+  ///
+  /// Sets [_manualStop] to prevent the fallback reconnect loop from
+  /// firing when the close event arrives.
   Future<void> disconnect() async {
+    _manualStop = true;
     _cancelTimers();
     _retryCount = 0;
+    _closeRetryCount = 0;
     _isConnecting = false;
 
-    if (_connection?.state == HubConnectionState.Connected) {
+    // Stop connection regardless of current state (Connected, Connecting, etc.)
+    if (_connection != null) {
       try {
         await _connection?.stop();
         Logger().info('SignalRConnectionManager: Disconnected');
@@ -233,9 +246,11 @@ class SignalRConnectionManager {
     );
     onDisconnected?.call(error);
 
-    // The built-in withAutomaticReconnect has given up.
-    // Start our own infinite retry loop with a fresh connection.
-    _reconnectAfterClose();
+    // Only start fallback reconnect if the close was NOT intentional.
+    // Manual disconnect sets _manualStop = true to suppress this.
+    if (!_manualStop) {
+      _reconnectAfterClose();
+    }
   }
 
   /// Retry connection indefinitely after the built-in reconnect gives up.
@@ -250,13 +265,15 @@ class SignalRConnectionManager {
       5 * math.pow(2, _closeRetryCount - 1).toInt(),
       _maxCloseRetryDelaySecs,
     );
+    // Randomize delay to prevent thundering herd when server drops many clients
+    final jitterMs = math.Random().nextInt(1000);
 
     Logger().info(
-      'SignalRConnectionManager: Fallback retry #$_closeRetryCount in ${delaySecs}s',
+      'SignalRConnectionManager: Fallback retry #$_closeRetryCount in ${delaySecs}s (+${jitterMs}ms jitter)',
     );
 
     _retryTimer?.cancel();
-    _retryTimer = Timer(Duration(seconds: delaySecs), () async {
+    _retryTimer = Timer(Duration(seconds: delaySecs, milliseconds: jitterMs), () async {
       if (_disposed) return;
 
       // Destroy the dead connection and create a fresh one

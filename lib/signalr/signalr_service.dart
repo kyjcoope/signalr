@@ -17,8 +17,7 @@ import 'signalr_session_hub.dart';
 /// delegating connection management to [SignalRConnectionManager]
 /// and message routing to [SignalRMessageRouter].
 class SignalRService {
-  SignalRService._()
-    : _messageController = StreamController<SignalRMessage>.broadcast();
+  SignalRService._();
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Singleton
@@ -53,10 +52,7 @@ class SignalRService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   final List<VideoWebRTCPlayer> _players = [];
-  final StreamController<SignalRMessage> _messageController;
-
-  /// Stream of SignalR messages for players to subscribe to.
-  Stream<SignalRMessage> get messageStream => _messageController.stream;
+  final Map<String, VideoWebRTCPlayer> _playersByDevice = {};
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Getters
@@ -112,10 +108,11 @@ class SignalRService {
   }
 
   Future<void> _connect() async {
-    final connected = await _connectionManager?.connect() ?? false;
-    if (connected) {
-      _bindMessageHandlers();
-    }
+    // Bind handlers AFTER the connection object is created but BEFORE start()
+    // so ReceivedSignalingMessage is registered before any server responses.
+    await _connectionManager?.connect(
+      onConnectionCreated: _bindMessageHandlers,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -193,11 +190,11 @@ class SignalRService {
   // Sending Messages
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Gate that blocks low-priority sends (ICE trickle) while a high-priority
-  /// send (SDP answer) is in-flight. This prevents the WebSocket invoke queue
-  /// from delaying critical answer messages behind dozens of fire-and-forget
-  /// ICE candidate sends.
-  Completer<void>? _answerGate;
+  /// Per-session gates that block low-priority sends (ICE trickle) while a
+  /// high-priority send (SDP answer) is in-flight for the SAME session.
+  /// This prevents the WebSocket invoke queue from delaying critical answer
+  /// messages behind dozens of fire-and-forget ICE candidate sends.
+  final Map<String, Completer<void>> _answerGates = {};
 
   Future<void> _sendMessage(Map<String, dynamic> data) async {
     if (!isPeerReady) {
@@ -218,10 +215,21 @@ class SignalRService {
   }
 
   /// Connect to a camera device.
+  ///
+  /// Returns false if the connection is not ready or the send fails.
   Future<bool> connectConsumerSession(String deviceId) async {
-    final message = ConnectRequest(deviceId: deviceId);
-    await _sendMessage(message.toJson());
-    return true;
+    if (!isPeerReady) {
+      Logger().warn('SignalRService: Cannot connect - not connected');
+      return false;
+    }
+    try {
+      final message = ConnectRequest(deviceId: deviceId);
+      await _connectionManager?.invoke('SendMessage', args: [message.toJson()]);
+      return true;
+    } catch (e) {
+      Logger().error('SignalRService: Connect request failed for $deviceId: $e');
+      return false;
+    }
   }
 
   /// Send an SDP answer for an invite.
@@ -237,8 +245,9 @@ class SignalRService {
       'SignalRService: 📤 SDP answer session=$sessionId id=$messageId type=${sdp.type}',
     );
 
-    // Open the gate — ICE trickle sends will wait until this completes.
-    _answerGate = Completer<void>();
+    // Open a per-session gate — ICE trickle sends for this session
+    // will wait until this answer completes.
+    _answerGates[sessionId] = Completer<void>();
 
     final message = InviteAnswerMessage(
       session: sessionId,
@@ -251,8 +260,7 @@ class SignalRService {
       Logger().info('SignalRService: ✅ SDP answer sent successfully');
     } finally {
       // Release the gate so buffered ICE trickle sends can proceed.
-      final gate = _answerGate;
-      _answerGate = null;
+      final gate = _answerGates.remove(sessionId);
       gate?.complete();
     }
   }
@@ -267,8 +275,8 @@ class SignalRService {
     final message = TrickleMessage(session: sessionId, candidate: candidate);
 
     Future<void> send() async {
-      // Wait for any in-flight answer send to complete first.
-      final gate = _answerGate;
+      // Wait for any in-flight answer send for THIS session to complete.
+      final gate = _answerGates[sessionId];
       if (gate != null && !gate.isCompleted) {
         await gate.future;
       }
@@ -331,10 +339,8 @@ class SignalRService {
       return;
     }
 
-    player.subscription = _messageController.stream.listen(
-      player.onSignalRMessage,
-    );
     _players.add(player);
+    _playersByDevice[player.deviceId] = player;
     Logger().info(
       'SignalRService: Registered player. Total: ${_players.length}',
     );
@@ -342,21 +348,23 @@ class SignalRService {
 
   /// Unregister a player.
   void unregisterPlayer(VideoWebRTCPlayer player) {
-    player.subscription?.cancel();
-    player.subscription = null;
     _players.removeWhere((p) => p.playerId == player.playerId);
+    _playersByDevice.remove(player.deviceId);
     Logger().info(
       'SignalRService: Unregistered player. Remaining: ${_players.length}',
     );
   }
 
   /// Find a player by session ID.
+  ///
+  /// Uses linear scan because sessionId is assigned after registration
+  /// by the message router, so a pre-built index would be stale.
   VideoWebRTCPlayer? findPlayerBySession(String sessionId) =>
       _players.where((p) => p.sessionId == sessionId).firstOrNull;
 
   /// Find a player by device ID.
   VideoWebRTCPlayer? findPlayerByDevice(String deviceId) =>
-      _players.where((p) => p.deviceId == deviceId).firstOrNull;
+      _playersByDevice[deviceId];
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Cleanup
@@ -367,10 +375,8 @@ class SignalRService {
     Logger().info('SignalRService: Closing connection');
 
     if (closeAllSessions) {
-      for (final player in _players) {
-        player.subscription?.cancel();
-      }
       _players.clear();
+      _playersByDevice.clear();
       _serviceInitialized = false;
     }
 

@@ -67,9 +67,21 @@ class IceCandidateManager {
     _gatheringCompleter = null;
   }
 
-  /// Create a new gathering completer.
-  Completer<void> createGatheringCompleter() {
+  /// Create a new gathering completer with a safety timeout.
+  ///
+  /// If the native WebRTC stack hangs and never fires the
+  /// end-of-candidates marker, the completer auto-resolves after [timeout].
+  Completer<void> createGatheringCompleter({
+    Duration timeout = const Duration(seconds: 15),
+  }) {
     _gatheringCompleter = Completer<void>();
+    // Safety net: auto-complete if ICE gathering hangs
+    Future.delayed(timeout, () {
+      if (_gatheringCompleter != null && !_gatheringCompleter!.isCompleted) {
+        Logger().warn('$tag ICE gathering timed out after ${timeout.inSeconds}s');
+        _gatheringCompleter!.complete();
+      }
+    });
     return _gatheringCompleter!;
   }
 
