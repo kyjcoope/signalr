@@ -156,10 +156,12 @@ class CameraConnectionController {
       return;
     }
 
-    // Session may have been torn down by deferred disconnect during await.
-    // Don't wire callbacks to a dead session.
+    // Session may have failed during the await (e.g. fast 480 error response).
+    // The onStateChanged callback wasn't wired yet, so the error hasn't reached
+    // Redux. Sync the final state (including lastError) before bailing.
     if (session.state.isTerminal) {
-      Logger().info('[ConnCtrl] $slug: session closed during connect');
+      Logger().info('[ConnCtrl] $slug: session failed during connect');
+      syncSessionToRedux(store, slug);
       return;
     }
 
