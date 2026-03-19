@@ -6,6 +6,7 @@ import 'package:synchronized/synchronized.dart';
 import '../signalr/signalr_session_hub.dart';
 import '../utils/logger.dart';
 import '../webrtc/session_state.dart';
+import 'camera_connection_queue.dart';
 import 'actions.dart';
 import 'app_state.dart';
 import 'thunks.dart' show syncSessionToRedux;
@@ -114,6 +115,7 @@ class CameraConnectionController {
   /// Called during hub shutdown to prevent stale timers from firing
   /// after the hub is torn down.
   void cancelAll() {
+    CameraConnectionQueue.instance.cancelAll();
     for (final timer in _disconnectTimers.values) {
       timer.cancel();
     }
@@ -128,25 +130,26 @@ class CameraConnectionController {
   Future<void> _doConnect(String slug, Store<AppState> store) async {
     final hub = SignalRSessionHub.instance;
 
-    // Already connected — check if the session is actually healthy
+    // Already connected — only skip reconnection if truly connected.
+    // Any other state (mid-negotiation, terminal, disconnected) means the
+    // session is stale or stuck — tear it down for a fresh attempt.
     if (hub.isConnected(slug)) {
       final session = hub.getSession(slug);
       final state = session?.state;
 
-      // If the session is in a terminal or stale state, tear it down
-      // and reconnect fresh. This handles the case where ICE failed,
-      // the reconnect stalled, or the session silently died.
-      if (state != null &&
-          (state.isTerminal || state == SessionConnectionState.disconnected)) {
-        Logger().info(
-          '[ConnCtrl] $slug: stale session (state=$state) — tearing down',
-        );
-        await _doDisconnect(slug, store);
-        // Fall through to reconnect below
-      } else {
-        Logger().info('[ConnCtrl] $slug: already connected (state=$state)');
+      if (state == SessionConnectionState.connected) {
+        Logger().info('[ConnCtrl] $slug: already connected — skipping');
         return;
       }
+
+      // Stale or mid-negotiation session — tear down and reconnect fresh.
+      // This handles: queue timeout left a session in exchangingIce,
+      // ICE failed, reconnect stalled, or the session silently died.
+      Logger().info(
+        '[ConnCtrl] $slug: stale session (state=$state) — tearing down',
+      );
+      await _doDisconnect(slug, store);
+      // Fall through to reconnect below
     }
 
     Logger().info('[ConnCtrl] $slug: connecting');
@@ -173,6 +176,22 @@ class CameraConnectionController {
     session.onRemoteIceCandidate = () => syncSessionToRedux(store, slug);
     session.statsNotifier.addListener(() => syncSessionToRedux(store, slug));
 
+    // Auto-reconnect: when a previously-connected camera drops with a
+    // recoverable error, re-enqueue it through the queue — unless the
+    // user intentionally disconnected or the queue is already managing
+    // a retry for this camera.
+    session.onSessionFailed = (_) {
+      final queue = CameraConnectionQueue.instance;
+      if (_desiredState[slug] == true && !queue.isManaged(slug)) {
+        Logger().info('[ConnCtrl] $slug: auto-reconnecting after failure');
+        queue.enqueue(slug, store);
+      } else if (queue.isManaged(slug)) {
+        Logger().info(
+          '[ConnCtrl] $slug: queue already managing retry — skipping auto-reconnect',
+        );
+      }
+    };
+
     Logger().info('[ConnCtrl] $slug: connected and wired');
   }
 
@@ -181,13 +200,17 @@ class CameraConnectionController {
 
     if (!hub.isConnected(slug)) {
       Logger().info('[ConnCtrl] $slug: already disconnected');
-      // Still clean up Redux state in case it's stale
+      // Still clean up Redux state and decoder tracking in case it's stale
+      CameraConnectionQueue.instance.notifyDisconnected(slug);
       store.dispatch(RemoveSession(slug));
       return;
     }
 
     Logger().info('[ConnCtrl] $slug: disconnecting');
     await hub.disconnectCamera(slug);
+    // Always notify — Set-based tracking makes this idempotent.
+    // If the camera was never counted, the remove is a no-op.
+    CameraConnectionQueue.instance.notifyDisconnected(slug);
     store.dispatch(RemoveSession(slug));
     Logger().info('[ConnCtrl] $slug: disconnected');
   }

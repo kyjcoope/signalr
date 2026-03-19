@@ -48,33 +48,8 @@ extension SessionConnectionStateX on SessionConnectionState {
       this == SessionConnectionState.exchangingIce ||
       this == SessionConnectionState.disconnected;
 
-  /// Whether the session is in a transitional state.
-  bool get isTransitioning =>
-      this == SessionConnectionState.waitingForSession ||
-      this == SessionConnectionState.initializingPeer ||
-      this == SessionConnectionState.settingRemoteDescription ||
-      this == SessionConnectionState.creatingAnswer ||
-      this == SessionConnectionState.sendingAnswer ||
-      this == SessionConnectionState.reconnecting;
-
   /// Whether the session has terminated (failed or closed).
   bool get isTerminal =>
       this == SessionConnectionState.failed ||
       this == SessionConnectionState.closed;
-
-  /// Whether the session is in the process of connecting (between idle and connected).
-  /// Used to prevent double-connect and other race conditions.
-  bool get isConnecting =>
-      this == SessionConnectionState.waitingForSession ||
-      this == SessionConnectionState.initializingPeer ||
-      this == SessionConnectionState.settingRemoteDescription ||
-      this == SessionConnectionState.creatingAnswer ||
-      this == SessionConnectionState.sendingAnswer ||
-      this == SessionConnectionState.exchangingIce ||
-      this == SessionConnectionState.reconnecting;
-
-  /// Whether ICE restart / reconnect is allowed in this state.
-  bool get canRestartIce =>
-      this == SessionConnectionState.connected ||
-      this == SessionConnectionState.disconnected;
 }

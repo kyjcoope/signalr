@@ -101,18 +101,14 @@ class WebRtcVideoStats extends Equatable {
 
 /// Polls `RTCPeerConnection.getStats()` once per interval and:
 ///   1. Always updates [statsNotifier] with [WebRtcVideoStats] for the UI.
-///   2. Optionally writes a detailed debug log block when [enableLogging] is on.
+///   2. Writes a detailed debug log block (filtered by the global [Logger] level).
 class WebRtcStatsMonitor {
   WebRtcStatsMonitor({
     this.interval = const Duration(seconds: 1),
-    this.enableLogging = false,
     String tag = '',
   }) : _tag = tag;
 
   final Duration interval;
-
-  /// Toggle verbose log output (ICE, DTLS, PATH, VIDEO, AUDIO).
-  bool enableLogging;
 
   /// Listen to this notifier for live stats updates.
   final ValueNotifier<WebRtcVideoStats> statsNotifier = ValueNotifier(
@@ -184,10 +180,8 @@ class WebRtcStatsMonitor {
       // ── Video stats (always) ──────────────────────────────────────────────
       final vidRxBytes = _updateVideoStats(byId, byType);
 
-      // ── Verbose logging (optional) ────────────────────────────────────────
-      if (enableLogging) {
-        _logDetailed(byId, byType);
-      }
+      // ── Verbose logging (filtered by global log level) ─────────────────
+      _logDetailed(byId, byType);
 
       // Update _lastVidRxBytes AFTER logging so dKbps sees the correct delta.
       _lastVidRxBytes = vidRxBytes ?? _lastVidRxBytes;
@@ -418,6 +412,6 @@ class WebRtcStatsMonitor {
         '| lost: ${_dash(audLost)} | jit: ${_fmtMs(audJit)} '
         '| tx: ${_fmtOptKbps(audTxKbps)}',
       );
-    Logger().info(buf.toString());
+    Logger().debug(buf.toString());
   }
 }

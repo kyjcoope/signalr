@@ -130,25 +130,6 @@ class SignalRConnectionManager {
     await _connection?.invoke(methodName, args: args);
   }
 
-  /// Leave a signaling session.
-  ///
-  /// This notifies the server that the client is leaving the session,
-  /// allowing proper cleanup on the server side.
-  Future<void> leaveSession(String sessionId) async {
-    if (!isConnected) {
-      Logger().warn(
-        'SignalRConnectionManager: Cannot leave session - not connected',
-      );
-      return;
-    }
-    try {
-      await _connection?.invoke('LeaveSession', args: [sessionId]);
-      Logger().info('SignalRConnectionManager: Left session $sessionId');
-    } catch (e) {
-      Logger().error('SignalRConnectionManager: Error leaving session: $e');
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   // Connection Management
   // ═══════════════════════════════════════════════════════════════════════════

@@ -53,18 +53,6 @@ abstract final class JsonRpc {
     required String id,
     required Map<String, dynamic> result,
   }) => {'jsonrpc': jsonRpcVersion, 'result': result, 'id': id};
-
-  /// Create a JSON-RPC error response.
-  static Map<String, dynamic> error({
-    required String id,
-    required int code,
-    required String message,
-    Map<String, dynamic>? data,
-  }) => {
-    'jsonrpc': jsonRpcVersion,
-    'error': {'code': code, 'message': message, if (data != null) 'data': data},
-    'id': id,
-  };
 }
 
 /// Extension for parsing JSON-RPC messages.

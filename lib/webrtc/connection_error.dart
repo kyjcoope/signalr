@@ -12,6 +12,10 @@ enum ConnectionError {
   /// Error 101: The server's active session limit has been reached.
   sessionLimitExceeded(101, 'Active session limit exceeded'),
 
+  /// Error 106: The session ID sent by the client is no longer valid on
+  /// the server (already cleaned up or never existed).
+  invalidSessionId(106, 'Invalid session'),
+
   /// Error 201: Generic WebRTC session error on the server.
   webrtcSessionError(201, 'WebRTC session error'),
 
@@ -58,4 +62,11 @@ enum ConnectionError {
   static ConnectionError fromServerCode(int code) {
     return values.where((e) => e.serverCode == code).firstOrNull ?? unknown;
   }
+
+  /// Whether this error is considered recoverable (worth retrying).
+  ///
+  /// Server-side rejections like session limit exceeded or device unavailable
+  /// are not recoverable. Transient errors (timeouts, ICE failures) are.
+  bool get isRecoverable =>
+      this != sessionLimitExceeded && this != deviceUnavailable;
 }

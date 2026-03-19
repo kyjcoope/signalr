@@ -12,6 +12,7 @@ import '../webrtc/webrtc_camera_session.dart';
 import 'actions.dart';
 import 'app_state.dart';
 import 'camera_connection_controller.dart';
+import 'camera_connection_queue.dart';
 import 'selectors.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -215,13 +216,13 @@ ThunkAction<AppState> fetchCameras({required AuthService authService}) {
 
 /// Connect to a single camera.
 ///
-/// Delegates to [CameraConnectionController] which handles debounce,
-/// intent tracking, and serialization. Connects execute immediately
-/// and cancel any pending disconnect debounce.
+/// Routes through [CameraConnectionQueue] which throttles concurrent
+/// signaling and respects the decoder cap. The queue delegates to
+/// [CameraConnectionController] for per-camera locking and debounce.
 ThunkAction<AppState> connectCamera(String slug) {
   return (Store<AppState> store) async {
     Logger().info('[Thunk] connectCamera: $slug');
-    await CameraConnectionController.instance.connect(slug, store);
+    await CameraConnectionQueue.instance.enqueue(slug, store);
   };
 }
 
@@ -237,45 +238,40 @@ ThunkAction<AppState> disconnectCamera(String slug) {
   };
 }
 
-/// Connect all currently visible cameras in batches.
+/// Connect all currently visible cameras via the connection queue.
 ///
-/// Connects up to [batchSize] cameras in parallel, then waits for the
-/// batch to finish before starting the next. This avoids overwhelming
-/// the signaling server while still being much faster than sequential.
-ThunkAction<AppState> connectAllVisible({int batchSize = 10}) {
+/// The [CameraConnectionQueue] throttles concurrent signaling (max 4 at a
+/// time), retries failures with a longer timeout, and respects the decoder
+/// cap (max 16 active connections).
+ThunkAction<AppState> connectAllVisible() {
   return (Store<AppState> store) async {
-    final ctrl = CameraConnectionController.instance;
     final hub = SignalRSessionHub.instance;
     final visible = selectVisibleCameras(store.state);
     final toConnect = visible.where((s) => !hub.isConnected(s)).toList();
 
     Logger().info(
-      '[Thunk] connectAllVisible: ${toConnect.length} cameras in batches of $batchSize',
+      '[Thunk] connectAllVisible: ${toConnect.length} cameras',
     );
 
-    for (var i = 0; i < toConnect.length; i += batchSize) {
-      final batch = toConnect.sublist(
-        i,
-        (i + batchSize).clamp(0, toConnect.length),
-      );
-      Logger().info(
-        '[Thunk] Batch ${(i ~/ batchSize) + 1}: connecting ${batch.length} cameras',
-      );
-      await Future.wait(batch.map((slug) => ctrl.connect(slug, store)));
-    }
+    await CameraConnectionQueue.instance.enqueueAll(toConnect, store);
   };
 }
 
 /// Stop all connected cameras immediately (no debounce).
+///
+/// First cancels the connection queue (stops pending/retrying cameras),
+/// then disconnects all active sessions.
 ThunkAction<AppState> stopAll() {
   return (Store<AppState> store) async {
+    CameraConnectionQueue.instance.cancelAll();
     final ctrl = CameraConnectionController.instance;
     final hub = SignalRSessionHub.instance;
     final ids = hub.connectedCameraIds.toList();
     Logger().info('[Thunk] stopAll: ${ids.length} cameras');
-    for (final slug in ids) {
-      await ctrl.disconnectImmediate(slug, store);
-    }
+    // Disconnect all cameras in parallel for instant teardown.
+    await Future.wait(
+      ids.map((slug) => ctrl.disconnectImmediate(slug, store)),
+    );
   };
 }
 

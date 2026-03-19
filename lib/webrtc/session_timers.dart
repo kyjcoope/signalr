@@ -12,7 +12,7 @@ class SessionTimers {
     required this.onNegotiationTimeout,
     required this.onConnectTimeout,
     this.negotiationDuration = const Duration(seconds: 30),
-    this.connectDuration = const Duration(seconds: 15),
+    this.connectDuration = const Duration(seconds: 45),
   });
 
   final String tag;
@@ -59,12 +59,6 @@ class SessionTimers {
     cancelNegotiation();
     cancelConnect();
   }
-
-  /// Whether the negotiation timer is active.
-  bool get isNegotiating => _negotiationTimer?.isActive ?? false;
-
-  /// Whether the connect timer is active.
-  bool get isConnecting => _connectTimer?.isActive ?? false;
 }
 
 /// Callback type for timer events.

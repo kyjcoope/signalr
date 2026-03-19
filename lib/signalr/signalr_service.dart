@@ -334,22 +334,6 @@ class SignalRService {
     }
   }
 
-  /// Leave a signaling session on the server.
-  ///
-  /// This is the proper way to disconnect from a session - it notifies
-  /// the server to clean up resources for this session.
-  ///
-  /// Optionally sends a close message first for full cleanup.
-  Future<void> leaveSession(
-    String sessionId, {
-    String? deviceId,
-    bool sendCloseFirst = true,
-  }) async {
-    if (sendCloseFirst && deviceId != null) {
-      await sendCloseMessage(sessionId, deviceId);
-    }
-    await _connectionManager?.leaveSession(sessionId);
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Player Management
@@ -377,6 +361,10 @@ class SignalRService {
     _playersByDevice.remove(player.deviceId);
     if (player.sessionId != null) {
       _playersBySession.remove(player.sessionId);
+      // Release any pending answer gate — the session is dead, so any
+      // ICE trickle sends awaiting the gate should unblock and fail gracefully.
+      final gate = _answerGates.remove(player.sessionId);
+      if (gate != null && !gate.isCompleted) gate.complete();
     }
     Logger().info(
       'SignalRService: Unregistered player. Remaining: ${_players.length}',
