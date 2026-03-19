@@ -4,53 +4,25 @@ import '../connection_error.dart';
 import '../webrtc_stats_monitor.dart';
 
 enum WebRtcConnectionState {
-  /// No connection attempt — default state.
   sessionDisconnected,
-
-  /// Connection initiated, negotiating.
   sessionPending,
-
-  /// ICE connected, media flowing.
   sessionConnected,
-
-  /// Temporarily lost, may recover.
   sessionReconnecting,
-
-  /// Fatal error or connection failed.
   sessionFailed,
 }
 
-/// Metadata for a single media track (video or audio).
 class TrackInfo extends Equatable {
-  /// MediaStreamTrack ID.
-  final String id;
-
-  /// Codec name (e.g. 'H264', 'opus'). Empty if unknown.
-  final String codec;
-
-  /// Whether the track is currently enabled.
-  final bool enabled;
-
   const TrackInfo({required this.id, this.codec = '', this.enabled = true});
+
+  final String id;
+  final String codec;
+  final bool enabled;
 
   @override
   List<Object?> get props => [id, codec, enabled];
 }
 
-/// Per-camera WebRTC session snapshot for the UI layer.
-///
-/// This is a plain value object — no references to RTCVideoRenderer or
-/// WebRtcCameraSession. The hub remains the source of truth for those.
 class WebRtcSessionState extends Equatable {
-  final WebRtcConnectionState connectionState;
-  final ConnectionError? error;
-  final int? textureId;
-  final List<TrackInfo> videoTracks;
-  final List<TrackInfo> audioTracks;
-  final int activeVideoTrack;
-  final int activeAudioTrack;
-  final WebRtcVideoStats? videoStats;
-
   const WebRtcSessionState({
     this.connectionState = WebRtcConnectionState.sessionDisconnected,
     this.error,
@@ -61,6 +33,15 @@ class WebRtcSessionState extends Equatable {
     this.activeAudioTrack = 0,
     this.videoStats,
   });
+
+  final WebRtcConnectionState connectionState;
+  final ConnectionError? error;
+  final int? textureId;
+  final List<TrackInfo> videoTracks;
+  final List<TrackInfo> audioTracks;
+  final int activeVideoTrack;
+  final int activeAudioTrack;
+  final WebRtcVideoStats? videoStats;
 
   WebRtcSessionState copyWith({
     WebRtcConnectionState? connectionState,
@@ -98,13 +79,10 @@ class WebRtcSessionState extends Equatable {
   ];
 }
 
-/// WebRTC state for all camera sessions. NOT persisted.
-///
-/// Pure data container — all query logic lives in selectors.
 class WebRtcState extends Equatable {
-  final Map<String, WebRtcSessionState> sessions;
-
   const WebRtcState({this.sessions = const {}});
+
+  final Map<String, WebRtcSessionState> sessions;
 
   WebRtcState copyWith({Map<String, WebRtcSessionState>? sessions}) {
     return WebRtcState(sessions: sessions ?? this.sessions);

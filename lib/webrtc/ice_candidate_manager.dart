@@ -7,13 +7,6 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../utils/logger.dart';
 import 'sdp_utils.dart';
 
-/// Manages ICE candidate queueing, resolution, and signaling.
-///
-/// Handles the complexity of:
-/// - Queueing remote candidates before remote description is set
-/// - Resolving mid from mline index when not provided
-/// - Tracking end-of-candidates signaling
-/// - One-time callbacks for first local/remote ICE
 class IceCandidateManager {
   IceCandidateManager({
     required this.onSendCandidate,
@@ -22,16 +15,9 @@ class IceCandidateManager {
     this.tag = '',
   });
 
-  /// Called when a candidate needs to be sent to the remote peer.
   final void Function(RTCIceCandidate candidate) onSendCandidate;
-
-  /// Called once when the first local ICE candidate is generated.
   final VoidCallback? onLocalIceStarted;
-
-  /// Called once when the first remote ICE candidate is received.
   final VoidCallback? onRemoteIceStarted;
-
-  /// Tag for logging.
   final String tag;
 
   final Queue<RTCIceCandidate> _pendingRemoteCandidates =
@@ -45,17 +31,14 @@ class IceCandidateManager {
   bool _remoteDescSet = false;
   Completer<void>? _gatheringCompleter;
 
-  /// Set the mline-to-mid mapping (usually from remote SDP).
   void setMlineMapping(Map<int, String> mapping) {
     _mlineToMid = mapping;
   }
 
-  /// Mark that the remote description has been set.
   void markRemoteDescSet() {
     _remoteDescSet = true;
   }
 
-  /// Reset state for a new negotiation.
   void reset() {
     _pendingRemoteCandidates.clear();
     _eocSentForMid.clear();
@@ -67,15 +50,10 @@ class IceCandidateManager {
     _gatheringCompleter = null;
   }
 
-  /// Create a new gathering completer with a safety timeout.
-  ///
-  /// If the native WebRTC stack hangs and never fires the
-  /// end-of-candidates marker, the completer auto-resolves after [timeout].
   Completer<void> createGatheringCompleter({
     Duration timeout = const Duration(seconds: 15),
   }) {
     _gatheringCompleter = Completer<void>();
-    // Safety net: auto-complete if ICE gathering hangs
     Future.delayed(timeout, () {
       if (_gatheringCompleter != null && !_gatheringCompleter!.isCompleted) {
         Logger().warn('$tag ICE gathering timed out after ${timeout.inSeconds}s');
@@ -85,11 +63,6 @@ class IceCandidateManager {
     return _gatheringCompleter!;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Local Candidates
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /// Handle a local ICE candidate from WebRTC.
   void handleLocalCandidate(RTCIceCandidate candidate, String? sessionId) {
     if ((candidate.candidate ?? '').isEmpty) {
       Logger().info('$tag ✅ End of LOCAL candidates');
@@ -103,18 +76,15 @@ class IceCandidateManager {
     }
 
     if (sessionId == null) return;
-
     onSendCandidate(candidate);
   }
 
-  /// Send end-of-candidates for a mid.
   void sendEndOfCandidates(String mid) {
     if (_eocSentForMid.add(mid)) {
       onSendCandidate(RTCIceCandidate('', mid, null));
     }
   }
 
-  /// Send end-of-candidates for all known mids.
   Future<void> sendAllEndOfCandidates(RTCPeerConnection pc) async {
     if (_mlineToMid.isNotEmpty) {
       for (final mid in _mlineToMid.values) {
@@ -129,7 +99,6 @@ class IceCandidateManager {
           }
         }
       } catch (_) {
-        // Fallback to default mids
         for (final mid in const ['audio0', 'video0', 'application1']) {
           sendEndOfCandidates(mid);
         }
@@ -137,29 +106,14 @@ class IceCandidateManager {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Remote Candidates
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /// Queue a remote candidate (before remote desc is set).
   void queueRemoteCandidate(RTCIceCandidate candidate) {
     _pendingRemoteCandidates.addLast(candidate);
   }
 
-  /// Handle a remote ICE candidate.
-  ///
-  /// If remote description is not set, queues for later.
-  /// Otherwise, adds to peer connection immediately.
-  /// Duplicate candidates (same candidate string) are silently skipped.
   Future<void> handleRemoteCandidate(
     RTCIceCandidate candidate,
     RTCPeerConnection? pc,
   ) async {
-    // End-of-candidates: do NOT relay to pc.addCandidate() — Android's
-    // native WebRTC JNI crashes with NullPointerException when sdpMid
-    // is null (which it typically is for EOC markers). The ICE stack
-    // transitions to completed/failed on its own once all candidates
-    // have been exchanged. Just complete the gathering completer.
     if ((candidate.candidate ?? '').isEmpty) {
       Logger().info(
         '$tag Received remote end-of-candidates (mid=${candidate.sdpMid})',
@@ -170,11 +124,8 @@ class IceCandidateManager {
       return;
     }
 
-    // Deduplicate: skip candidates we've already processed
     final candidateStr = candidate.candidate!;
-    if (!_seenRemoteCandidates.add(candidateStr)) {
-      return; // Already seen, skip silently
-    }
+    if (!_seenRemoteCandidates.add(candidateStr)) return;
 
     if (pc == null || !_remoteDescSet) {
       _pendingRemoteCandidates.addLast(candidate);
@@ -184,7 +135,6 @@ class IceCandidateManager {
     await _addCandidate(candidate, pc);
   }
 
-  /// Drain all queued remote candidates.
   Future<void> drainQueuedCandidates(RTCPeerConnection pc) async {
     if (_pendingRemoteCandidates.isEmpty) return;
 
@@ -194,8 +144,6 @@ class IceCandidateManager {
     final futures = <Future<void>>[];
     while (_pendingRemoteCandidates.isNotEmpty) {
       final candidate = _pendingRemoteCandidates.removeFirst();
-      // Skip end-of-candidates markers — they must not be passed to
-      // pc.addCandidate() as Android's native JNI crashes on null sdpMid.
       if ((candidate.candidate ?? '').isEmpty) {
         Logger().info('$tag Skipping queued end-of-candidates marker');
         continue;

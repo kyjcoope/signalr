@@ -2,10 +2,6 @@ import 'dart:async';
 
 import '../utils/logger.dart';
 
-/// Manages session timers for WebRTC connections.
-///
-/// Handles negotiation timeout and connect phase timeout with
-/// consistent start/cancel patterns.
 class SessionTimers {
   SessionTimers({
     required this.tag,
@@ -24,7 +20,6 @@ class SessionTimers {
   Timer? _negotiationTimer;
   Timer? _connectTimer;
 
-  /// Start the negotiation timeout.
   void startNegotiation() {
     cancelNegotiation();
     _negotiationTimer = Timer(negotiationDuration, () {
@@ -33,13 +28,11 @@ class SessionTimers {
     });
   }
 
-  /// Cancel the negotiation timeout.
   void cancelNegotiation() {
     _negotiationTimer?.cancel();
     _negotiationTimer = null;
   }
 
-  /// Start the connect phase timeout.
   void startConnect() {
     cancelConnect();
     _connectTimer = Timer(connectDuration, () {
@@ -48,18 +41,15 @@ class SessionTimers {
     });
   }
 
-  /// Cancel the connect timeout.
   void cancelConnect() {
     _connectTimer?.cancel();
     _connectTimer = null;
   }
 
-  /// Cancel all timers.
   void cancelAll() {
     cancelNegotiation();
     cancelConnect();
   }
 }
 
-/// Callback type for timer events.
 typedef VoidCallback = void Function();

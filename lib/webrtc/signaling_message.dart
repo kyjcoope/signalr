@@ -1,4 +1,3 @@
-/// Wrapper for SDP (Session Description Protocol) data.
 class SdpWrapper {
   SdpWrapper({required this.type, required this.sdp});
 

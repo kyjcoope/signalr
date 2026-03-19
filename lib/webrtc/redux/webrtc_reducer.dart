@@ -1,7 +1,6 @@
 import 'webrtc_actions.dart';
 import 'webrtc_state.dart';
 
-/// WebRTC session sub-reducer.
 WebRtcState webRtcReducer(WebRtcState state, dynamic action) {
   if (action is SetSessionSnapshot) {
     final updated = Map<String, WebRtcSessionState>.from(state.sessions);
@@ -21,3 +20,4 @@ WebRtcState webRtcReducer(WebRtcState state, dynamic action) {
 
   return state;
 }
+

@@ -5,16 +5,9 @@ import '../utils/logger.dart';
 import 'json_rpc.dart';
 import 'signalr_messages.dart';
 
-/// Callback for when ICE servers are received.
 typedef IceServersCallback = void Function(List<IceServerConfig> servers);
-
-/// Callback for when a client ID is received.
 typedef ClientIdCallback = void Function(String clientId);
 
-/// Routes incoming SignalR messages to the appropriate handlers.
-///
-/// Extracted from [SignalRService] for better separation of concerns.
-/// Handles JSON-RPC message parsing and player notification.
 class SignalRMessageRouter {
   SignalRMessageRouter({
     required this.findPlayerBySession,
@@ -25,30 +18,14 @@ class SignalRMessageRouter {
     this.onSessionAssigned,
   });
 
-  /// Find a player by session ID.
   final VideoWebRTCPlayer? Function(String session) findPlayerBySession;
-
-  /// Find a player by device ID.
   final VideoWebRTCPlayer? Function(String deviceId) findPlayerByDevice;
-
-  /// Find a player for a new connection (by peer or first without session).
   final VideoWebRTCPlayer? Function(String? peer) findPlayerForConnection;
-
-  /// Called when ICE servers are received.
   final IceServersCallback? onIceServers;
-
-  /// Called when client ID is received from registration.
   final ClientIdCallback? onClientId;
-
-  /// Called when a session is assigned to a player (for session index updates).
   final void Function(String sessionId, VideoWebRTCPlayer player)?
-      onSessionAssigned;
+  onSessionAssigned;
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Hub Method Handlers
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /// Handle incoming SignalR message from hub.
   void handleSignalRMessage(List<Object?>? args) {
     if (args == null || args.isEmpty) return;
 
@@ -57,7 +34,6 @@ class SignalRMessageRouter {
 
     try {
       final parsed = jsonDecode(messageStr) as Map<String, dynamic>;
-
       final method = parsed.method;
       final session = parsed.param<String>('session');
       final logLabel = method != null
@@ -77,12 +53,10 @@ class SignalRMessageRouter {
     }
   }
 
-  /// Handle device session info event.
   void handleDeviceSessionInfo(List<Object?>? args) {
     Logger().info('SignalRMessageRouter: Device session info: $args');
   }
 
-  /// Handle device disconnection event.
   void handleDeviceDisconnected(List<Object?>? args) {
     Logger().info('SignalRMessageRouter: Device disconnected: $args');
     final deviceId = args?.firstOrNull?.toString();
@@ -97,7 +71,6 @@ class SignalRMessageRouter {
     }
   }
 
-  /// Handle peer disconnection event.
   void handlePeerDisconnected(List<Object?>? args) {
     Logger().info('SignalRMessageRouter: Peer disconnected: $args');
     final session = args?.firstOrNull?.toString();
@@ -117,14 +90,9 @@ class SignalRMessageRouter {
     }
   }
 
-  /// Handle generic error event.
   void handleError(List<Object?>? args) {
     Logger().error('SignalRMessageRouter: Error: $args');
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // JSON-RPC Message Routing
-  // ═══════════════════════════════════════════════════════════════════════════
 
   void _handleRequestMessage(Map<String, dynamic> message) {
     switch (message.method) {
@@ -143,9 +111,9 @@ class SignalRMessageRouter {
 
   void _handleSuccessResponse(Map<String, dynamic> message) {
     switch (message.id) {
-      case '1': // Register response
+      case '1':
         _handleRegisterResponse(message);
-      case '2': // Connect response
+      case '2':
         _handleConnectResponse(message);
       default:
         Logger().warn(
@@ -153,10 +121,6 @@ class SignalRMessageRouter {
         );
     }
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Response Handlers
-  // ═══════════════════════════════════════════════════════════════════════════
 
   void _handleRegisterResponse(Map<String, dynamic> message) {
     final id = message.resultValue<String>('id');
@@ -173,11 +137,10 @@ class SignalRMessageRouter {
     final session = result['session'] as String?;
     final peer = result['peer'] as String?;
 
-    // Parse ICE servers — treat missing as empty list so session assignment
-    // always happens even if the server omits iceServers.
     final iceList = result['iceServers'] as List?;
-    final servers =
-        (iceList ?? []).map((e) => IceServerConfig.fromJson(e)).toList();
+    final servers = (iceList ?? [])
+        .map((e) => IceServerConfig.fromJson(e))
+        .toList();
 
     if (servers.isNotEmpty) {
       Logger().info(
@@ -193,8 +156,6 @@ class SignalRMessageRouter {
       onIceServers?.call(servers);
     }
 
-    // Always notify the player if we have a session — don't gate on
-    // iceServers presence.
     final player = findPlayerForConnection(peer);
     if (player != null && session != null) {
       player.sessionId = session;
@@ -211,11 +172,6 @@ class SignalRMessageRouter {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Error Handlers
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /// Handle a JSON-RPC error response (top-level `error` field, no `method`).
   void _handleErrorResponse(Map<String, dynamic> message) {
     final error = ErrorMessage.fromJson(message);
     Logger().error(
@@ -225,7 +181,6 @@ class SignalRMessageRouter {
     _notifyPlayerOfError(error);
   }
 
-  /// Handle a JSON-RPC request with method="error".
   void _handleSignalError(Map<String, dynamic> message) {
     final error = ErrorMessage.fromJson(message);
     Logger().error(
@@ -235,9 +190,6 @@ class SignalRMessageRouter {
     _notifyPlayerOfError(error);
   }
 
-  /// Notify the appropriate player of an error.
-  ///
-  /// Looks up the player by session first, then by peer (device) ID.
   void _notifyPlayerOfError(ErrorMessage error) {
     VideoWebRTCPlayer? player;
     if (error.session != null) {
@@ -249,10 +201,6 @@ class SignalRMessageRouter {
       SignalRMessage(method: SignalRMessageType.onSignalError, detail: error),
     );
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Request Handlers
-  // ═══════════════════════════════════════════════════════════════════════════
 
   void _handleInvite(Map<String, dynamic> message) {
     final session = message.param<String>('session');
@@ -273,7 +221,6 @@ class SignalRMessageRouter {
 
     Logger().info('SignalRMessageRouter: Trickle for session: $session');
 
-    // Support batched candidates (params.candidates: [...])
     final candidatesList = message.param<List<dynamic>>('candidates');
     if (candidatesList != null) {
       Logger().info(
@@ -288,7 +235,6 @@ class SignalRMessageRouter {
       return;
     }
 
-    // Single candidate fallback (params.candidate: {...})
     findPlayerBySession(session)?.onSignalRMessage(
       SignalRMessage(
         method: SignalRMessageType.onSignalTrickle,
