@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import '../auth/auth.dart';
 import '../utils/logger.dart';
 import '../webrtc/webrtc_camera_session.dart';
 import '../webrtc/session_state.dart';
@@ -22,7 +21,6 @@ class SignalRSessionHub {
   }
 
   SignalRService? _signalRService;
-  AuthService? _authService;
   bool _initialized = false;
 
   final Map<String, WebRtcCameraSession> activeSessions = {};
@@ -34,18 +32,16 @@ class SignalRSessionHub {
 
   bool get isInitialized => _initialized;
   SignalRService? get signalRService => _signalRService;
-  AuthService? get authService => _authService;
   int get activeSessionCount => activeSessions.length;
   List<String> get connectedCameraIds => activeSessions.keys.toList();
   Map<String, RTCVideoRenderer> get renderers => Map.unmodifiable(_renderers);
 
-  Future<void> initialize(String signalRUrl, AuthService authService) async {
+  Future<void> initialize(String signalRUrl) async {
     if (_initialized) {
       Logger().info('SignalRSessionHub: Already initialized');
       return;
     }
 
-    _authService = authService;
     _signalRService = SignalRService.instance;
     _initialized = true;
     await _signalRService!.initService(signalRUrl);
@@ -336,7 +332,6 @@ class SignalRSessionHub {
 
     await _signalRService?.closeConnection(closeAllSessions: true);
     _signalRService = null;
-    _authService = null;
     _initialized = false;
     Logger().info('SignalRSessionHub: Shutdown complete');
   }

@@ -134,7 +134,7 @@ ThunkAction<AppState> initializeSignalRThunk({
 
       // Initialize SignalR hub (cameras loaded from persistence)
       final hub = SignalRSessionHub.instance;
-      await hub.initialize(signalRUrl, authService);
+      await hub.initialize(signalRUrl);
       Logger().info('[Thunk] initializeSignalRThunk: hub initialized');
 
       // Sync any existing sessions (e.g., survived page navigation)
