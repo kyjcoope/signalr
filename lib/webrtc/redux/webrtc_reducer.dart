@@ -14,6 +14,15 @@ WebRtcState webRtcReducer(WebRtcState state, dynamic action) {
     return state.copyWith(sessions: updated);
   }
 
+  if (action is SetSessionQueued) {
+    if (state.sessions.containsKey(action.slug)) return state;
+    final updated = Map<String, WebRtcSessionState>.from(state.sessions);
+    updated[action.slug] = const WebRtcSessionState(
+      connectionState: WebRtcConnectionState.sessionPending,
+    );
+    return state.copyWith(sessions: updated);
+  }
+
   if (action is ClearAllSessions) {
     return const WebRtcState();
   }

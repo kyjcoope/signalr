@@ -5,6 +5,7 @@ import 'package:redux/redux.dart';
 
 import '../signalr/signalr_session_hub.dart';
 import '../utils/logger.dart';
+import '../webrtc/redux/webrtc_actions.dart';
 
 import 'app_state.dart';
 import 'camera_connection_controller.dart';
@@ -56,8 +57,11 @@ class CameraConnectionQueue {
   // State
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /// Max total attempts per camera (1 fast + N-1 slow retries).
+  static int maxAttempts = 3;
+
   /// Single queue: cameras waiting to connect. Retries go to the back
-  /// with [_QueueEntry.isRetry] set so they get the longer timeout.
+  /// with an incremented attempt counter so they get the longer timeout.
   final Queue<_QueueEntry> _queue = Queue();
 
   /// Camera IDs currently occupying a connection slot.
@@ -117,6 +121,8 @@ class CameraConnectionQueue {
     _completers[slug] = completer;
     _managedSlugs.add(slug);
     _queue.add(_QueueEntry(slug: slug, store: store));
+
+    store.dispatch(SetSessionQueued(slug));
 
     Logger().info(
       '[Queue] Enqueued $slug '
@@ -209,7 +215,7 @@ class CameraConnectionQueue {
         _connectedSlugs.length < maxActiveDecoders &&
         _queue.isNotEmpty) {
       final entry = _queue.removeFirst();
-      final timeout = entry.isRetry ? slowTimeout : fastTimeout;
+      final timeout = entry.attempt > 0 ? slowTimeout : fastTimeout;
       _startSlot(entry, timeout);
     }
   }
@@ -219,7 +225,7 @@ class CameraConnectionQueue {
     final slug = entry.slug;
     _activeSlots.add(slug);
 
-    final phase = entry.isRetry ? 'retry' : 'fast';
+    final phase = entry.attempt == 0 ? 'fast' : 'retry #${entry.attempt}';
     Logger().info(
       '[Queue] Starting $slug ($phase, timeout=${timeout.inSeconds}s) '
       '[${_activeSlots.length}/$maxConcurrent slots, '
@@ -238,15 +244,10 @@ class CameraConnectionQueue {
     try {
       final sw = Stopwatch()..start();
 
-      // Use the existing CameraConnectionController which handles
-      // per-camera locking, debounce, and Redux wiring.
       await CameraConnectionController.instance
           .connect(slug, store)
           .timeout(timeout);
 
-      // The controller returns as soon as the SignalR session is created
-      // and callbacks are wired — WebRTC is still negotiating. Await the
-      // session's connectionResult future with the remaining budget.
       final remaining = timeout - sw.elapsed;
       if (remaining <= Duration.zero) throw TimeoutException(null);
 
@@ -257,15 +258,21 @@ class CameraConnectionQueue {
       }
     } on TimeoutException {
       Logger().warn('[Queue] $slug timed out (${timeout.inSeconds}s)');
-      // Actively kill the session — don't leave zombies running in the
-      // background. This means retries start clean without the controller
-      // having to discover and tear down a stale session first.
-      try {
-        await CameraConnectionController.instance
-            .disconnectImmediate(slug, store);
-      } catch (e) {
-        Logger().warn('[Queue] $slug cleanup after timeout failed: $e');
-      }
+
+      // Free the slot FIRST so the next camera can start while we clean up.
+      // _onSlotComplete handles retry logic and queue advancement.
+      _onSlotComplete(entry, false);
+
+      // Clean up the stale session in the background — don't block the slot.
+      unawaited(
+        CameraConnectionController.instance
+            .disconnectImmediate(slug, store)
+            .catchError(
+              (e) =>
+                  Logger().warn('[Queue] $slug cleanup after timeout failed: $e'),
+            ),
+      );
+      return;
     } catch (e) {
       Logger().error('[Queue] $slug connection error: $e');
     }
@@ -291,15 +298,19 @@ class CameraConnectionQueue {
         '[${_connectedSlugs.length}/$maxActiveDecoders decoders]',
       );
       _completers.remove(slug)?.complete();
-    } else if (!entry.isRetry) {
-      // First attempt failed — re-queue for retry with longer timeout.
-      // Camera stays in _managedSlugs so onSessionFailed won't double-enqueue.
-      Logger().info('[Queue] $slug → back of queue for retry');
-      _queue.add(_QueueEntry(slug: slug, store: entry.store, isRetry: true));
+    } else if (entry.attempt + 1 < maxAttempts) {
+      final next = entry.attempt + 1;
+      Logger().info('[Queue] $slug → back of queue for retry #$next');
+      _queue.add(_QueueEntry(
+        slug: slug,
+        store: entry.store,
+        attempt: next,
+      ));
     } else {
-      // Retry also failed — give up on this camera.
       _managedSlugs.remove(slug);
-      Logger().warn('[Queue] ❌ $slug failed after retry — giving up');
+      Logger().warn(
+        '[Queue] ❌ $slug failed after $maxAttempts attempts — giving up',
+      );
       _completers.remove(slug)?.complete();
     }
 
@@ -312,7 +323,7 @@ class CameraConnectionQueue {
 class _QueueEntry {
   final String slug;
   final Store<AppState> store;
-  final bool isRetry;
+  final int attempt;
 
-  _QueueEntry({required this.slug, required this.store, this.isRetry = false});
+  _QueueEntry({required this.slug, required this.store, this.attempt = 0});
 }

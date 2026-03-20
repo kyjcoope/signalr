@@ -13,3 +13,8 @@ class RemoveSession {
 
 class ClearAllSessions {}
 
+class SetSessionQueued {
+  final String slug;
+  SetSessionQueued(this.slug);
+}
+

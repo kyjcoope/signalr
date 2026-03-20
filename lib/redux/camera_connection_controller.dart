@@ -200,18 +200,19 @@ class CameraConnectionController {
 
     if (!hub.isConnected(slug)) {
       Logger().info('[ConnCtrl] $slug: already disconnected');
-      // Still clean up Redux state and decoder tracking in case it's stale
       CameraConnectionQueue.instance.notifyDisconnected(slug);
-      store.dispatch(RemoveSession(slug));
+      if (!CameraConnectionQueue.instance.isManaged(slug)) {
+        store.dispatch(RemoveSession(slug));
+      }
       return;
     }
 
     Logger().info('[ConnCtrl] $slug: disconnecting');
     await hub.disconnectCamera(slug);
-    // Always notify — Set-based tracking makes this idempotent.
-    // If the camera was never counted, the remove is a no-op.
     CameraConnectionQueue.instance.notifyDisconnected(slug);
-    store.dispatch(RemoveSession(slug));
+    if (!CameraConnectionQueue.instance.isManaged(slug)) {
+      store.dispatch(RemoveSession(slug));
+    }
     Logger().info('[ConnCtrl] $slug: disconnected');
   }
 }
