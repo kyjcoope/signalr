@@ -62,9 +62,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   int _connectionGeneration = 0;
   Timer? _disconnectRecoveryTimer;
   Completer<void>? _peerConnectionReady;
-  DateTime? _connectStartedAt;
-  DateTime? _inviteReceivedAt;
-  DateTime? _answerSentAt;
   int _iceRestartAttempts = 0;
   SessionConnectionState _state = SessionConnectionState.idle;
   Completer<bool> _connectionCompleter = Completer<bool>();
@@ -356,11 +353,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _sessionId = session;
       Logger().info('$_tag Session started: $_sessionId');
 
-      // If connect() already kicked off PC init with cached ICE servers,
-      // we just need the session ID (set above). Otherwise start PC init now.
       if (_peerConnection != null ||
           (_peerConnectionReady != null && !_peerConnectionReady!.isCompleted)) {
-        Logger().info('$_tag PC init already in progress — session ID stored');
         return;
       }
 
@@ -368,10 +362,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _peerConnectionReady ??= Completer<void>();
       try {
         await _initializePeerConnection();
-        if (_isClosing) {
-          Logger().info('$_tag Session closed during PC init — aborting');
-          return;
-        }
+        if (_isClosing) return;
         if (!_peerConnectionReady!.isCompleted) {
           _peerConnectionReady!.complete();
         }
@@ -382,7 +373,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         }
         rethrow;
       }
-      Logger().info('$_tag Peer connection ready, awaiting invite');
     }
   }
 
@@ -418,19 +408,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     try {
       _peerConnectionReady ??= Completer<void>();
       if (!_peerConnectionReady!.isCompleted) {
-        Logger().info('$_tag Invite arrived early — waiting for PC init');
         try {
           await _peerConnectionReady!.future.timeout(negotiationTimeout);
         } on TimeoutException {
-          Logger().error(
-            '$_tag Timed out waiting for peer connection to be ready while handling invite',
-          );
+          Logger().error('$_tag Timed out waiting for PC ready');
           _fail(ConnectionError.connectTimeout);
           return;
         } catch (e) {
-          Logger().info(
-            '$_tag Peer connection init failed while waiting for invite: $e',
-          );
           return;
         }
       }
@@ -456,11 +440,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         Logger().info('$_tag Ignoring invite while connected (id=$inviteId)');
         return;
       }
-
-      final rawSdp = offer['sdp'] as String? ?? '';
-      Logger().debug('$_tag ———————— Remote SDP Offer ————————');
-      Logger().debug(rawSdp);
-      Logger().debug('$_tag ———————— End SDP ————————');
 
       final sdpWrapper = SdpWrapper.fromJson(offer);
       if (_lastInviteId != null && _peerConnection != null) {
@@ -564,7 +543,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
           : null;
 
       final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
-      Logger().debug('✅ $_tag ICE candidate -> $candidateStr');
       _iceManager.handleRemoteCandidate(candidate, _peerConnection);
     } catch (e) {
       Logger().error('$_tag Error processing candidate: $e');
@@ -597,22 +575,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _connectionCompleter = Completer<bool>();
     }
 
-    _connectStartedAt = DateTime.now();
     Logger().info('$_tag Connecting...');
     _setState(SessionConnectionState.waitingForSession);
     _signalRService.registerPlayer(this);
     _startConnectTimeout();
 
-    // Start PC init immediately if we have cached ICE servers from a
-    // previous camera. Saves ~190ms by overlapping PC creation with the
-    // server roundtrip for this camera's session ID + invite.
     if (_signalRService.iceServers.isNotEmpty && _peerConnection == null) {
       _peerConnectionReady = Completer<void>();
       _setState(SessionConnectionState.initializingPeer);
       unawaited(_initializePeerConnection().then((_) {
         if (!_isClosing && !_peerConnectionReady!.isCompleted) {
           _peerConnectionReady!.complete();
-          Logger().info('$_tag Peer connection ready (early init)');
         }
       }).catchError((e) {
         if (_peerConnectionReady != null &&
@@ -676,11 +649,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   Future<void> _initializePeerConnection() async {
     if (_peerConnection != null) return;
 
-    Logger().info('$_tag Initializing peer connection');
     final pc = await createPeerConnection(_buildConfig());
 
     if (_isClosing) {
-      Logger().info('$_tag Session closed during PC init — discarding orphan');
       await pc.close();
       if (_peerConnectionReady != null &&
           !_peerConnectionReady!.isCompleted) {
@@ -696,15 +667,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   Map<String, dynamic> _buildConfig() {
-    final config = PeerConnectionFactory.buildConfig(
+    return PeerConnectionFactory.buildConfig(
       iceServers: _signalRService.iceServers,
       turnTcpOnly: turnTcpOnly,
       iceCandidatePoolSize: iceCandidatePoolSize,
     );
-    Logger().info(
-      '$_tag ICE config: ${_signalRService.iceServers.length} servers, turnTcpOnly=$turnTcpOnly',
-    );
-    return config;
   }
 
   void _bindPeerConnectionHandlers(RTCPeerConnection pc) {
@@ -767,33 +734,21 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   Future<void> _negotiate(SdpWrapper offer) async {
-    if (_isClosing) {
-      Logger().info('$_tag Skipping negotiate — session is closing');
-      return;
-    }
+    if (_isClosing) return;
 
     _isNegotiating = true;
-    _inviteReceivedAt = DateTime.now();
-    final waitMs = _connectStartedAt != null
-        ? _inviteReceivedAt!.difference(_connectStartedAt!).inMilliseconds
-        : 0;
-    Logger().info('$_tag ⏱ Invite received after ${waitMs}ms');
     _startNegotiationTimer();
     _setState(SessionConnectionState.settingRemoteDescription);
 
     try {
       final pc = _peerConnection;
-      if (pc == null || _isClosing) {
-        Logger().info('$_tag Aborting negotiate — peer connection gone');
-        return;
-      }
+      if (pc == null || _isClosing) return;
 
       _iceManager.createGatheringCompleter();
       final offerSdp = offer.sdp.withCompatibilityFixes;
 
       _videoTrackCodecs.clear();
       _videoTrackCodecs.addAll(offerSdp.videoCodecsPerSection);
-      Logger().info('$_tag Per-track codecs from SDP: $_videoTrackCodecs');
 
       await pc.setRemoteDescription(
         RTCSessionDescription(offerSdp, offer.type),
@@ -803,32 +758,24 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _iceManager.markRemoteDescSet();
       await _iceManager.drainQueuedCandidates(pc);
 
-      if (_isClosing) {
-        Logger().info('$_tag Aborting negotiate — session closed mid-flight');
-        return;
-      }
+      if (_isClosing) return;
 
       _setState(SessionConnectionState.creatingAnswer);
       final answer = await pc.createAnswer();
+
       final answerSdp = answer.sdp;
       if (answerSdp == null) {
-        throw StateError(
-          '$_tag Failed to create answer: RTCSessionDescription.sdp was null',
-        );
+        throw StateError('Failed to create answer: sdp was null');
       }
 
       final fixedSdp = answerSdp.withAnswerFixes;
       _codecDetector.extractFromSdp(fixedSdp);
-      Logger().info('$_tag Applied answer fixes (DTLS active role)');
 
       await pc.setLocalDescription(
         RTCSessionDescription(fixedSdp, answer.type),
       );
 
-      if (_isClosing) {
-        Logger().info('$_tag Aborting negotiate — session closed before send');
-        return;
-      }
+      if (_isClosing) return;
 
       _setState(SessionConnectionState.sendingAnswer);
       await _signalRService.sendSignalInviteMessage(
@@ -836,12 +783,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         SdpWrapper(type: answer.type!, sdp: fixedSdp),
         _lastInviteId ?? '',
       );
-
-      _answerSentAt = DateTime.now();
-      final negotiateMs = _inviteReceivedAt != null
-          ? _answerSentAt!.difference(_inviteReceivedAt!).inMilliseconds
-          : 0;
-      Logger().info('$_tag ⏱ Answer created+sent in ${negotiateMs}ms');
 
       _setState(SessionConnectionState.exchangingIce);
       _cancelNegotiationTimer();
@@ -860,8 +801,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void _cancelConnectTimeout() => _timers.cancelConnect();
 
   void _handleIceConnectionState(RTCIceConnectionState state) {
-    Logger().info('$_tag ICE connection state: $state');
-
     switch (state) {
       case RTCIceConnectionState.RTCIceConnectionStateChecking:
         break;
@@ -869,20 +808,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       case RTCIceConnectionState.RTCIceConnectionStateCompleted:
         _disconnectRecoveryTimer?.cancel();
         _disconnectRecoveryTimer = null;
-        final iceMs = _answerSentAt != null
-            ? DateTime.now().difference(_answerSentAt!).inMilliseconds
-            : 0;
-        final totalMs = _connectStartedAt != null
-            ? DateTime.now().difference(_connectStartedAt!).inMilliseconds
-            : 0;
-        Logger().info('$_tag 🎉 ICE CONNECTION ESTABLISHED!');
-        Logger().info(
-          '$_tag ⏱ ICE connected ${iceMs}ms after answer, ${totalMs}ms total',
-        );
         _setState(SessionConnectionState.connected);
         _iceRestartAttempts = 0;
-        // Defer stats logging off the critical path so the queue can
-        // advance immediately.
         if (_peerConnection != null) {
           final pc = _peerConnection!;
           Future.delayed(const Duration(milliseconds: 500), () {
@@ -901,7 +828,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
             }),
           );
         }
-        Logger().error('$_tag ❌ ICE FAILED');
+        Logger().error('$_tag ICE failed');
         _attemptReconnect();
       case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
         if (_peerConnection != null) {
@@ -912,7 +839,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
             }),
           );
         }
-        Logger().warn('$_tag ⚠️ ICE DISCONNECTED');
+        Logger().warn('$_tag ICE disconnected');
         _setState(SessionConnectionState.disconnected);
         _disconnectRecoveryTimer?.cancel();
         _disconnectRecoveryTimer = Timer(const Duration(seconds: 3), () {
@@ -926,12 +853,9 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   void _handleConnectionState(RTCPeerConnectionState state) {
-    Logger().info('$_tag Peer connection state: $state');
     switch (state) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-        Logger().info('$_tag 🎉 PEER CONNECTION ESTABLISHED!');
         onConnectionComplete?.call();
-        // Defer stats monitoring off the critical path.
         if (_peerConnection != null) {
           final pc = _peerConnection!;
           Future.delayed(const Duration(milliseconds: 500), () {
@@ -946,7 +870,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         if (!_isClosing &&
             _state != SessionConnectionState.reconnecting &&
             _state != SessionConnectionState.failed) {
-          Logger().error('$_tag ❌ PEER CONNECTION FAILED');
+          Logger().error('$_tag Peer connection failed');
           _attemptReconnect();
         }
       case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
@@ -965,7 +889,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   Future<void> _handleIceGatheringState(RTCIceGatheringState state) async {
-    Logger().info('$_tag ICE gathering state: $state');
     if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
       await _iceManager.sendAllEndOfCandidates(_peerConnection!);
     }
@@ -1116,9 +1039,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _reconnectInFlight = false;
     _disconnectRecoveryTimer?.cancel();
     _disconnectRecoveryTimer = null;
-    _connectStartedAt = null;
-    _inviteReceivedAt = null;
-    _answerSentAt = null;
     lastError = null;
     _remoteStreams.clear();
     _videoTracks.clear();

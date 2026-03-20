@@ -23,7 +23,7 @@ class SessionTimers {
   void startNegotiation() {
     cancelNegotiation();
     _negotiationTimer = Timer(negotiationDuration, () {
-      Logger().warn('$tag ❌ Negotiation timeout');
+      Logger().warn('$tag Negotiation timeout');
       onNegotiationTimeout();
     });
   }
@@ -36,7 +36,7 @@ class SessionTimers {
   void startConnect() {
     cancelConnect();
     _connectTimer = Timer(connectDuration, () {
-      Logger().warn('$tag ⏰ Connect phase timeout - no session received');
+      Logger().warn('$tag Connect phase timeout - no session received');
       onConnectTimeout();
     });
   }
