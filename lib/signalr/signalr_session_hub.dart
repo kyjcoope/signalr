@@ -93,23 +93,30 @@ class SignalRSessionHub {
           rendererBound = true;
           _activeVideoTrack[cameraId] = 0;
           _activeAudioTrack[cameraId] = 0;
-          try {
-            final renderer = RTCVideoRenderer();
-            await renderer.initialize();
-            if (!activeSessions.containsKey(cameraId)) {
-              await renderer.dispose();
-              return;
+          // Defer renderer init so it doesn't block the SDP negotiation
+          // critical path. The renderer will be ready well before the
+          // first decoded video frame arrives.
+          final stream = event.streams[0];
+          Future.delayed(const Duration(milliseconds: 100), () async {
+            if (!activeSessions.containsKey(cameraId)) return;
+            try {
+              final renderer = RTCVideoRenderer();
+              await renderer.initialize();
+              if (!activeSessions.containsKey(cameraId)) {
+                await renderer.dispose();
+                return;
+              }
+              _renderers[cameraId] = renderer;
+              renderer.srcObject = stream;
+              Logger().info(
+                'SignalRSessionHub: Renderer initialized & bound for $cameraId (track 1/${session.videoTrackCount})',
+              );
+            } catch (e) {
+              Logger().error(
+                'SignalRSessionHub: Failed to create renderer for $cameraId: $e',
+              );
             }
-            _renderers[cameraId] = renderer;
-            renderer.srcObject = event.streams[0];
-            Logger().info(
-              'SignalRSessionHub: Renderer initialized & bound for $cameraId (track 1/${session.videoTrackCount})',
-            );
-          } catch (e) {
-            Logger().error(
-              'SignalRSessionHub: Failed to create renderer for $cameraId: $e',
-            );
-          }
+          });
         }
       };
 

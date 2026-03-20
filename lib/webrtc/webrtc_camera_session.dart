@@ -355,8 +355,16 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     if (session != null) {
       _sessionId = session;
       Logger().info('$_tag Session started: $_sessionId');
-      _setState(SessionConnectionState.initializingPeer);
 
+      // If connect() already kicked off PC init with cached ICE servers,
+      // we just need the session ID (set above). Otherwise start PC init now.
+      if (_peerConnection != null ||
+          (_peerConnectionReady != null && !_peerConnectionReady!.isCompleted)) {
+        Logger().info('$_tag PC init already in progress — session ID stored');
+        return;
+      }
+
+      _setState(SessionConnectionState.initializingPeer);
       _peerConnectionReady ??= Completer<void>();
       try {
         await _initializePeerConnection();
@@ -418,6 +426,11 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
             '$_tag Timed out waiting for peer connection to be ready while handling invite',
           );
           _fail(ConnectionError.connectTimeout);
+          return;
+        } catch (e) {
+          Logger().info(
+            '$_tag Peer connection init failed while waiting for invite: $e',
+          );
           return;
         }
       }
@@ -589,6 +602,26 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _setState(SessionConnectionState.waitingForSession);
     _signalRService.registerPlayer(this);
     _startConnectTimeout();
+
+    // Start PC init immediately if we have cached ICE servers from a
+    // previous camera. Saves ~190ms by overlapping PC creation with the
+    // server roundtrip for this camera's session ID + invite.
+    if (_signalRService.iceServers.isNotEmpty && _peerConnection == null) {
+      _peerConnectionReady = Completer<void>();
+      _setState(SessionConnectionState.initializingPeer);
+      unawaited(_initializePeerConnection().then((_) {
+        if (!_isClosing && !_peerConnectionReady!.isCompleted) {
+          _peerConnectionReady!.complete();
+          Logger().info('$_tag Peer connection ready (early init)');
+        }
+      }).catchError((e) {
+        if (_peerConnectionReady != null &&
+            !_peerConnectionReady!.isCompleted) {
+          _peerConnectionReady!.completeError(e);
+        }
+      }));
+    }
+
     await _signalRService.connectConsumerSession(cameraId);
   }
 
@@ -649,21 +682,17 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     if (_isClosing) {
       Logger().info('$_tag Session closed during PC init — discarding orphan');
       await pc.close();
+      if (_peerConnectionReady != null &&
+          !_peerConnectionReady!.isCompleted) {
+        _peerConnectionReady!.completeError(
+          StateError('Session closed during PC init'),
+        );
+      }
       return;
     }
 
     _bindPeerConnectionHandlers(pc);
     _peerConnection = pc;
-
-    await pc.addTransceiver(
-      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-    );
-    await pc.addTransceiver(
-      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-    );
-    Logger().info('$_tag Added audio and video transceivers');
   }
 
   Map<String, dynamic> _buildConfig() {
@@ -753,6 +782,12 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _setState(SessionConnectionState.settingRemoteDescription);
 
     try {
+      final pc = _peerConnection;
+      if (pc == null || _isClosing) {
+        Logger().info('$_tag Aborting negotiate — peer connection gone');
+        return;
+      }
+
       _iceManager.createGatheringCompleter();
       final offerSdp = offer.sdp.withCompatibilityFixes;
 
@@ -760,13 +795,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _videoTrackCodecs.addAll(offerSdp.videoCodecsPerSection);
       Logger().info('$_tag Per-track codecs from SDP: $_videoTrackCodecs');
 
-      await _peerConnection!.setRemoteDescription(
+      await pc.setRemoteDescription(
         RTCSessionDescription(offerSdp, offer.type),
       );
 
       _iceManager.setMlineMapping(offerSdp.mlineToMidMapping);
       _iceManager.markRemoteDescSet();
-      await _iceManager.drainQueuedCandidates(_peerConnection!);
+      await _iceManager.drainQueuedCandidates(pc);
 
       if (_isClosing) {
         Logger().info('$_tag Aborting negotiate — session closed mid-flight');
@@ -774,7 +809,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       }
 
       _setState(SessionConnectionState.creatingAnswer);
-      final answer = await _peerConnection!.createAnswer();
+      final answer = await pc.createAnswer();
       final answerSdp = answer.sdp;
       if (answerSdp == null) {
         throw StateError(
@@ -786,7 +821,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       _codecDetector.extractFromSdp(fixedSdp);
       Logger().info('$_tag Applied answer fixes (DTLS active role)');
 
-      await _peerConnection!.setLocalDescription(
+      await pc.setLocalDescription(
         RTCSessionDescription(fixedSdp, answer.type),
       );
 
@@ -834,13 +869,6 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
       case RTCIceConnectionState.RTCIceConnectionStateCompleted:
         _disconnectRecoveryTimer?.cancel();
         _disconnectRecoveryTimer = null;
-        if (_peerConnection != null) {
-          unawaited(
-            _statsMonitor.logOnce(_peerConnection!).catchError((e) {
-              Logger().warn('$_tag logOnce error: $e');
-            }),
-          );
-        }
         final iceMs = _answerSentAt != null
             ? DateTime.now().difference(_answerSentAt!).inMilliseconds
             : 0;
@@ -853,6 +881,18 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
         );
         _setState(SessionConnectionState.connected);
         _iceRestartAttempts = 0;
+        // Defer stats logging off the critical path so the queue can
+        // advance immediately.
+        if (_peerConnection != null) {
+          final pc = _peerConnection!;
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (!_isClosing) {
+              _statsMonitor.logOnce(pc).catchError((e) {
+                Logger().warn('$_tag logOnce error: $e');
+              });
+            }
+          });
+        }
       case RTCIceConnectionState.RTCIceConnectionStateFailed:
         if (_peerConnection != null) {
           unawaited(
@@ -890,10 +930,18 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     switch (state) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
         Logger().info('$_tag 🎉 PEER CONNECTION ESTABLISHED!');
-        _statsMonitor.setTag(_tag);
-        _statsMonitor.start(_peerConnection!);
         onConnectionComplete?.call();
-        _statsMonitor.statsNotifier.addListener(_checkCodecFromStats);
+        // Defer stats monitoring off the critical path.
+        if (_peerConnection != null) {
+          final pc = _peerConnection!;
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (!_isClosing) {
+              _statsMonitor.setTag(_tag);
+              _statsMonitor.start(pc);
+              _statsMonitor.statsNotifier.addListener(_checkCodecFromStats);
+            }
+          });
+        }
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
         if (!_isClosing &&
             _state != SessionConnectionState.reconnecting &&

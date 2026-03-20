@@ -48,7 +48,7 @@ class CameraConnectionQueue {
   static int maxActiveDecoders = 16;
 
   /// Timeout for the first attempt — catches quick-connecting cameras.
-  static Duration fastTimeout = const Duration(seconds: 8);
+  static Duration fastTimeout = const Duration(seconds: 15);
 
   /// Timeout for retries — gives struggling cameras more time.
   static Duration slowTimeout = const Duration(seconds: 20);
@@ -210,24 +210,45 @@ class CameraConnectionQueue {
 
     if (_cancelled) return;
 
-    // Fill available slots from the queue
+    // Fill available slots from the queue, staggering starts by 200ms
+    // to reduce main-thread contention from concurrent createPeerConnection
+    // calls (each one blocks the platform thread for ~600ms+ under load).
+    int started = 0;
     while (_activeSlots.length < maxConcurrent &&
         _connectedSlugs.length < maxActiveDecoders &&
         _queue.isNotEmpty) {
       final entry = _queue.removeFirst();
       final timeout = entry.attempt > 0 ? slowTimeout : fastTimeout;
-      _startSlot(entry, timeout);
+      if (started > 0) {
+        final delay = Duration(milliseconds: 200 * started);
+        _activeSlots.add(entry.slug);
+        Future.delayed(delay, () {
+          if (!_cancelled) {
+            _startSlotBody(entry, timeout);
+          } else {
+            _activeSlots.remove(entry.slug);
+            _managedSlugs.remove(entry.slug);
+            _completers.remove(entry.slug)?.complete();
+          }
+        });
+      } else {
+        _startSlot(entry, timeout);
+      }
+      started++;
     }
   }
 
-  /// Start a camera in a connection slot.
+  /// Start a camera in a connection slot (adds to _activeSlots + starts).
   void _startSlot(_QueueEntry entry, Duration timeout) {
-    final slug = entry.slug;
-    _activeSlots.add(slug);
+    _activeSlots.add(entry.slug);
+    _startSlotBody(entry, timeout);
+  }
 
+  /// Actually kick off the connection attempt (slot already reserved).
+  void _startSlotBody(_QueueEntry entry, Duration timeout) {
     final phase = entry.attempt == 0 ? 'fast' : 'retry #${entry.attempt}';
     Logger().info(
-      '[Queue] Starting $slug ($phase, timeout=${timeout.inSeconds}s) '
+      '[Queue] Starting ${entry.slug} ($phase, timeout=${timeout.inSeconds}s) '
       '[${_activeSlots.length}/$maxConcurrent slots, '
       '${_connectedSlugs.length}/$maxActiveDecoders decoders]',
     );
