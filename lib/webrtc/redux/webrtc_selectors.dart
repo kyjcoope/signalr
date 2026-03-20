@@ -12,15 +12,15 @@ bool hasWebRtcSession(AppState state, String slug) =>
 
 bool isWebRtcConnected(AppState state, String slug) =>
     state.webRtc.sessions[slug]?.connectionState ==
-    WebRtcConnectionState.sessionConnected;
+    WebRtcConnectionState.connected;
 
 bool isWebRtcPending(AppState state, String slug) =>
     state.webRtc.sessions[slug]?.connectionState ==
-    WebRtcConnectionState.sessionPending;
+    WebRtcConnectionState.pending;
 
 WebRtcConnectionState getWebRtcConnectionState(AppState state, String slug) =>
     state.webRtc.sessions[slug]?.connectionState ??
-    WebRtcConnectionState.sessionDisconnected;
+    WebRtcConnectionState.disconnected;
 
 int? getWebRtcTextureId(AppState state, String slug) =>
     state.webRtc.sessions[slug]?.textureId;
@@ -55,7 +55,7 @@ int getWebRtcActiveAudioTrack(AppState state, String slug) =>
 String? selectTrackInfo(AppState state, String slug) {
   final session = state.webRtc.sessions[slug];
   if (session == null ||
-      session.connectionState != WebRtcConnectionState.sessionConnected) {
+      session.connectionState != WebRtcConnectionState.connected) {
     return null;
   }
   return 'V:${session.videoTracks.length} A:${session.audioTracks.length}';
@@ -68,7 +68,7 @@ final getConnectedWebRtcSlugs =
           .where(
             (e) =>
                 e.value.connectionState ==
-                WebRtcConnectionState.sessionConnected,
+                WebRtcConnectionState.connected,
           )
           .map((e) => e.key)
           .toList(),

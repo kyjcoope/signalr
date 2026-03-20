@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show ValueNotifier, kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -21,7 +21,7 @@ class CameraListItem extends StatelessWidget {
     required this.onDisconnect,
     required this.onToggleFavorite,
     required this.compact,
-    this.statsNotifier,
+    this.videoStats,
     this.trackInfo,
     this.videoTrackCount = 0,
     this.activeVideoTrack = 0,
@@ -43,7 +43,7 @@ class CameraListItem extends StatelessWidget {
   final VoidCallback onDisconnect;
   final VoidCallback onToggleFavorite;
   final bool compact;
-  final ValueNotifier<WebRtcVideoStats>? statsNotifier;
+  final WebRtcVideoStats? videoStats;
   final String? trackInfo;
   final int videoTrackCount;
   final int activeVideoTrack;
@@ -63,40 +63,37 @@ class CameraListItem extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             compact ? _buildCompactLayout() : _buildWideLayout(),
-            if (connected && _hasVideo) ...[
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: SizedBox(
-                  width: compact ? double.infinity : _videoWidth,
-                  height: compact ? (_videoHeight * 0.75) : _videoHeight,
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: Container(
-                          color: Colors.black,
-                          child: _buildVideoWidget(),
-                        ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: compact ? double.infinity : _videoWidth,
+                height: compact ? (_videoHeight * 0.75) : _videoHeight,
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: Container(
+                        color: Colors.black,
+                        child: _buildPanelContent(),
                       ),
-                      // Track switching arrows
-                      if (videoTrackCount > 1)
-                        Positioned(
-                          bottom: 4,
-                          left: 0,
-                          right: 0,
-                          child: _buildTrackSwitcher(),
-                        ),
-                      if (statsNotifier != null)
-                        Positioned(
-                          top: 4,
-                          right: 4,
-                          child: _StatsOverlay(notifier: statsNotifier!),
-                        ),
-                    ],
-                  ),
+                    ),
+                    if (connected && _hasVideo && videoTrackCount > 1)
+                      Positioned(
+                        bottom: 4,
+                        left: 0,
+                        right: 0,
+                        child: _buildTrackSwitcher(),
+                      ),
+                    if (videoStats != null)
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: _StatsOverlay(stats: videoStats!),
+                      ),
+                  ],
                 ),
               ),
-            ],
+            ),
           ],
         ),
       ),
@@ -105,25 +102,40 @@ class CameraListItem extends StatelessWidget {
 
   bool get _hasVideo => kIsWeb ? renderer != null : textureId != null;
 
-  Widget _buildVideoWidget() {
-    if (kIsWeb) {
-      // Web: use RTCVideoView which internally uses HtmlElementView
-      return RTCVideoView(
-        renderer!,
-        mirror: false,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-      );
-    } else {
-      // Native: use Texture widget with aspect ratio preservation
-      return FittedBox(
-        fit: BoxFit.contain,
+  Widget _buildPanelContent() {
+    if (connected && _hasVideo) {
+      if (kIsWeb) {
+        return RTCVideoView(
+          renderer!,
+          mirror: false,
+          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+        );
+      } else {
+        return FittedBox(
+          fit: BoxFit.contain,
+          child: SizedBox(
+            width: 16,
+            height: 9,
+            child: Texture(textureId: textureId!),
+          ),
+        );
+      }
+    }
+
+    if (isPending) {
+      return const Center(
         child: SizedBox(
-          width: 16,
-          height: 9,
-          child: Texture(textureId: textureId!),
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.5,
+            color: Colors.white38,
+          ),
         ),
       );
     }
+
+    return const SizedBox.shrink();
   }
 
   Widget _buildTrackSwitcher() {
@@ -388,40 +400,35 @@ class CameraListItem extends StatelessWidget {
 
 /// Semi-transparent overlay showing live WebRTC video stats.
 class _StatsOverlay extends StatelessWidget {
-  const _StatsOverlay({required this.notifier});
+  const _StatsOverlay({required this.stats});
 
-  final ValueNotifier<WebRtcVideoStats> notifier;
+  final WebRtcVideoStats stats;
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<WebRtcVideoStats>(
-      valueListenable: notifier,
-      builder: (context, stats, _) {
-        // Don't show anything until we have real data.
-        if (stats.rfps <= 0 && stats.dfps <= 0) {
-          return const SizedBox.shrink();
-        }
+    // Don't show anything until we have real data.
+    if (stats.rfps <= 0 && stats.dfps <= 0) {
+      return const SizedBox.shrink();
+    }
 
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.65),
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _line('Rx', '${stats.rfps.round()} fps'),
-              _line('Dec', '${stats.dfps.round()} fps'),
-              if (stats.width > 0 && stats.height > 0)
-                _line('Res', '${stats.width}x${stats.height}'),
-              if (stats.bitrateKbps > 0)
-                _line('Kbps', stats.bitrateKbps.round().toString()),
-            ],
-          ),
-        );
-      },
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _line('Rx', '${stats.rfps.round()} fps'),
+          _line('Dec', '${stats.dfps.round()} fps'),
+          if (stats.width > 0 && stats.height > 0)
+            _line('Res', '${stats.width}x${stats.height}'),
+          if (stats.bitrateKbps > 0)
+            _line('Kbps', stats.bitrateKbps.round().toString()),
+        ],
+      ),
     );
   }
 

@@ -63,10 +63,10 @@ final selectVisibleCameras =
         // Working / Pending filter
         bool isWorking(String id) =>
             sessions[id]?.connectionState ==
-            WebRtcConnectionState.sessionConnected;
+            WebRtcConnectionState.connected;
         bool isPending(String id) =>
             sessions[id]?.connectionState ==
-            WebRtcConnectionState.sessionPending;
+            WebRtcConnectionState.pending;
 
         if (filters.workingOnly && filters.pendingOnly) {
           base = base.where((id) => isWorking(id) || isPending(id)).toList();

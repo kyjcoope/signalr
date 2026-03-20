@@ -226,7 +226,7 @@ class CameraListState extends State<StatefulWidget> {
       onToggleFavorite: () =>
           store.dispatch(thunks.toggleFavoriteAndPersist(slug)),
       compact: compact,
-      statsNotifier: _hub.getStatsNotifier(slug),
+      videoStats: session?.videoStats,
       trackInfo: trackInfo,
       videoTrackCount: session?.videoTracks.length ?? 0,
       activeVideoTrack: session?.activeVideoTrack ?? 0,

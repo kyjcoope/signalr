@@ -101,8 +101,8 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   SignalRService get signalRService => _signalRService;
   String? get negotiatedVideoCodec => _codecDetector.codec;
 
-  ValueNotifier<WebRtcVideoStats> get statsNotifier =>
-      _statsMonitor.statsNotifier;
+  WebRtcVideoStats get latestStats => _statsMonitor.latestStats;
+  void Function()? onStatsUpdated;
 
   List<MediaStream> get remoteStreams => List.unmodifiable(_remoteStreams);
   MediaStream? get remoteStream =>
@@ -168,7 +168,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _cancelConnectTimeout();
     _disconnectRecoveryTimer?.cancel();
     _disconnectRecoveryTimer = null;
-    _statsMonitor.statsNotifier.removeListener(_checkCodecFromStats);
+    _statsMonitor.onStatsUpdated = null;
     _statsMonitor.dispose();
     _signalRService.unregisterPlayer(this);
 
@@ -559,7 +559,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
     if (_state != SessionConnectionState.idle) {
       _iceManager.reset();
-      _statsMonitor.statsNotifier.removeListener(_checkCodecFromStats);
+      _statsMonitor.onStatsUpdated = null;
       _statsMonitor.dispose();
       _codecDetector.reset();
       await _cleanupDataChannel();
@@ -618,7 +618,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _disconnectRecoveryTimer = null;
     _cancelNegotiationTimer();
     _cancelConnectTimeout();
-    _statsMonitor.statsNotifier.removeListener(_checkCodecFromStats);
+    _statsMonitor.onStatsUpdated = null;
     _statsMonitor.dispose();
 
     if (_sessionId != null) {
@@ -862,7 +862,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
             if (!_isClosing) {
               _statsMonitor.setTag(_tag);
               _statsMonitor.start(pc);
-              _statsMonitor.statsNotifier.addListener(_checkCodecFromStats);
+              _statsMonitor.onStatsUpdated = () {
+                _checkCodecFromStats();
+                onStatsUpdated?.call();
+              };
             }
           });
         }
@@ -881,10 +884,12 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   }
 
   void _checkCodecFromStats() {
-    final codec = _statsMonitor.statsNotifier.value.codec;
+    final codec = _statsMonitor.latestStats.codec;
     if (codec.isNotEmpty) {
       _codecDetector.resolveFromStats(codec);
-      _statsMonitor.statsNotifier.removeListener(_checkCodecFromStats);
+      _statsMonitor.onStatsUpdated = () {
+        onStatsUpdated?.call();
+      };
     }
   }
 
@@ -946,7 +951,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
     try {
       _iceManager.reset();
-      _statsMonitor.statsNotifier.removeListener(_checkCodecFromStats);
+      _statsMonitor.onStatsUpdated = null;
       _statsMonitor.dispose();
       await _cleanupDataChannel();
       await _cleanupPeerConnection();

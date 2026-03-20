@@ -50,7 +50,7 @@ void syncSessionToRedux(Store<AppState> store, String slug) {
     audioTracks: audioTracks,
     activeVideoTrack: hub.getActiveVideoTrack(slug),
     activeAudioTrack: hub.getActiveAudioTrack(slug),
-    videoStats: hub.getStatsNotifier(slug)?.value,
+    videoStats: hub.getLatestStats(slug),
   );
 
   if (snapshot == existing) return;
@@ -85,21 +85,21 @@ WebRtcConnectionState _mapConnectionState(SessionConnectionState state) {
   switch (state) {
     case SessionConnectionState.idle:
     case SessionConnectionState.closed:
-      return WebRtcConnectionState.sessionDisconnected;
+      return WebRtcConnectionState.disconnected;
     case SessionConnectionState.waitingForSession:
     case SessionConnectionState.initializingPeer:
     case SessionConnectionState.settingRemoteDescription:
     case SessionConnectionState.creatingAnswer:
     case SessionConnectionState.sendingAnswer:
     case SessionConnectionState.exchangingIce:
-      return WebRtcConnectionState.sessionPending;
+      return WebRtcConnectionState.pending;
     case SessionConnectionState.connected:
-      return WebRtcConnectionState.sessionConnected;
+      return WebRtcConnectionState.connected;
     case SessionConnectionState.disconnected:
     case SessionConnectionState.reconnecting:
-      return WebRtcConnectionState.sessionReconnecting;
+      return WebRtcConnectionState.reconnecting;
     case SessionConnectionState.failed:
-      return WebRtcConnectionState.sessionFailed;
+      return WebRtcConnectionState.failed;
   }
 }
 

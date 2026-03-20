@@ -4,11 +4,11 @@ import '../connection_error.dart';
 import '../webrtc_stats_monitor.dart';
 
 enum WebRtcConnectionState {
-  sessionDisconnected,
-  sessionPending,
-  sessionConnected,
-  sessionReconnecting,
-  sessionFailed,
+  disconnected,
+  pending,
+  connected,
+  reconnecting,
+  failed,
 }
 
 class TrackInfo extends Equatable {
@@ -24,7 +24,7 @@ class TrackInfo extends Equatable {
 
 class WebRtcSessionState extends Equatable {
   const WebRtcSessionState({
-    this.connectionState = WebRtcConnectionState.sessionDisconnected,
+    this.connectionState = WebRtcConnectionState.disconnected,
     this.error,
     this.textureId,
     this.videoTracks = const [],

@@ -4,7 +4,6 @@ import '../utils/logger.dart';
 
 import 'package:collection/collection.dart';
 import 'package:equatable/equatable.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 String _pick(Map v, List<String> keys, {String fallback = '—'}) {
@@ -45,6 +44,26 @@ String _fmtRes(String w, String h) {
 
 String _pad(String s) => s.padRight(6);
 
+StatsReport? _findRtp(
+  Map<String, List<StatsReport>>? byType,
+  String type,
+  String mediaKind, {
+  bool requireLocal = false,
+}) {
+  return byType?[type]?.firstWhereOrNull(
+    (r) {
+      final kind =
+          _pick(r.values, ['kind', 'mediaType']).toLowerCase();
+      if (kind != mediaKind) return false;
+      if (requireLocal &&
+          _pick(r.values, ['remoteSource'], fallback: 'false') != 'false') {
+        return false;
+      }
+      return true;
+    },
+  );
+}
+
 class WebRtcVideoStats extends Equatable {
   const WebRtcVideoStats({
     this.rfps = 0,
@@ -82,30 +101,34 @@ class WebRtcStatsMonitor {
   }) : _tag = tag;
 
   final Duration interval;
-  final ValueNotifier<WebRtcVideoStats> statsNotifier = ValueNotifier(
-    WebRtcVideoStats.empty,
-  );
+  void Function()? onStatsUpdated;
 
-  void Function(WebRtcVideoStats stats)? onStats;
+  static const int _detailedLogInterval = 5;
 
   Timer? _timer;
   String _tag;
   DateTime? _lastPollTime;
   int? _lastFramesDecoded;
   int? _lastVidRxBytes, _lastVidTxBytes, _lastAudRxBytes, _lastAudTxBytes;
+  WebRtcVideoStats _latestStats = WebRtcVideoStats.empty;
+  int _pollCount = 0;
   bool _pollInProgress = false;
 
   void setTag(String tag) => _tag = tag;
 
   void start(RTCPeerConnection pc) {
     stop();
+    _lastPollTime = DateTime.now();
     _timer = Timer.periodic(interval, (_) => _poll(pc));
+    _poll(pc);
   }
 
   void stop() {
     _timer?.cancel();
     _timer = null;
   }
+
+  WebRtcVideoStats get latestStats => _latestStats;
 
   void dispose() {
     stop();
@@ -115,8 +138,9 @@ class WebRtcStatsMonitor {
     _lastVidTxBytes = null;
     _lastAudRxBytes = null;
     _lastAudTxBytes = null;
+    _pollCount = 0;
     _pollInProgress = false;
-    statsNotifier.value = WebRtcVideoStats.empty;
+    _latestStats = WebRtcVideoStats.empty;
   }
 
   Future<void> logOnce(RTCPeerConnection pc) => _poll(pc);
@@ -124,6 +148,7 @@ class WebRtcStatsMonitor {
   Future<void> _poll(RTCPeerConnection pc) async {
     if (_pollInProgress) return;
     _pollInProgress = true;
+    _pollCount++;
 
     try {
       final reports = await pc.getStats();
@@ -135,9 +160,36 @@ class WebRtcStatsMonitor {
         (byType[r.type] ??= []).add(r);
       }
 
-      final vidRxBytes = _updateVideoStats(byId, byType);
-      _logDetailed(byId, byType);
+      final inV = _findRtp(byType, 'inbound-rtp', 'video', requireLocal: true);
+      final outV = _findRtp(byType, 'outbound-rtp', 'video');
+      final inA = _findRtp(byType, 'inbound-rtp', 'audio', requireLocal: true);
+      final outA = _findRtp(byType, 'outbound-rtp', 'audio');
+
+      final now = DateTime.now();
+      final dt = _lastPollTime != null
+          ? now.difference(_lastPollTime!).inMilliseconds / 1000.0
+          : 0.0;
+
+      final vidRxBytes = _pickInt(inV?.values ?? {}, ['bytesReceived']);
+      final vidTxBytes = _pickInt(outV?.values ?? {}, ['bytesSent']);
+      final audRxBytes = _pickInt(inA?.values ?? {}, ['bytesReceived']);
+      final audTxBytes = _pickInt(outA?.values ?? {}, ['bytesSent']);
+
+      double? vidRxKbps = _deltaKbps(vidRxBytes, _lastVidRxBytes, dt);
+      double? vidTxKbps = _deltaKbps(vidTxBytes, _lastVidTxBytes, dt);
+      double? audRxKbps = _deltaKbps(audRxBytes, _lastAudRxBytes, dt);
+      double? audTxKbps = _deltaKbps(audTxBytes, _lastAudTxBytes, dt);
+
+      _updateVideoStats(byId, inV, vidRxKbps ?? 0, dt);
+      if (_pollCount % _detailedLogInterval == 0) {
+        _logDetailed(byId, byType, inV, outV, inA, outA, vidRxKbps, vidTxKbps, audRxKbps, audTxKbps);
+      }
+
+      _lastPollTime = now;
       _lastVidRxBytes = vidRxBytes ?? _lastVidRxBytes;
+      _lastVidTxBytes = vidTxBytes ?? _lastVidTxBytes;
+      _lastAudRxBytes = audRxBytes ?? _lastAudRxBytes;
+      _lastAudTxBytes = audTxBytes ?? _lastAudTxBytes;
     } catch (e) {
       Logger().warn('$_tag Stats poll error: $e');
     } finally {
@@ -145,24 +197,24 @@ class WebRtcStatsMonitor {
     }
   }
 
-  int? _updateVideoStats(
+  double? _deltaKbps(int? now, int? last, double dt) {
+    if (now == null || last == null || dt <= 0) return null;
+    return ((now - last) * 8.0 / dt) / 1000.0;
+  }
+
+  void _updateVideoStats(
     Map<String, StatsReport> byId,
-    Map<String, List<StatsReport>> byType,
+    StatsReport? inV,
+    double bitrateKbps,
+    double dt,
   ) {
-    final inV = byType['inbound-rtp']?.firstWhereOrNull(
-      (r) =>
-          _pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video' &&
-          _pick(r.values, ['remoteSource'], fallback: 'false') == 'false',
-    );
-    if (inV == null) return null;
+    if (inV == null) return;
 
     final v = inV.values;
     final receivedFps = _pickNum(v, ['framesPerSecond']) ?? 0;
     final width = _pickInt(v, ['frameWidth']) ?? 0;
     final height = _pickInt(v, ['frameHeight']) ?? 0;
     final framesDecoded = _pickInt(v, ['framesDecoded']);
-    final bytesReceived = _pickInt(v, ['bytesReceived']);
-    final now = DateTime.now();
 
     final codecId = _pick(v, ['codecId'], fallback: '');
     String codec = '';
@@ -175,24 +227,17 @@ class WebRtcStatsMonitor {
     }
 
     double decodedFps = 0;
-    double bitrateKbps = 0;
-    if (_lastPollTime != null) {
-      final dt = now.difference(_lastPollTime!).inMilliseconds / 1000.0;
-      if (dt > 0) {
-        if (framesDecoded != null && _lastFramesDecoded != null) {
-          decodedFps = (framesDecoded - _lastFramesDecoded!) / dt;
-        }
-        if (bytesReceived != null && _lastVidRxBytes != null) {
-          bitrateKbps =
-              ((bytesReceived - _lastVidRxBytes!) * 8.0 / dt) / 1000.0;
-        }
+    if (dt > 0) {
+      if (framesDecoded != null && _lastFramesDecoded != null) {
+        decodedFps = (framesDecoded - _lastFramesDecoded!) / dt;
+      } else if (receivedFps > 0) {
+        decodedFps = receivedFps.toDouble();
       }
     }
 
-    _lastPollTime = now;
     _lastFramesDecoded = framesDecoded;
 
-    final newStats = WebRtcVideoStats(
+    _latestStats = WebRtcVideoStats(
       rfps: receivedFps.toDouble(),
       dfps: decodedFps,
       width: width,
@@ -200,15 +245,20 @@ class WebRtcStatsMonitor {
       bitrateKbps: bitrateKbps,
       codec: codec,
     );
-    statsNotifier.value = newStats;
-    onStats?.call(newStats);
-
-    return bytesReceived;
+    onStatsUpdated?.call();
   }
 
   void _logDetailed(
     Map<String, StatsReport> byId,
     Map<String, List<StatsReport>> byType,
+    StatsReport? inV,
+    StatsReport? outV,
+    StatsReport? inA,
+    StatsReport? outA,
+    double? vidRxKbps,
+    double? vidTxKbps,
+    double? audRxKbps,
+    double? audTxKbps,
   ) {
     final transport = byType['transport']?.firstWhereOrNull(
       (r) =>
@@ -267,51 +317,15 @@ class WebRtcStatsMonitor {
     final role = _pick(tv, ['iceRole']);
     final ufrag = _pick(tv, ['iceLocalUsernameFragment', 'localCertificateId']);
 
-    final inV = byType['inbound-rtp']?.firstWhereOrNull(
-      (r) =>
-          _pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video' &&
-          _pick(r.values, ['remoteSource'], fallback: 'false') == 'false',
-    );
-    final outV = byType['outbound-rtp']?.firstWhereOrNull(
-      (r) => _pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'video',
-    );
-    final inA = byType['inbound-rtp']?.firstWhereOrNull(
-      (r) =>
-          _pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'audio' &&
-          _pick(r.values, ['remoteSource'], fallback: 'false') == 'false',
-    );
-    final outA = byType['outbound-rtp']?.firstWhereOrNull(
-      (r) => _pick(r.values, ['kind', 'mediaType']).toLowerCase() == 'audio',
-    );
-
-    double? dKbps(int? now, int? last) {
-      if (now == null || last == null || _lastPollTime == null) return null;
-      final dt = interval.inMilliseconds / 1000.0;
-      if (dt <= 0) return null;
-      return ((now - last) * 8.0 / dt) / 1000.0;
-    }
-
-    final vidRxBytes = _pickInt(inV?.values ?? {}, ['bytesReceived']);
     final vidRxFps = _pickNum(inV?.values ?? {}, ['framesPerSecond']);
     final vidW = _pick(inV?.values ?? {}, ['frameWidth']);
     final vidH = _pick(inV?.values ?? {}, ['frameHeight']);
     final vidLost = _pick(inV?.values ?? {}, ['packetsLost']);
     final vidJit = _pickNum(inV?.values ?? {}, ['jitter']);
-    final vidRxKbps = dKbps(vidRxBytes, _lastVidRxBytes);
-    final vidTxBytes = _pickInt(outV?.values ?? {}, ['bytesSent']);
     final vidTxFps = _pickNum(outV?.values ?? {}, ['framesPerSecond']);
-    final vidTxKbps = dKbps(vidTxBytes, _lastVidTxBytes);
 
-    final audRxBytes = _pickInt(inA?.values ?? {}, ['bytesReceived']);
     final audLost = _pick(inA?.values ?? {}, ['packetsLost']);
     final audJit = _pickNum(inA?.values ?? {}, ['jitter']);
-    final audTxBytes = _pickInt(outA?.values ?? {}, ['bytesSent']);
-    final audRxKbps = dKbps(audRxBytes, _lastAudRxBytes);
-    final audTxKbps = dKbps(audTxBytes, _lastAudTxBytes);
-
-    _lastVidTxBytes = vidTxBytes ?? _lastVidTxBytes;
-    _lastAudRxBytes = audRxBytes ?? _lastAudRxBytes;
-    _lastAudTxBytes = audTxBytes ?? _lastAudTxBytes;
 
     final t = _tag.isNotEmpty ? '$_tag ' : '';
     final buf = StringBuffer()

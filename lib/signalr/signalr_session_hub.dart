@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../utils/logger.dart';
@@ -194,8 +193,8 @@ class SignalRSessionHub {
   RTCVideoRenderer? getRenderer(String cameraId) => _renderers[cameraId];
   int? getTextureId(String cameraId) => _renderers[cameraId]?.textureId;
 
-  ValueNotifier<WebRtcVideoStats>? getStatsNotifier(String cameraId) =>
-      activeSessions[cameraId]?.statsNotifier;
+  WebRtcVideoStats? getLatestStats(String cameraId) =>
+      activeSessions[cameraId]?.latestStats;
 
   int getVideoTrackCount(String cameraId) =>
       activeSessions[cameraId]?.videoTrackCount ?? 0;

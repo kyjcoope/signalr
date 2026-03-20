@@ -136,7 +136,7 @@ class CameraConnectionController {
     session.onVideoCodecResolved = (_) => syncSessionToRedux(store, slug);
     session.onLocalIceCandidate = () => syncSessionToRedux(store, slug);
     session.onRemoteIceCandidate = () => syncSessionToRedux(store, slug);
-    session.statsNotifier.addListener(() => syncSessionToRedux(store, slug));
+    session.onStatsUpdated = () => syncSessionToRedux(store, slug);
     session.onSessionFailed = (_) {
       final queue = CameraConnectionQueue.instance;
       if (_desiredState[slug] == true && !queue.isManaged(slug)) {
