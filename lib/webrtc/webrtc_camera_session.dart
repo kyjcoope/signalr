@@ -41,14 +41,10 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   final Duration negotiationTimeout;
   final int iceCandidatePoolSize;
 
-  VoidCallback? onConnectionComplete;
+  VoidCallback? onChanged;
   VoidCallback? onDataChannelReady;
   void Function(RTCTrackEvent)? onTrack;
   void Function(Uint8List)? onDataFrame;
-  VoidCallback? onLocalIceCandidate;
-  VoidCallback? onRemoteIceCandidate;
-  void Function(String codec)? onVideoCodecResolved;
-  void Function(SessionConnectionState state)? onStateChanged;
   void Function(ConnectionError error)? onSessionFailed;
 
   RTCPeerConnection? _peerConnection;
@@ -143,7 +139,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     final oldState = _state;
     _state = newState;
     Logger().info('$_tag State: $oldState -> $newState');
-    onStateChanged?.call(newState);
+    onChanged?.call();
 
     if (!_connectionCompleter.isCompleted) {
       if (newState == SessionConnectionState.connected) {
@@ -186,13 +182,13 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
     _iceManager = IceCandidateManager(
       tag: _tag,
       onSendCandidate: _sendCandidate,
-      onLocalIceStarted: () => onLocalIceCandidate?.call(),
-      onRemoteIceStarted: () => onRemoteIceCandidate?.call(),
+      onLocalIceStarted: () => onChanged?.call(),
+      onRemoteIceStarted: () => onChanged?.call(),
     );
 
     _codecDetector = CodecDetector(
       tag: _tag,
-      onCodecResolved: (codec) => onVideoCodecResolved?.call(codec),
+      onCodecResolved: (codec) => onChanged?.call(),
     );
 
     _timers = SessionTimers(
@@ -855,7 +851,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
   void _handleConnectionState(RTCPeerConnectionState state) {
     switch (state) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-        onConnectionComplete?.call();
+        onChanged?.call();
         if (_peerConnection != null) {
           final pc = _peerConnection!;
           Future.delayed(const Duration(milliseconds: 500), () {
