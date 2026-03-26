@@ -18,6 +18,7 @@ import 'sdp_utils.dart';
 import 'signaling_message.dart';
 import 'webrtc_stats_monitor.dart';
 
+
 const Duration _negotiationTimeout = Duration(seconds: 30);
 
 class WebRtcCameraSession implements VideoWebRTCPlayer {
@@ -43,7 +44,7 @@ class WebRtcCameraSession implements VideoWebRTCPlayer {
 
   VoidCallback? onChanged;
   VoidCallback? onDataChannelReady;
-  void Function(RTCTrackEvent)? onTrack;
+  FutureOr<void> Function(RTCTrackEvent)? onTrack;
   void Function(Uint8List)? onDataFrame;
   void Function(ConnectionError error)? onSessionFailed;
 

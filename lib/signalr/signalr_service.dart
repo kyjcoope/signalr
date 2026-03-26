@@ -275,6 +275,11 @@ class SignalRService {
       _players.clear();
       _playersByDevice.clear();
       _playersBySession.clear();
+      for (final gate in _answerGates.values) {
+        if (!gate.isCompleted) gate.complete();
+      }
+      _answerGates.clear();
+      iceServers = [];
       _messageRouter = null;
     }
 
