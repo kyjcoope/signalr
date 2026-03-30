@@ -404,3 +404,15 @@ At the end, provide a concise summary with:
 - detected shared/private packages or internal repos and confidence level
 - notable skills added and why
 - anything left conservative because the repo did not provide enough evidence
+
+
+
+
+https://code.visualstudio.com/docs/copilot/customization/agent-skills
+https://code.visualstudio.com/docs/copilot/customization/custom-instructions
+https://code.visualstudio.com/docs/copilot/guides/customize-copilot-guide
+https://docs.github.com/en/copilot/reference/customization-cheat-sheet?utm_source=chatgpt.com
+https://code.visualstudio.com/docs/copilot/customization/agent-skills
+https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?utm_source=chatgpt.com
+https://code.visualstudio.com/docs/copilot/customization/custom-instructions
+https://code.visualstudio.com/docs/copilot/guides/customize-copilot-guide
