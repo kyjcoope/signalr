@@ -1,127 +1,406 @@
-If your backend expects a stream of mic audio, what you’re describing is usually raw PCM frames (most commonly PCM16 little-endian, mono), sent continuously in small chunks (e.g., 20–40ms) over a long-lived HTTP request.
+You are setting up GitHub Copilot customizations for this repository.
 
-Below are the best “modern iOS + Android” ways to do this, with the knobs that matter for clean voice.
+Your job is to inspect the REAL codebase, infer how this project actually works, and then create a structured Copilot customization system that matches this repo instead of generating generic boilerplate.
 
-What to stream (a sane default)
+Work in this order:
 
-PCM16LE, mono, with one of:
+PHASE 1 — Inspect and infer
+Before creating files, inspect the repository and determine as much as possible from code and config:
 
-48 kHz (best fidelity, simplest on-device because many devices naturally run 48k)
+A) Core stack and architecture
+- main languages and frameworks
+- project/app structure
+- state management patterns
+- navigation/routing patterns
+- dependency injection / service location patterns
+- error handling patterns
+- logging patterns
+- async/concurrency patterns
+- testing patterns
+- build and CI commands
+- performance-sensitive areas
+- platform/native integration points
 
-16 kHz (often sufficient for voice and cheaper bandwidth, but you’ll likely resample on-device)
+B) Flutter/Dart conventions
+- widget composition patterns
+- naming conventions
+- file organization patterns
+- whether the repo uses feature folders, layered architecture, Redux/BLoC/Riverpod/custom state, selectors, memoization, etc.
+- how reusable widgets/components are organized
+- how theme, colors, spacing, typography, extensions, and design tokens are handled
+- how text styling is handled (for example theme text styles, wrappers, helper methods, design system widgets, typography tokens)
+- how localization is handled (for example intl, arb, l10n.yaml, generated localizations, AppLocalizations, custom localization wrappers, translation helpers)
+- how assets and icons are handled
+- how tests are written for widgets, state, services, and platform boundaries
 
-Bandwidth reality (mono PCM16):
+C) Native/platform conventions
+- Android build structure, Gradle patterns, manifests, JNI/platform channels
+- iOS/macOS project structure, plist/project settings, Swift/Obj-C/C++ boundaries
+- media, WebRTC, FFmpeg, rendering, audio/video, platform channels, FFI, or plugin code if present
+- any recurring failure points or tricky integration areas
 
-48k: 48,000 samples/s × 2 bytes ≈ 96 KB/s
+D) Shared/private dependencies and internal libraries
+- inspect pubspec.yaml, lockfiles, git dependencies, path dependencies, submodules, scripts, docs, README, CI, import patterns, and config for evidence of shared/private repos or internal packages
+- determine whether the repo depends on internal/shared libraries such as a private components/design-system repo (example: flutter-components) or other internal repos
+- ONLY include repo-specific guidance for those if there is direct evidence in this workspace
+- if evidence is incomplete, create conservative placeholder guidance that explicitly says it must be confirmed
 
-16k: ≈ 32 KB/s
+E) Existing AI/customization files
+- detect and reuse any existing .github/copilot-instructions.md, .github/instructions/*.instructions.md, .github/prompts/*.prompt.md, .github/agents/*.agent.md, .github/skills/**/SKILL.md, AGENTS.md, or CLAUDE.md
+- preserve useful existing content and improve it rather than replacing it blindly
 
-iOS: AVAudioEngine tap → PCM frames
+PHASE 2 — Create or update the Copilot customization structure
 
-Use:
+Create or update these files:
 
-AVAudioSession configured for capture, with a voice-friendly mode
+.github/
+  copilot-instructions.md
+  instructions/
+    dart.instructions.md
+    ios.instructions.md
+    android.instructions.md
+    localization.instructions.md
+    design-system.instructions.md
+    components.instructions.md
+    testing.instructions.md
+    native-integration.instructions.md
+    performance.instructions.md
+  prompts/
+    review-change.prompt.md
+    write-widget-test.prompt.md
+    debug-build-failure.prompt.md
+    trace-state-flow.prompt.md
+    add-localized-ui.prompt.md
+    use-shared-component.prompt.md
+  skills/
+    flutter-architecture/
+      SKILL.md
+      examples/
+    native-media-debug/
+      SKILL.md
+      scripts/
+    localization-workflow/
+      SKILL.md
+      examples/
+    design-system-usage/
+      SKILL.md
+      examples/
+    component-selection/
+      SKILL.md
+      examples/
+    state-flow-tracing/
+      SKILL.md
+      examples/
+    test-authoring/
+      SKILL.md
+      examples/
+    build-release-triage/
+      SKILL.md
+      scripts/
+  agents/
+    planner.agent.md
+    reviewer.agent.md
+    bugfixer.agent.md
+    ui-implementer.agent.md
+    platform-investigator.agent.md
 
-Category: playAndRecord (typical for voice/VoIP)
+.vscode/
+  mcp.json
 
-Mode: voiceChat (two-way voice) / videoChat depending on your use case
+File requirements:
 
-Request buffer + sample rate preferences (actual hardware may differ):
-setPreferredIOBufferDuration and setPreferredSampleRate
+1) .github/copilot-instructions.md
+Create concise repo-wide instructions only.
+This file should contain the highest-value always-on guidance that applies broadly across the whole repo.
+Include:
+- actual tech stack used here
+- repo architecture summary
+- preserve existing architecture and patterns unless explicitly asked to refactor
+- do not rewrite unrelated files
+- do not add new dependencies unless justified and consistent with repo conventions
+- reuse existing shared widgets, helpers, abstractions, and internal packages before creating new ones
+- follow the actual localization workflow used by this repo
+- follow the actual theming/text styling/design-system workflow used by this repo
+- prefer minimal diffs
+- add or update tests when appropriate
+- call out platform-specific or performance-sensitive caution areas if present
 
-AVAudioEngine input capture with a tap
+Keep it compact and high signal.
 
-Install a tap on the input node to receive mic buffers in realtime: installTap(onBus:bufferSize:format:block:)
+2) Path-specific instruction files in .github/instructions/
+Use valid YAML frontmatter with applyTo globs based on the ACTUAL repo layout.
 
-For cleaner voice in noisy/echoey environments, enable voice processing on the I/O node: setVoiceProcessingEnabled(true)
-(Apple notes voice processing enablement has constraints; it’s typically done while the engine is stopped.)
+A) dart.instructions.md
+Applies to the repo’s Dart/Flutter source and tests.
+Include:
+- state management patterns actually used
+- widget composition patterns
+- preferred reusable widget/component usage
+- text styling and theme usage
+- localization usage
+- async/error/logging conventions
+- testing patterns
+- performance guidance for Flutter code
+- rules for when to reuse existing shared/internal packages and components
 
-Convert to your wire format
+B) localization.instructions.md
+Create only if localization is present or strongly implied.
+Apply to localization-relevant files (arb, l10n config, localization helpers, UI files that commonly use strings).
+Include:
+- how strings should be added
+- how generated localization classes are used
+- whether hardcoded user-facing text should be avoided
+- placeholder/interpolation/pluralization guidance if used
+- naming conventions for translation keys if inferable
+If localization is not present, create a short conservative file saying localization workflow was not confidently detected and should be verified before introducing one.
 
-The tap often gives you Float32 / non-interleaved; convert to PCM16LE mono and (optionally) resample to 16k using AVAudioConverter (common pattern in voice apps).
+C) design-system.instructions.md
+Create if there is evidence of a shared theme/design system/style token workflow.
+Include:
+- typography/text style usage
+- spacing/color/radius/elevation token usage
+- theme extension usage
+- shared style helpers
+- when to avoid ad hoc inline styling
+- how to stay visually consistent with the repo
+If a private/shared design system package is detected, mention it specifically.
 
-Emit fixed chunk sizes (e.g., 20ms worth of samples) to simplify server decoding.
+D) components.instructions.md
+Include:
+- how to choose between shared components and new widgets
+- where reusable widgets live
+- how internal/shared component libraries should be preferred
+- whether there is evidence for a private repo such as flutter-components or similar
+- only reference private/shared repos if evidence exists in the repo
 
-Android: AudioRecord → PCM frames (+ optional AEC/NS/AGC)
+E) testing.instructions.md
+Include:
+- test commands actually used
+- widget/unit/integration patterns
+- mocks/fakes/helpers used in this repo
+- how to structure tests to match existing style
+- platform/native test expectations if present
 
-Use AudioRecord (not MediaRecorder) since you want PCM buffers:
+F) ios.instructions.md
+Applies to actual iOS/macOS files in the repo.
+Include:
+- native boundary expectations
+- plist/project hygiene
+- plugin/platform channel/FFI/C++ bridge expectations
+- memory/error handling conventions
+- minimal-change expectations
 
-AudioRecord API
+G) android.instructions.md
+Applies to actual Android/build files in the repo.
+Include:
+- Gradle/build config hygiene
+- manifest patterns
+- JNI/platform integration expectations
+- logging/error handling
+- minimal-change expectations
 
-Pick the right audio source (this impacts “clean”)
+H) native-integration.instructions.md
+Create if there are platform channels, FFI, plugin code, WebRTC/media/native rendering/audio/video integration points.
+Include:
+- how to trace across Dart ↔ native boundaries
+- version/config cautions
+- debugging expectations
+- safety/performance concerns
+If not applicable, omit this file.
 
-Two common choices:
+I) performance.instructions.md
+Create if the repo has clear performance-sensitive areas.
+Include:
+- avoid unnecessary rebuilds
+- selector/memoization/state diff guidance if present
+- heavy rendering/media/native performance cautions
+- logging/perf tradeoffs
+If not applicable, omit this file.
 
-VOICE_COMMUNICATION: tends to route through voice capture processing (echo cancel, etc.). Android specifically calls out AEC expectations for this source.
+3) Prompt files in .github/prompts/
+Use solid frontmatter and focused behavior.
 
-VOICE_RECOGNITION: Android 10 CDD requires that it can capture at 44.1k/48k, and that by default it disables noise reduction and AGC (i.e., “less processed / more raw”).
+A) review-change.prompt.md
+Purpose:
+Review current diff/selection for correctness, regressions, architecture fit, test impact, localization impact, design-system consistency, performance risks, and platform risks.
 
-If you want “good and clean” for voice being sent remotely, many apps start with VOICE_COMMUNICATION (better echo handling), but if you want minimal processing because you’ll do server-side cleanup, VOICE_RECOGNITION is often preferable. (You can also offer a runtime toggle.)
+Output:
+- summary
+- issues found
+- suggested fixes
+- tests to run
+- risk level
 
-Enable capture effects when available
+B) write-widget-test.prompt.md
+Purpose:
+Write or update Flutter widget/unit tests matching this repo’s actual test style.
 
-Android exposes capture-path effects you can attach to the AudioRecord session:
+Output:
+- test plan
+- test code
+- notes on mocks/fakes/helpers
+- gaps needing manual follow-up
 
-AcousticEchoCanceler
+C) debug-build-failure.prompt.md
+Purpose:
+Inspect current errors/logs/config and rank likely build or toolchain causes.
 
-AutomaticGainControl
+Output:
+- likely root causes ranked
+- evidence from repo/config
+- minimal fix
+- commands/tests to verify
 
-NoiseSuppressor (same audiofx family as above; availability varies by device)
+D) trace-state-flow.prompt.md
+Purpose:
+Trace how data/state flows through the actual architecture for a feature or bug.
 
-Also note Android’s platform guidance/requirements around preprocessing for VOICE_COMMUNICATION and discoverability via the SDK APIs.
+Output:
+- entry points
+- key state transformations
+- affected files
+- likely bug locations
+- safest intervention points
 
-Buffering
+E) add-localized-ui.prompt.md
+Purpose:
+Implement UI changes using the repo’s actual localization and design-system conventions.
 
-Use AudioRecord.getMinBufferSize(...), then read on a dedicated high-priority thread.
+Output:
+- affected strings/keys
+- UI/component changes
+- localization updates
+- test updates
+- consistency checks
 
-Chunk into 20–40ms frames for transport.
+F) use-shared-component.prompt.md
+Purpose:
+Determine whether an existing shared/internal component or style primitive should be used before creating a new widget.
 
-Flutter integration: stream bytes from native → Dart
+Output:
+- existing candidate components
+- why one should be reused or why a new component is needed
+- minimal implementation plan
+- follow-up tests/review points
 
-For a lightweight custom plugin:
+4) Skills in .github/skills/
+Each skill must be repo-specific and based on actual evidence in the repo.
+Do not create fluffy or generic skills.
+Each SKILL should clearly state:
+- when to use the skill
+- what files/folders to inspect first in THIS repo
+- how to reason through the task using THIS architecture
+- how to keep changes minimal and consistent
+- examples and resources if helpful
 
-Use a MethodChannel for start/stop/config.
+Create these skills:
 
-Use an EventChannel to emit PCM byte chunks as a Dart Stream<Uint8List> (that’s the intended pattern for “streaming from native to Flutter”).
+A) flutter-architecture
+How to understand and modify the repo’s Flutter architecture.
 
-At 48k mono PCM16, you’re sending ~96KB/s; if you batch into 20–40ms chunks, the platform-channel overhead is usually manageable.
+B) native-media-debug
+How to debug media/native/platform/build/runtime issues if this repo contains those layers.
+If no media/native complexity exists, rename or narrow the skill to what the repo actually contains.
 
-Sending to a REST “input stream”: long-lived POST with chunked body
+C) localization-workflow
+How localization is added/updated in this repo.
 
-If your server truly accepts a streaming request body, you generally do an HTTP/1.1 request with Transfer-Encoding: chunked (i.e., no Content-Length). Chunked transfer coding is defined in HTTP/1.1.
+D) design-system-usage
+How typography, text styling, theme tokens, visual consistency, and shared styling are handled here.
 
-In Dart, the low-level HttpClient is the most reliable for writing an ongoing request body:
+E) component-selection
+How to find and reuse existing shared widgets/components/internal packages before building new UI.
 
-You can control buffering (HttpClientRequest.bufferOutput)
+F) state-flow-tracing
+How to trace state/data/event flow in this repo’s actual architecture.
 
-You can explicitly enable chunked transfer encoding on headers (HttpHeaders.chunkedTransferEncoding)
+G) test-authoring
+How to write tests in the repo’s existing style.
 
-Practical notes:
+H) build-release-triage
+How to investigate build/config/release issues in this repo using existing tooling.
+Only include scripts if they match actual repo tooling.
 
-Some servers/reverse proxies reject chunked uploads unless configured (common 411/length-required style issues). If that’s your situation, you’ll need either:
+For each skill:
+- use the real repo structure
+- include example requests only if useful
+- include references to actual files/folders
+- do not invent internal repos, scripts, or commands that are not evidenced in the repo
 
-a protocol change (WebSocket / gRPC streaming), or
+5) Agents in .github/agents/
+Create concise custom agents:
 
-buffering to a known Content-Length (which defeats “live streaming”).
+A) planner.agent.md
+Read-first.
+Produces implementation plans before editing.
+Should identify:
+- touched files
+- architecture constraints
+- shared component/design system implications
+- localization implications
+- tests/verification steps
+- risk areas
 
-The “clean voice” checklist (works across modern devices)
+B) reviewer.agent.md
+Read-first.
+Focus on:
+- correctness
+- regressions
+- architecture drift
+- localization mistakes
+- design-system inconsistency
+- performance issues
+- missing tests
+- platform/native risks
 
-iOS
+C) bugfixer.agent.md
+Edit-oriented.
+Focus on:
+- minimal diffs
+- preserving existing patterns
+- reusing shared/internal components
+- updating tests when appropriate
+- briefly explaining tradeoffs
 
-AVAudioSession playAndRecord + voiceChat/videoChat
+D) ui-implementer.agent.md
+Edit-oriented.
+Focus on:
+- implementing UI using existing shared components, text styles, theme tokens, and localization patterns
+- avoiding ad hoc styles and hardcoded user-facing strings unless repo evidence says otherwise
 
-Enable voice processing on the engine I/O node when you want echo/noise help
+E) platform-investigator.agent.md
+Read-first or mixed.
+Focus on:
+- tracing Dart ↔ platform ↔ native issues
+- build/config/runtime root cause analysis
+- minimal remediation steps
 
-Use a stable buffer duration request, but verify actual ioBufferDuration
+If tool restrictions are supported, use conservative tool access.
+If unsupported, omit unsupported settings.
 
-Android
+6) MCP starter config
+Create .vscode/mcp.json as a safe starter only.
+- no secrets
+- no fake servers
+- minimal structure or commented placeholders
+- short note explaining how to fill it in later if org policy allows MCP
 
-Decide: VOICE_COMMUNICATION (more voice processing) vs VOICE_RECOGNITION (less processing by default per CDD)
+7) Quality bar
+- Everything must be grounded in this repo’s real files and patterns
+- Do not generate generic corporate boilerplate
+- Do not duplicate the same text across files
+- Keep instructions concise and useful
+- Prefer updating existing customizations rather than replacing them
+- If a private repo or shared library is only weakly implied, mark it as “needs confirmation”
+- If localization/design-system/shared components are strongly present, reflect them clearly
+- If they are absent or unclear, say so explicitly and stay conservative
 
-Attach AEC/NS/AGC effects when available
-
-Both
-
-Keep capture thread non-blocking; use a ring buffer so network hiccups don’t stall recording.
-
-Send fixed-duration frames (20–40ms) and include a sample counter / sequence number in your wire protocol so the server can detect drops/reorder.
+8) Final summary
+At the end, provide a concise summary with:
+- files created/updated
+- key repo-specific conventions inferred
+- detected localization approach
+- detected design-system/text styling approach
+- detected shared/private packages or internal repos and confidence level
+- notable skills added and why
+- anything left conservative because the repo did not provide enough evidence
