@@ -416,3 +416,203 @@ https://code.visualstudio.com/docs/copilot/customization/agent-skills
 https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?utm_source=chatgpt.com
 https://code.visualstudio.com/docs/copilot/customization/custom-instructions
 https://code.visualstudio.com/docs/copilot/guides/customize-copilot-guide
+
+
+
+
+
+
+
+Yes — the right next step is a **second pass focused only on orchestration**. Your first prompt built the repo-specific instructions, prompts, skills, and starter agents.  Now you want Copilot to tune three things separately: **model routing, delegation rules, and workflow sequencing**. In Copilot, those are mainly controlled by each agent’s frontmatter (`model`, `tools`, `agents`, `user-invocable`, `disable-model-invocation`) plus agent-body instructions; in VS Code you can also add `handoffs`, while GitHub.com’s coding agent currently ignores `handoffs`. ([Visual Studio Code][1])
+
+The biggest thing to know is that **delegation is not mostly controlled by your chat prompt**. Copilot’s docs recommend defining **when to use subagents inside the custom agent instructions**, not manually re-describing delegation every time. Also, subagents are typically agent-initiated, and they only work if the `runSubagent` tool is enabled or if your agent/prompt file includes the `agent`/`runSubagent` tool. ([Visual Studio Code][2])
+
+Use this as your **next prompt** in Copilot:
+
+```md
+You already created repo-specific Copilot instructions, prompts, skills, and agents for this repository.
+
+Now do a SECOND PASS focused only on agent orchestration, model routing, and reliable delegation.
+
+Goal:
+Turn the current setup into a coordinated multi-agent workflow for VS Code Copilot Agent mode, while keeping GitHub.com compatibility conservative where handoffs are unsupported.
+
+Before editing anything:
+1. Inspect the existing files in:
+   - .github/agents/
+   - .github/prompts/
+   - .github/skills/
+   - .github/copilot-instructions.md
+   - .github/instructions/
+2. Identify which agents are currently user-facing, which should become worker-only subagents, and where current descriptions/tools are too overlapping or ambiguous.
+3. Infer the repo’s most common task categories:
+   - planning / architecture
+   - implementation
+   - UI implementation
+   - state-flow tracing
+   - localization / design-system consistency
+   - native/platform debugging
+   - testing
+   - review
+
+Then update the agent system with these rules:
+
+A) Create a coordinator-and-workers design
+Create or update one top-level coordinator agent and several specialized worker agents.
+
+Preferred structure:
+- task-orchestrator.agent.md (top-level coordinator)
+- planner.agent.md
+- architecture-checker.agent.md
+- bugfixer.agent.md
+- ui-implementer.agent.md
+- platform-investigator.agent.md
+- test-author.agent.md
+- reviewer.agent.md
+- localization-checker.agent.md
+- component-selector.agent.md
+- performance-reviewer.agent.md
+
+You may rename agents to match the repo better, but keep names distinct and explicit.
+
+B) Set invocation visibility correctly
+- Coordinator should be user-invocable.
+- Most worker agents should be user-invocable: false so they are primarily used as subagents.
+- If an agent should only be manually selected by the user and never auto-delegated, set disable-model-invocation: true.
+- Avoid deprecated infer behavior.
+
+C) Restrict delegation explicitly
+For the top-level coordinator:
+- include tools needed for orchestration
+- include the agent tool
+- explicitly set the agents: list to only the worker agents it is allowed to delegate to
+- do NOT allow wildcard delegation unless truly justified
+
+For worker agents:
+- give each one a narrow, unambiguous role
+- if they should not delegate further, set agents: [] or omit delegation capability
+- do not create recursive delegation unless clearly useful
+
+D) Make delegation predictable
+Rewrite each agent’s instructions so delegation happens for clear reasons, not vaguely.
+For every coordinator and any delegating agent, include explicit rules like:
+- delegate planning to planner for task breakdown and touched-file discovery
+- delegate architecture/pattern reuse checks to architecture-checker before implementation
+- delegate implementation only after plan validation
+- delegate localization/design-system checks when user-facing UI or strings are involved
+- delegate native/platform investigation when the task touches platform channels, FFI, media, build config, or native code
+- delegate testing after implementation or bugfixing
+- delegate review after edits are complete
+- if a reviewer finds issues, loop back to the correct implementer, then re-run focused review
+- do not delegate trivial tasks that fit entirely within one agent’s specialty
+- when delegating, pass a compact subtask and request a concise structured result
+
+E) Add structured outputs for subagents
+For each worker agent, make the instructions require a compact output schema.
+Examples:
+- planner returns: summary, assumptions, touched files, risks, validation steps
+- architecture-checker returns: reusable patterns, conflicts, recommended adjustments
+- implementer returns: files changed, why, open questions
+- reviewer returns: issues, severity, evidence, suggested fixes
+- test-author returns: test plan, files, gaps
+- localization/design-system checkers return: violations, affected strings/components/styles, fixes
+
+F) Set models conservatively and correctly
+Important:
+- Only use exact model names if they are already evidenced in existing agent files or clearly intended for this Copilot setup.
+- If exact model availability cannot be verified from the workspace files, do NOT invent questionable model names.
+- Prefer model arrays only when the exact names are likely valid for this installation.
+- If uncertain, omit model: and let the current model picker control it, while adding a short comment in the file body noting the intended class of model.
+
+Model policy:
+- planner / architecture-checker / reviewer / platform-investigator:
+  strongest reasoning or high-quality general coding model available
+- bugfixer / ui-implementer / test-author:
+  faster coding-oriented model preferred, with stronger fallback if needed
+- lightweight checker agents:
+  favor faster/cheaper models where possible
+- coordinator:
+  use a strong general model if explicit routing is warranted, otherwise omit model and rely on current picker
+
+If the files already contain valid exact model names, normalize them into a coherent policy and add fallbacks where appropriate.
+
+G) Add handoffs only where appropriate
+For VS Code-targeted agents:
+- add handoffs for the user-visible sequential transitions where they help:
+  planner -> bugfixer or ui-implementer
+  implementer -> test-author
+  test-author -> reviewer
+  reviewer -> bugfixer or ui-implementer if fixes are needed
+- keep handoffs concise and useful
+- use send: false unless auto-send is clearly beneficial
+
+Do NOT rely on handoffs as the only orchestration mechanism.
+The coordinator + subagent instructions should still work without handoffs.
+
+H) Ensure prompts can trigger orchestration
+Review relevant .github/prompts/*.prompt.md files.
+For prompt files that should be able to invoke subagents, include the proper tools frontmatter needed for subagent use.
+Update at least these prompts if present:
+- review-change.prompt.md
+- trace-state-flow.prompt.md
+- debug-build-failure.prompt.md
+- add-localized-ui.prompt.md
+
+I) Keep the system clean
+- avoid overlapping agent roles
+- avoid having two agents with nearly identical names/descriptions
+- avoid giving edit tools to read-only agents
+- avoid giving every agent every tool
+- preserve repo-specific behavior from the earlier pass
+- do not rewrite unrelated instructions or skills unless needed for orchestration consistency
+
+J) Final output
+At the end, provide:
+1. a short explanation of the orchestration design
+2. which agents are user-facing vs worker-only
+3. which agents can delegate to which other agents
+4. where model routing was explicit vs intentionally left to the model picker
+5. where handoffs were added
+6. any places where exact model names could not be safely confirmed
+```
+
+That prompt is designed around how Copilot actually works today:
+
+* custom agents can specify a **single model or a prioritized list of models**; if `model` is omitted, the current model picker is used instead. ([Visual Studio Code][1])
+* worker-only agents should usually use `user-invocable: false`. Agents that should never be auto-used as subagents can use `disable-model-invocation: true`. ([Visual Studio Code][1])
+* reliable delegation comes from **explicit `agents` allow-lists** on the coordinator, not from letting Copilot choose from every vaguely similar agent. The docs specifically warn that otherwise it may select an unintended agent. ([Visual Studio Code][1])
+* if you want prompt files to trigger subagents, they need `agent` or `runSubagent` in frontmatter. ([Visual Studio Code][2])
+
+For “how do I make sure stuff is delegated correctly,” these are the levers that matter most:
+
+First, make the **top-level orchestrator explicit**. The VS Code docs show a coordinator/worker pattern where one agent owns the workflow and delegates to narrowly scoped workers. That is much more reliable than hoping any user-facing agent will spontaneously pick the right helper. ([Visual Studio Code][2])
+
+Second, keep worker roles **sharp and non-overlapping**. If two agents both sound like “reviewer” or both sound like “implementer,” the main agent can choose the wrong one. The docs call this out directly. ([Visual Studio Code][2])
+
+Third, make delegation rules part of the **agent body**, not just your one-off chat prompt. VS Code explicitly recommends defining when to use subagents in the custom agent’s instructions for consistent behavior. ([Visual Studio Code][2])
+
+Fourth, use **handoffs for user-guided phase changes**, not as your only orchestration mechanism. Handoffs are great in VS Code for plan → implement → review, but GitHub.com’s coding agent ignores `handoffs`, so the instructions and subagent design still need to stand on their own. ([Visual Studio Code][1])
+
+One honest caveat: **Copilot cannot reliably know which exact models your org has enabled just from repo files**. GitHub’s docs show you can set `model:` in the `.agent.md` file and use autocomplete in the agent editor, and VS Code now supports **multiple-model fallback arrays**. But exact model names still need to match what your installation exposes. So the safest flow is: let Copilot wire the architecture and intended routing, then you do one quick pass in the agent editor to normalize any model names that do not match your picker/autocomplete. ([GitHub Docs][3])
+
+A good default routing policy is:
+
+* **Planner / Architecture Checker / Reviewer / Platform Investigator**: strongest reasoning-oriented model you have.
+* **Bugfixer / UI Implementer / Test Author**: faster coding-oriented model, with a stronger fallback if available.
+* **Coordinator**: strong general-purpose model, or no explicit `model:` if you want the current picker to control it. GitHub’s model comparison docs describe this general split between deep reasoning/debugging models and faster/simple-task models. ([GitHub Docs][4])
+
+After Copilot applies that second-pass prompt, the very next thing I’d do manually is:
+
+1. open the agents dropdown and verify your **user-facing vs hidden worker** split,
+2. confirm the **`runSubagent`/`agent` tool** is enabled where needed,
+3. inspect the coordinator’s **`agents:` allow-list**,
+4. verify any explicit **`model:` names** against the picker/autocomplete,
+5. test one real workflow: “plan → implement → test → review.” ([GitHub Docs][5])
+
+If you want, I can turn this one step further into a **concrete agent layout** with sample frontmatter for `task-orchestrator`, `planner`, `bugfixer`, and `reviewer`.
+
+[1]: https://code.visualstudio.com/docs/copilot/customization/custom-agents "Custom agents in VS Code"
+[2]: https://code.visualstudio.com/docs/copilot/agents/subagents "Subagents in Visual Studio Code"
+[3]: https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/create-custom-agents "Creating custom agents for Copilot coding agent - GitHub Docs"
+[4]: https://docs.github.com/en/enterprise-cloud%40latest/copilot/reference/ai-models/model-comparison?utm_source=chatgpt.com "AI model comparison - GitHub Enterprise Cloud Docs"
+[5]: https://docs.github.com/en/enterprise-cloud%40latest/copilot/using-github-copilot/asking-github-copilot-questions-in-your-ide?tool=visualstudio "Asking GitHub Copilot questions in your IDE - GitHub Enterprise Cloud Docs"
