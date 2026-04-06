@@ -1,118 +1,16 @@
-I want you to act as a senior mobile systems architect and logging/observability expert.
-
-Context:
-I have a Flutter/Dart mobile app with significant native code. The app includes:
-- Flutter/Dart application code
-- Android native code in Java
-- iOS native code in Swift
-- A substantial amount of C++ native code accessed through FFI/bindings
-
-Current state:
-- We currently use a Flutter/Dart logger package for Dart-side logging
-- Native code mostly uses platform-native debug statements / console output
-- Native logs are not being written into the same file-based logging system as Dart logs
-- Native logs are not consistently bubbled up into Flutter logging
-- This makes it hard to debug “native land,” because we often need separate tools to inspect native logs
-- We want a cleaner, more unified observability strategy across Dart, Java, Swift, and C++
-
-Task:
-Research and evaluate the best modern approach for unifying logging across a mixed Flutter + native mobile app, and give me an educated recommendation.
-
-What I want you to answer:
-1. Should we fully unify Dart and native logging, partially unify them, or keep them mostly separate?
-2. What architecture would you recommend for:
-   - Dart logging
-   - Android Java logging
-   - iOS Swift logging
-   - C++ logging
-   - shared log files / persistence
-   - optional remote logging / crash reporting / support bundle export
-3. What is the best way to handle native logs:
-   - keep them native-first and forward selected logs upward?
-   - send everything to Flutter?
-   - write directly to a shared file sink from native layers?
-   - use an abstraction layer in every language?
-4. What are the tradeoffs around:
-   - performance
-   - threading
-   - startup/early-init logging
-   - release vs debug logging
-   - privacy / PII / security
-   - crash-time reliability
-   - developer ergonomics
-5. If bridging logs into Flutter, what are the safest and most practical mechanisms?
-   Consider things like:
-   - Flutter platform channels
-   - EventChannel streams
-   - FFI callbacks
-   - native file sinks read by Dart
-   - hybrid approaches
-6. What libraries / SDKs / patterns would you recommend for:
-   - C++ logging
-   - Android logging
-   - iOS logging
-   - Flutter/Dart logging
-   - crash reporting / telemetry
-7. I want a practical recommendation, not a generic one.
-   Please tell me what you would actually choose if this were your app.
-
-Important guidance:
-- Use current official documentation and primary sources where possible
-- Prefer official platform guidance for Android, iOS, Flutter, and Dart
-- Also evaluate reputable tooling such as Sentry and Firebase Crashlytics where relevant
-- Be opinionated and practical
-- Do not just list options — rank them and explain which one is best for this use case
-
-Deliverables:
-Please structure your response like this:
-
-A. Executive recommendation
-- Give the best overall approach in plain English
-
-B. Final architecture recommendation
-- Show the recommended logging architecture across Dart, Java, Swift, and C++
-
-C. Why this is the best choice
-- Explain why this beats the alternatives
-
-D. Alternatives considered
-- Evaluate at least:
-  1. Fully separate logging systems
-  2. Everything routed through Flutter/Dart
-  3. Native-first logging with unified sinks
-  4. Shared logging abstraction used in every layer
-
-E. Recommended implementation plan
-- Provide a phased rollout plan
-
-F. Concrete examples
-- Give example interfaces / pseudocode for:
-  - a shared log schema
-  - Dart logger wrapper
-  - Android logger wrapper
-  - Swift logger wrapper
-  - C++ logger wrapper
-  - forwarding selected native logs to Flutter
-  - writing to rotating log files
-
-G. Final verdict
-- Answer clearly:
-  - Should we unify logs?
-  - How much should we unify?
-  - What should remain platform-native?
-  - What should be shared?
-
-Additional preference:
-I suspect the best answer may be:
-- native-first logging at the point of emission
-- a shared log schema across all layers
-- shared sinks such as rotating log files and optional remote telemetry
-- selective mirroring of important native logs into Flutter rather than forcing every native log through Dart
-
-Please verify whether that is actually the best approach or not, and explain why.
-
-When you answer:
-- cite your sources
-- clearly separate facts from your own recommendations
-- be specific to mobile apps with Flutter + Java + Swift + C++ FFI
-- avoid hand-wavy advice
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Run Figma page URL script",
+      "program": "${workspaceFolder}/figma-pages.mjs",
+      "cwd": "${workspaceFolder}",
+      "args": ["YOUR_PROJECT_ID_HERE"],
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}
