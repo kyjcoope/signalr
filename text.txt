@@ -1,16 +1,505 @@
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Run Figma page URL script",
-      "program": "${workspaceFolder}/figma-pages.mjs",
-      "cwd": "${workspaceFolder}",
-      "args": ["YOUR_PROJECT_ID_HERE"],
-      "envFile": "${workspaceFolder}/.env",
-      "console": "integratedTerminal",
-      "skipFiles": ["<node_internals>/**"]
-    }
-  ]
+Yes — your idea is very implementable, and I would **not** build it as “one giant Copilot prompt that tells an orchestrator agent to manage other agents.” I would build it as a **local-first workflow harness** where your app owns the workflow graph, and Copilot SDK/CLI/ACP provide the agent execution layer.
+
+The core recommendation:
+
+```text
+Use Copilot SDK as the primary agent runtime.
+Use ACP as an optional protocol adapter / frontend bridge.
+Use raw Copilot CLI only for quick batch jobs or a true terminal-preview mode.
+```
+
+## The app I would build
+
+I would build a local tool that looks like this:
+
+```text
+Agent Workbench
+  ├─ CLI: workbench run, workbench serve, workbench open
+  ├─ Web UI: React dashboard at localhost
+  ├─ Local daemon: Node/TypeScript service
+  ├─ Workflow engine: research → plan → implement → review → PR
+  ├─ Agent registry: researcher, planner, implementer, reviewer, tester
+  ├─ Session/event store: SQLite
+  ├─ Git worktree manager
+  ├─ Permission/policy layer
+  ├─ Copilot SDK adapter
+  ├─ Copilot ACP adapter
+  └─ Optional raw Copilot CLI terminal adapter
+```
+
+The reason I would keep it **local-first** is that the agents need access to local repos, local build tools, local test runners, developer credentials, and often a local dev environment. Later, you could add a central service, but the first useful version should probably run on each developer’s machine.
+
+## Why SDK should be the main engine
+
+The GitHub Copilot SDK is more than a model API. GitHub’s SDK repo says it exposes the same engine behind Copilot CLI, including planning, tool invocation, file edits, and more. Internally, SDK clients communicate with a Copilot CLI server over JSON-RPC, and the SDK manages that CLI process lifecycle automatically. That means the SDK is basically a programmable way to use the Copilot agent runtime, not just “send text to a model.” ([GitHub][1])
+
+For your app, that matters because the SDK gives you the exact pieces you need for a UI-driven harness: custom agents, scoped tools, hooks, skills, streaming events, steering/queueing, session persistence, and OAuth support. GitHub’s docs explicitly list hooks, custom agents, MCP, skills, streaming events, steering/queueing, session persistence, and observability as SDK capabilities. ([GitHub][2])
+
+The SDK is also the best match for your “observe what is happening” requirement. GitHub’s streaming-events docs say every action the Copilot agent takes — thinking, writing code, running tools — is emitted as a session event you can subscribe to, and that `streaming: true` emits real-time events plus persisted events. ([GitHub Docs][3])
+
+## The most important design choice: app-level orchestration
+
+For your workflow:
+
+```text
+research → planning → implementation/writing → review
+```
+
+I would **not** rely entirely on Copilot’s internal sub-agent selection to decide that chain. I would make the workflow explicit in your app:
+
+```yaml
+name: feature-pr
+stages:
+  - id: research
+    agent: researcher
+    write: false
+    skills: [repo-research, frontend-stack]
+    output: research.md
+
+  - id: plan
+    agent: planner
+    write: false
+    skills: [planning]
+    requiresApproval: true
+    output: plan.md
+
+  - id: implement
+    agent: implementer
+    write: true
+    skills: [frontend-stack, testing]
+    allowedCommands:
+      - "npm test"
+      - "npm run lint"
+    output: patch
+
+  - id: review
+    agent: reviewer
+    write: false
+    skills: [code-review]
+    output: review.md
+
+  - id: pr
+    type: app-action
+    requiresApproval: true
+```
+
+Then each stage runs a Copilot SDK session with a selected agent and restricted permissions. This gives you deterministic UI state, clear audit logs, and predictable permissions. You can still let Copilot use SDK sub-agents **inside** a stage, but the app should own the top-level lifecycle.
+
+That maps well to GitHub’s SDK custom-agent model. The SDK lets you define named custom agents with their own prompts and tool sets, and the runtime can delegate to sub-agents in isolated contexts. The parent session receives sub-agent lifecycle events such as `subagent.started`, `subagent.completed`, and `subagent.failed`, which are specifically intended for building agent-tree UIs. ([GitHub Docs][4])
+
+## What the UI should show
+
+I would give the UI five main panels:
+
+```text
+1. Workflow timeline
+   research → plan → implement → review → PR
+
+2. Agent tree
+   Orchestrator
+     ├─ Researcher
+     ├─ Planner
+     ├─ Implementer
+     └─ Reviewer
+
+3. Live transcript
+   Assistant messages, tool calls, status updates, permission prompts
+
+4. Tool/terminal drawer
+   Commands run, files read/written, test output, failures
+
+5. Diff/artifact panel
+   plan.md, research.md, patch, review.md, PR title/body
+```
+
+The SDK already gives you the raw material for this. Streaming events can be persisted and replayed; sub-agent events include identifiers such as `toolCallId` that GitHub’s docs suggest using to reconstruct an execution tree. ([GitHub Docs][3])
+
+I would store every event in SQLite:
+
+```text
+workflow_runs
+stage_runs
+agent_sessions
+agent_events
+tool_calls
+artifacts
+approval_requests
+git_snapshots
+```
+
+That gives you replay, auditability, a “what happened?” timeline, and the ability to resume or debug failed tasks.
+
+## How ACP fits
+
+ACP is very relevant, but I would use it differently than the SDK.
+
+ACP, the Agent Client Protocol, is a JSON-RPC protocol for connecting clients — editors, IDEs, UIs, automation systems — to coding agents. The protocol supports session creation/loading, prompts, progress updates, file operations, terminal operations, permission requests, and cancellation. ([Agent Client Protocol][5])
+
+Copilot CLI can run as an ACP server:
+
+```bash
+copilot --acp --stdio
+```
+
+or:
+
+```bash
+copilot --acp --port 3000
+```
+
+GitHub’s docs explicitly list ACP use cases that match your app: custom frontends, CI/CD pipelines, IDE integrations, and multi-agent systems. ([GitHub Docs][6])
+
+So I would think of ACP this way:
+
+```text
+SDK = best for your internal workflow engine
+ACP = best for a standard agent protocol between your UI and agent backends
+Raw CLI = best for actual terminal/TUI preview
+```
+
+A Copilot ACP adapter in your app would look like:
+
+```ts
+const copilotProcess = spawn("copilot", ["--acp", "--stdio"], {
+  cwd: worktreePath,
+  stdio: ["pipe", "pipe", "inherit"],
+});
+
+const connection = new acp.ClientSideConnection((_agent) => ({
+  async requestPermission(params) {
+    return await approvalService.askUser(params);
+  },
+
+  async sessionUpdate(params) {
+    eventBus.publish({
+      type: "copilot.acp.update",
+      update: params.update,
+    });
+  },
+}), stream);
+
+await connection.initialize({
+  protocolVersion: acp.PROTOCOL_VERSION,
+  clientCapabilities: {},
+});
+
+const session = await connection.newSession({
+  cwd: worktreePath,
+  mcpServers: [],
+});
+
+await connection.prompt({
+  sessionId: session.sessionId,
+  prompt: [{ type: "text", text: "Research the auth flow and produce a plan." }],
+});
+```
+
+GitHub’s ACP docs show essentially this pattern: spawn `copilot --acp --stdio`, wrap stdin/stdout as an NDJSON stream, implement `requestPermission` and `sessionUpdate`, create a session with `cwd`, and send a prompt. ([GitHub Docs][6])
+
+## Should the app preview the actual CLI?
+
+There are three possible “preview” modes.
+
+**Mode 1: Structured event preview — recommended.**
+Use SDK or ACP events and render your own transcript, status, tools, plans, sub-agents, command output, and diffs. This is the best for a polished web UI.
+
+**Mode 2: Actual terminal preview.**
+Spawn `copilot` in a pseudo-terminal and render it in the app. This gives the closest “actual CLI” experience, but it is much harder to control, parse, chain, and audit.
+
+**Mode 3: Hybrid.**
+Use SDK/ACP for the real workflow, but include a terminal-style log panel that looks like the CLI. Also provide “open this session in terminal” or “take over manually” later.
+
+I would start with Mode 1 and add Mode 2 only if users strongly want the literal terminal UI.
+
+## How to chain agents
+
+I would define agents like this:
+
+```text
+researcher
+  tools: read, grep, glob
+  can write: no
+  goal: understand codebase and produce findings
+
+planner
+  tools: read, grep, glob
+  can write: no
+  goal: produce implementation plan and risk list
+
+implementer
+  tools: read, write, edit, bash
+  can write: yes
+  goal: implement approved plan with minimal diffs
+
+reviewer
+  tools: read, grep, bash
+  can write: no
+  goal: review diff, run tests, find defects
+
+test-writer
+  tools: read, write, bash
+  can write: yes
+  goal: add missing tests only
+```
+
+With the SDK, custom agents are lightweight definitions attached to a session. Each can have its own prompt, tool restrictions, and optional MCP servers. GitHub’s docs also recommend explicit tool lists for least privilege, since omitted or `null` tools can inherit broader session access. ([GitHub Docs][4])
+
+A simplified SDK stage runner would look like:
+
+```ts
+import { CopilotClient } from "@github/copilot-sdk";
+
+async function runStage(stage, run) {
+  const client = new CopilotClient({
+    cwd: run.worktreePath,
+    githubToken: run.githubToken,
+    useLoggedInUser: false,
+    logLevel: "debug",
+  });
+
+  await client.start();
+
+  const session = await client.createSession({
+    sessionId: `${run.id}:${stage.id}`,
+    model: stage.model ?? "gpt-4.1",
+    streaming: true,
+
+    agent: stage.agent,
+
+    customAgents: [
+      {
+        name: "researcher",
+        displayName: "Researcher",
+        description: "Read-only codebase exploration and architecture analysis",
+        tools: ["grep", "glob", "view"],
+        prompt: "Analyze the repository. Do not modify files.",
+      },
+      {
+        name: "implementer",
+        displayName: "Implementer",
+        description: "Makes minimal code changes based on an approved plan",
+        tools: ["view", "edit", "bash"],
+        prompt: "Implement only the approved plan. Keep diffs small. Run targeted tests.",
+      },
+      {
+        name: "reviewer",
+        displayName: "Reviewer",
+        description: "Reviews diffs for correctness, regressions, and missing tests",
+        tools: ["grep", "glob", "view", "bash"],
+        prompt: "Review critically. Do not modify files.",
+      },
+    ],
+
+    skillDirectories: stage.skills?.map((s) => `./skills/${s}`) ?? [],
+
+    hooks: {
+      onPreToolUse: async (input) => {
+        return policy.checkToolCall(run, stage, input);
+      },
+
+      onPostToolUse: async (input) => {
+        await audit.logToolResult(run, stage, input);
+        return null;
+      },
+
+      onSessionEnd: async (input) => {
+        await metrics.recordSessionEnd(run, stage, input);
+        return null;
+      },
+    },
+
+    onPermissionRequest: async (request) => {
+      return approvals.request(run.id, stage.id, request);
+    },
+  });
+
+  session.on((event) => {
+    eventStore.append(run.id, stage.id, event);
+    websocket.publish(`runs/${run.id}`, event);
+  });
+
+  const response = await session.sendAndWait({
+    prompt: buildStagePrompt(stage, run),
+  });
+
+  await client.stop();
+  return response;
 }
+```
+
+The hook layer is important. GitHub’s SDK hooks can run at session start, user prompt submission, before tool use, after tool use, session end, and error handling; the docs explicitly call out permissions, auditing, notifications, prompt enrichment, recovery, and metrics as hook use cases. ([GitHub Docs][7])
+
+## Conditional skills
+
+This is a strong fit for your “load skills for certain tasks” idea.
+
+The SDK’s skills are reusable prompt modules. A skill is a directory containing a `SKILL.md`, and you can pass `skillDirectories` when creating a session. The docs describe using skills to package domain expertise, share specialized behavior, organize complex agent configs, and enable/disable capabilities per session. ([GitHub Docs][8])
+
+I would structure them like this:
+
+```text
+skills/
+  frontend-react/
+    SKILL.md
+  frontend-accessibility/
+    SKILL.md
+  code-review/
+    SKILL.md
+  test-writing/
+    SKILL.md
+  company-style/
+    SKILL.md
+  security-basics/
+    SKILL.md
+```
+
+Then the workflow engine chooses skills based on the task:
+
+```ts
+function selectSkills(task) {
+  return [
+    "company-style",
+    task.type === "review" && "code-review",
+    task.stack === "react" && "frontend-react",
+    task.needsTests && "test-writing",
+    task.touchesAuth && "security-basics",
+  ].filter(Boolean);
+}
+```
+
+That gives you conditional behavior without needing MCP yet.
+
+## Auth and PR submission
+
+For the first version, I would use the developer’s local Copilot CLI auth. GitHub’s setup docs say the SDK can use a local CLI that is already signed in, which is the simplest configuration. ([GitHub Docs][9])
+
+For the work/enterprise version, I would move to a GitHub App or OAuth App. GitHub’s SDK OAuth docs say users can authorize your app, you pass the user token to the SDK, Copilot requests are made on behalf of each authenticated user, and usage is billed to that user’s Copilot subscription; the app does not handle model API keys. ([GitHub Docs][10])
+
+For PRs, I would **not** let the agent freely push branches. I would have the app own this:
+
+```text
+Agent produces patch
+  → app shows diff
+  → user approves
+  → app creates branch
+  → app pushes branch
+  → app creates PR
+  → agent drafts title/body only
+```
+
+Copilot CLI does ship with GitHub MCP configured and can interact with GitHub resources, but since you said MCP is probably out of scope for now, I would use the GitHub API or GitHub App permissions for PR creation instead of making PR creation an agent tool. ([GitHub Docs][11])
+
+## Desktop/web packaging
+
+I would build the core in **TypeScript/Node** because the Copilot SDK and ACP examples are already natural in TypeScript, and because Node makes child processes, PTYs, file watching, Git operations, and WebSocket streaming straightforward.
+
+For UI packaging:
+
+```text
+MVP:
+  local daemon + browser UI
+  workbench serve
+  opens http://localhost:<port>
+
+Desktop app:
+  Electron first if you want easiest Node/PTY/process integration
+
+More polished/lighter app:
+  Tauri later if you want a smaller desktop shell
+```
+
+Electron is cross-platform and runs on macOS, Windows, and Linux, while embedding Chromium and Node.js. ([Electron][12]) Tauri also supports cross-platform desktop/mobile apps from one codebase, with a JavaScript frontend and Rust application logic. ([Tauri][13])
+
+For your use case, I would choose **Electron first** despite the size because you will be managing local processes, Git, filesystem permissions, and likely a terminal preview. Tauri is attractive later, but the Rust/Node boundary adds complexity early.
+
+## Where raw Copilot CLI still helps
+
+Raw CLI wrapping is useful for simple batch jobs and quick prototypes. Copilot CLI supports non-interactive prompts with `-p`, quiet output with `-s`, custom agents with `--agent`, model selection with `--model`, tool allow/deny flags, `--no-ask-user`, secret redaction, and transcript export with `--share`. ([GitHub Docs][14])
+
+Example:
+
+```bash
+copilot -p "Review the diff against main. Return only high-confidence defects." \
+  -s \
+  --agent=reviewer \
+  --allow-tool='shell(git:*),shell(npm test),read' \
+  --deny-tool='shell(git push)' \
+  --no-ask-user \
+  --share ./agent-review.md
+```
+
+I would use that for early proof-of-concept workflows, but I would not make it the core long-term engine because terminal output is less structured than SDK/ACP events.
+
+## Important security note
+
+Be careful with defaults. The SDK repo says the SDK can operate the CLI in an equivalent of `--allow-all`, enabling broad first-party tools such as filesystem, Git, and web requests, unless you customize tool availability. ([GitHub][1])
+
+So the harness should enforce:
+
+```text
+No --allow-all in default workflows
+Read-only research/planning stages
+Approval before writes
+Approval before git push
+Deny destructive shell commands
+Per-repo worktree isolation
+Per-stage allowed commands
+Secret redaction
+Full event and tool-call audit log
+User approval before PR creation
+```
+
+## My recommended MVP
+
+Build this first:
+
+```text
+workbench serve
+  Starts local daemon
+  Opens web UI
+
+workbench run feature-pr --repo .
+  Creates workflow run
+  Creates git worktree
+  Runs research stage
+  Streams events to UI
+  Runs planning stage
+  Waits for user approval
+  Runs implementation stage
+  Runs tests
+  Runs review stage
+  Shows final diff
+```
+
+Use this stack:
+
+```text
+Core: TypeScript + Node
+UI: React
+Transport: WebSocket or SSE
+Storage: SQLite
+Agent runtime: Copilot SDK
+Protocol adapter: ACP, optional but design for it now
+Terminal preview: later, PTY-based
+Desktop wrapper: Electron after browser MVP
+Auth v1: local Copilot CLI auth
+Auth v2: GitHub App/OAuth App
+PR creation: app-owned GitHub API action
+```
+
+The big architectural principle is: **your app should orchestrate the workflow; Copilot should execute stages.** That gives you the Claude-Code-like experience you want, but with better visibility, safer permissions, and a clearer path to work-approved OAuth, PR creation, and auditability.
+
+[1]: https://github.com/github/copilot-sdk "GitHub - github/copilot-sdk: Multi-platform SDK for integrating GitHub Copilot Agent into apps and services · GitHub"
+[2]: https://github.com/github/copilot-sdk/blob/main/docs/index.md "copilot-sdk/docs/index.md at main · github/copilot-sdk · GitHub"
+[3]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/streaming-events "Streaming events in the Copilot SDK - GitHub Docs"
+[4]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/custom-agents "Custom agents and sub-agent orchestration - GitHub Docs"
+[5]: https://agentclientprotocol.com/protocol/overview "Overview - Agent Client Protocol"
+[6]: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server "Copilot CLI ACP server - GitHub Docs"
+[7]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/working-with-hooks "Working with hooks - GitHub Docs"
+[8]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/custom-skills "Using custom skills with the Copilot SDK - GitHub Docs"
+[9]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/set-up-copilot-sdk "Set up Copilot SDK - GitHub Docs"
+[10]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/set-up-copilot-sdk/github-oauth "Using GitHub OAuth with Copilot SDK - GitHub Docs"
+[11]: https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli "Using GitHub Copilot CLI - GitHub Docs"
+[12]: https://electronjs.org/ "Build cross-platform desktop apps with JavaScript, HTML, and CSS | Electron"
+[13]: https://v2.tauri.app/ "Tauri 2.0 | Tauri"
+[14]: https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference "GitHub Copilot CLI programmatic reference - GitHub Docs"
