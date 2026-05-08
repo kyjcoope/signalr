@@ -1,505 +1,482 @@
-Yes — your idea is very implementable, and I would **not** build it as “one giant Copilot prompt that tells an orchestrator agent to manage other agents.” I would build it as a **local-first workflow harness** where your app owns the workflow graph, and Copilot SDK/CLI/ACP provide the agent execution layer.
-
-The core recommendation:
+I’d implement memory as **four separate layers**, not one catch-all “memory” feature:
 
 ```text
-Use Copilot SDK as the primary agent runtime.
-Use ACP as an optional protocol adapter / frontend bridge.
-Use raw Copilot CLI only for quick batch jobs or a true terminal-preview mode.
+1. Session record        = what happened in this channel/session
+2. Session handoff       = compact markdown summary for resuming
+3. Repo memory           = durable learned facts/quirks shared across sessions
+4. Domain knowledge      = curated rules/skills/docs loaded conditionally
 ```
 
-## The app I would build
+The key is: **raw sessions are not memory**. They are evidence. Memory should be a distilled, scoped, reviewable layer built from sessions.
 
-I would build a local tool that looks like this:
+## What existing tools suggest
+
+The strongest pattern I found is from Claude Code and Cline: use **plain markdown for durable, human-editable memory**, but keep it structured and concise. Claude Code now uses two complementary systems: explicit `CLAUDE.md` instruction files written by humans, and auto memory written by Claude based on corrections/preferences; both are loaded at the start of a session, but Claude treats them as context rather than hard enforcement. ([Claude][1])
+
+Cline’s Memory Bank is even closer to what you are describing. It uses a `memory-bank/` directory with files like `projectbrief.md`, `activeContext.md`, `systemPatterns.md`, `techContext.md`, and `progress.md`; Cline’s docs frame this as a structured markdown system for preserving context across sessions. ([Cline Documentation][2])
+
+GitHub Copilot’s own new memory system gives another important design principle: memories are **repo-scoped**, stored with citations to code locations, validated against the current codebase before use, and expired after 28 days to reduce stale-memory risk. ([GitHub Docs][3]) That is probably the best pattern to copy even if you implement your own local memory.
+
+## My recommendation for your app
+
+For your Discord-like UI, I would use this model:
 
 ```text
-Agent Workbench
-  ├─ CLI: workbench run, workbench serve, workbench open
-  ├─ Web UI: React dashboard at localhost
-  ├─ Local daemon: Node/TypeScript service
-  ├─ Workflow engine: research → plan → implement → review → PR
-  ├─ Agent registry: researcher, planner, implementer, reviewer, tester
-  ├─ Session/event store: SQLite
-  ├─ Git worktree manager
-  ├─ Permission/policy layer
-  ├─ Copilot SDK adapter
-  ├─ Copilot ACP adapter
-  └─ Optional raw Copilot CLI terminal adapter
+Repo = Discord server
+Session = Discord channel
+Workflow stage = thread/status lane
+Memory = repo sidebar + agent-accessible context source
 ```
 
-The reason I would keep it **local-first** is that the agents need access to local repos, local build tools, local test runners, developer credentials, and often a local dev environment. Later, you could add a central service, but the first useful version should probably run on each developer’s machine.
-
-## Why SDK should be the main engine
-
-The GitHub Copilot SDK is more than a model API. GitHub’s SDK repo says it exposes the same engine behind Copilot CLI, including planning, tool invocation, file edits, and more. Internally, SDK clients communicate with a Copilot CLI server over JSON-RPC, and the SDK manages that CLI process lifecycle automatically. That means the SDK is basically a programmable way to use the Copilot agent runtime, not just “send text to a model.” ([GitHub][1])
-
-For your app, that matters because the SDK gives you the exact pieces you need for a UI-driven harness: custom agents, scoped tools, hooks, skills, streaming events, steering/queueing, session persistence, and OAuth support. GitHub’s docs explicitly list hooks, custom agents, MCP, skills, streaming events, steering/queueing, session persistence, and observability as SDK capabilities. ([GitHub][2])
-
-The SDK is also the best match for your “observe what is happening” requirement. GitHub’s streaming-events docs say every action the Copilot agent takes — thinking, writing code, running tools — is emitted as a session event you can subscribe to, and that `streaming: true` emits real-time events plus persisted events. ([GitHub Docs][3])
-
-## The most important design choice: app-level orchestration
-
-For your workflow:
+Then expose memory in the UI as a first-class object, not just hidden files. Give each repo a **Memory** section with tabs like:
 
 ```text
-research → planning → implementation/writing → review
+Overview
+Architecture
+Commands
+Testing
+Pitfalls
+Decisions
+Failures
+User/team preferences
+Pending memory proposals
 ```
 
-I would **not** rely entirely on Copilot’s internal sub-agent selection to decide that chain. I would make the workflow explicit in your app:
+The agent should be able to propose memory updates, but I would not let it silently mutate important shared memory without review at first.
 
-```yaml
-name: feature-pr
-stages:
-  - id: research
-    agent: researcher
-    write: false
-    skills: [repo-research, frontend-stack]
-    output: research.md
+## Use markdown, but do not only use markdown
 
-  - id: plan
-    agent: planner
-    write: false
-    skills: [planning]
-    requiresApproval: true
-    output: plan.md
-
-  - id: implement
-    agent: implementer
-    write: true
-    skills: [frontend-stack, testing]
-    allowedCommands:
-      - "npm test"
-      - "npm run lint"
-    output: patch
-
-  - id: review
-    agent: reviewer
-    write: false
-    skills: [code-review]
-    output: review.md
-
-  - id: pr
-    type: app-action
-    requiresApproval: true
-```
-
-Then each stage runs a Copilot SDK session with a selected agent and restricted permissions. This gives you deterministic UI state, clear audit logs, and predictable permissions. You can still let Copilot use SDK sub-agents **inside** a stage, but the app should own the top-level lifecycle.
-
-That maps well to GitHub’s SDK custom-agent model. The SDK lets you define named custom agents with their own prompts and tool sets, and the runtime can delegate to sub-agents in isolated contexts. The parent session receives sub-agent lifecycle events such as `subagent.started`, `subagent.completed`, and `subagent.failed`, which are specifically intended for building agent-tree UIs. ([GitHub Docs][4])
-
-## What the UI should show
-
-I would give the UI five main panels:
+I would store memory in **two representations**:
 
 ```text
-1. Workflow timeline
-   research → plan → implement → review → PR
-
-2. Agent tree
-   Orchestrator
-     ├─ Researcher
-     ├─ Planner
-     ├─ Implementer
-     └─ Reviewer
-
-3. Live transcript
-   Assistant messages, tool calls, status updates, permission prompts
-
-4. Tool/terminal drawer
-   Commands run, files read/written, test output, failures
-
-5. Diff/artifact panel
-   plan.md, research.md, patch, review.md, PR title/body
+Markdown files = source of truth humans can read/edit/version
+SQLite/FTS/vector index = fast retrieval/search/UI/filtering
 ```
 
-The SDK already gives you the raw material for this. Streaming events can be persisted and replayed; sub-agent events include identifiers such as `toolCallId` that GitHub’s docs suggest using to reconstruct an execution tree. ([GitHub Docs][3])
+This gives you the best of both worlds. Markdown is portable, auditable, and works with other agents. SQLite/FTS gives you fast “what did we learn about auth?” search, memory proposals, stale-memory detection, and UI filtering.
 
-I would store every event in SQLite:
+Pi’s `pi-hermes-memory` extension is a useful example here: it advertises SQLite FTS5 search across conversations, persistent markdown memories, failure memory, categorized memories, background learning, auto-consolidation, secret scanning, and a two-tier global/per-project memory model. ([Pi Dev][4])
+
+## Proposed file layout
+
+I would separate **repo-committed guidance** from **local learned memory**.
+
+Inside the repo, commit stable team guidance:
 
 ```text
-workflow_runs
-stage_runs
-agent_sessions
-agent_events
-tool_calls
-artifacts
-approval_requests
-git_snapshots
+repo/
+  AGENTS.md
+  .agent/
+    rules/
+      frontend.md
+      testing.md
+      api.md
+      security.md
+    skills/
+      react-review/
+        SKILL.md
+      playwright-debugging/
+        SKILL.md
 ```
 
-That gives you replay, auditability, a “what happened?” timeline, and the ability to resume or debug failed tasks.
-
-## How ACP fits
-
-ACP is very relevant, but I would use it differently than the SDK.
-
-ACP, the Agent Client Protocol, is a JSON-RPC protocol for connecting clients — editors, IDEs, UIs, automation systems — to coding agents. The protocol supports session creation/loading, prompts, progress updates, file operations, terminal operations, permission requests, and cancellation. ([Agent Client Protocol][5])
-
-Copilot CLI can run as an ACP server:
-
-```bash
-copilot --acp --stdio
-```
-
-or:
-
-```bash
-copilot --acp --port 3000
-```
-
-GitHub’s docs explicitly list ACP use cases that match your app: custom frontends, CI/CD pipelines, IDE integrations, and multi-agent systems. ([GitHub Docs][6])
-
-So I would think of ACP this way:
+Outside the repo, store learned local memory and session archives:
 
 ```text
-SDK = best for your internal workflow engine
-ACP = best for a standard agent protocol between your UI and agent backends
-Raw CLI = best for actual terminal/TUI preview
+~/Library/Application Support/YourApp/
+  repos/
+    <repo-id>/
+      repo.json
+      memory/
+        MEMORY.md
+        architecture.md
+        commands.md
+        testing.md
+        pitfalls.md
+        decisions.md
+        failures.md
+        tool-quirks.md
+      sessions/
+        <session-id>/
+          session.md
+          handoff.md
+          events.jsonl
+          artifacts/
+            plan.md
+            research.md
+            review.md
+            patch.diff
+      index.sqlite
 ```
 
-A Copilot ACP adapter in your app would look like:
+For macOS, using the user’s Application Support directory is cleaner than dropping hidden state all over the repo. For team-shared memory, you can later add an option to commit selected memories into `.agent/memory/` or convert them into `AGENTS.md` / rules / skills.
 
-```ts
-const copilotProcess = spawn("copilot", ["--acp", "--stdio"], {
-  cwd: worktreePath,
-  stdio: ["pipe", "pipe", "inherit"],
-});
+## What each file should do
 
-const connection = new acp.ClientSideConnection((_agent) => ({
-  async requestPermission(params) {
-    return await approvalService.askUser(params);
-  },
+`AGENTS.md` should be the stable, repo-level instruction file. It should include setup commands, build/test commands, code conventions, PR rules, and important repo structure. The AGENTS.md site describes it as a predictable “README for agents,” and OpenCode, Codex, Copilot-related tooling, and many other agents support it or recognize it. ([Agents][5])
 
-  async sessionUpdate(params) {
-    eventBus.publish({
-      type: "copilot.acp.update",
-      update: params.update,
-    });
-  },
-}), stream);
+`MEMORY.md` should be a compact index, not a giant dump. Claude Code’s auto memory does this: it keeps a `MEMORY.md` entrypoint and moves details into topic files, loading only the first 200 lines or 25 KB of `MEMORY.md` at session start, while topic files are read on demand. ([Claude][1])
 
-await connection.initialize({
-  protocolVersion: acp.PROTOCOL_VERSION,
-  clientCapabilities: {},
-});
+`handoff.md` should summarize the current session for continuation. It should include the task, current plan, files touched, commands run, unresolved issues, and next step. Cline’s Memory Bank pattern explicitly distinguishes preserving knowledge from preserving code state; memory keeps project context while checkpoints preserve code snapshots. ([Cline Documentation][2])
 
-const session = await connection.newSession({
-  cwd: worktreePath,
-  mcpServers: [],
-});
+`events.jsonl` should be the raw structured event log. Do not rely on markdown alone for replaying the UI. Copilot SDK streaming events include assistant messages, tool events, session lifecycle events, permission/user-input events, sub-agent/skill events, and event metadata like IDs, timestamps, parent IDs, and persisted-vs-ephemeral status. ([GitHub Docs][6])
 
-await connection.prompt({
-  sessionId: session.sessionId,
-  prompt: [{ type: "text", text: "Research the auth flow and produce a plan." }],
-});
-```
+## Memory scopes I would support
 
-GitHub’s ACP docs show essentially this pattern: spawn `copilot --acp --stdio`, wrap stdin/stdout as an NDJSON stream, implement `requestPermission` and `sessionUpdate`, create a session with `cwd`, and send a prompt. ([GitHub Docs][6])
+| Scope       | Storage                          |  Shared? | Loaded how                     | Purpose                     |
+| ----------- | -------------------------------- | -------: | ------------------------------ | --------------------------- |
+| Session     | `sessions/<id>/handoff.md`       |       No | Current session only           | Active task state           |
+| Repo memory | `memory/*.md`                    | Optional | Index always, topics on demand | Quirks, decisions, failures |
+| Repo rules  | `AGENTS.md`, `.agent/rules/*.md` |      Yes | At session start or path match | Stable instructions         |
+| Skills      | `.agent/skills/*/SKILL.md`       |      Yes | Conditionally                  | Domain workflows            |
+| User memory | global `user.md`                 |       No | At session start               | Personal preferences        |
+| Org policy  | managed config/rules             |      Yes | Always                         | Non-negotiable standards    |
 
-## Should the app preview the actual CLI?
+This split matters because “always run `pnpm test`” belongs in rules, “last auth refactor failed because mocked tokens expire after 5 minutes” belongs in memory, and “current branch is half-way through replacing the modal state machine” belongs in session handoff.
 
-There are three possible “preview” modes.
+## How memory should be written
 
-**Mode 1: Structured event preview — recommended.**
-Use SDK or ACP events and render your own transcript, status, tools, plans, sub-agents, command output, and diffs. This is the best for a polished web UI.
+I would not let every message become memory. Use a **memory proposal pipeline**.
 
-**Mode 2: Actual terminal preview.**
-Spawn `copilot` in a pseudo-terminal and render it in the app. This gives the closest “actual CLI” experience, but it is much harder to control, parse, chain, and audit.
-
-**Mode 3: Hybrid.**
-Use SDK/ACP for the real workflow, but include a terminal-style log panel that looks like the CLI. Also provide “open this session in terminal” or “take over manually” later.
-
-I would start with Mode 1 and add Mode 2 only if users strongly want the literal terminal UI.
-
-## How to chain agents
-
-I would define agents like this:
+Memory write triggers:
 
 ```text
-researcher
-  tools: read, grep, glob
-  can write: no
-  goal: understand codebase and produce findings
-
-planner
-  tools: read, grep, glob
-  can write: no
-  goal: produce implementation plan and risk list
-
-implementer
-  tools: read, write, edit, bash
-  can write: yes
-  goal: implement approved plan with minimal diffs
-
-reviewer
-  tools: read, grep, bash
-  can write: no
-  goal: review diff, run tests, find defects
-
-test-writer
-  tools: read, write, bash
-  can write: yes
-  goal: add missing tests only
+1. User explicitly says “remember this”
+2. User corrects the agent
+3. A workflow stage fails and is fixed
+4. Review catches a recurring mistake
+5. Session ends
+6. Before context compaction
+7. Before opening a PR
 ```
 
-With the SDK, custom agents are lightweight definitions attached to a session. Each can have its own prompt, tool restrictions, and optional MCP servers. GitHub’s docs also recommend explicit tool lists for least privilege, since omitted or `null` tools can inherit broader session access. ([GitHub Docs][4])
+Then create proposals like this:
 
-A simplified SDK stage runner would look like:
-
-```ts
-import { CopilotClient } from "@github/copilot-sdk";
-
-async function runStage(stage, run) {
-  const client = new CopilotClient({
-    cwd: run.worktreePath,
-    githubToken: run.githubToken,
-    useLoggedInUser: false,
-    logLevel: "debug",
-  });
-
-  await client.start();
-
-  const session = await client.createSession({
-    sessionId: `${run.id}:${stage.id}`,
-    model: stage.model ?? "gpt-4.1",
-    streaming: true,
-
-    agent: stage.agent,
-
-    customAgents: [
-      {
-        name: "researcher",
-        displayName: "Researcher",
-        description: "Read-only codebase exploration and architecture analysis",
-        tools: ["grep", "glob", "view"],
-        prompt: "Analyze the repository. Do not modify files.",
-      },
-      {
-        name: "implementer",
-        displayName: "Implementer",
-        description: "Makes minimal code changes based on an approved plan",
-        tools: ["view", "edit", "bash"],
-        prompt: "Implement only the approved plan. Keep diffs small. Run targeted tests.",
-      },
-      {
-        name: "reviewer",
-        displayName: "Reviewer",
-        description: "Reviews diffs for correctness, regressions, and missing tests",
-        tools: ["grep", "glob", "view", "bash"],
-        prompt: "Review critically. Do not modify files.",
-      },
-    ],
-
-    skillDirectories: stage.skills?.map((s) => `./skills/${s}`) ?? [],
-
-    hooks: {
-      onPreToolUse: async (input) => {
-        return policy.checkToolCall(run, stage, input);
-      },
-
-      onPostToolUse: async (input) => {
-        await audit.logToolResult(run, stage, input);
-        return null;
-      },
-
-      onSessionEnd: async (input) => {
-        await metrics.recordSessionEnd(run, stage, input);
-        return null;
-      },
+```json
+{
+  "scope": "repo",
+  "kind": "pitfall",
+  "title": "Auth tests require frozen time",
+  "memory": "When updating auth tests, freeze the clock because token expiry logic depends on Date.now().",
+  "evidence": [
+    {
+      "type": "file",
+      "path": "src/auth/token.test.ts",
+      "lineStart": 42,
+      "lineEnd": 79
     },
-
-    onPermissionRequest: async (request) => {
-      return approvals.request(run.id, stage.id, request);
-    },
-  });
-
-  session.on((event) => {
-    eventStore.append(run.id, stage.id, event);
-    websocket.publish(`runs/${run.id}`, event);
-  });
-
-  const response = await session.sendAndWait({
-    prompt: buildStagePrompt(stage, run),
-  });
-
-  await client.stop();
-  return response;
+    {
+      "type": "session",
+      "sessionId": "sess_123",
+      "artifact": "review.md"
+    }
+  ],
+  "confidence": 0.82,
+  "ttlDays": 60,
+  "createdBy": "reviewer-agent",
+  "requiresApproval": true
 }
 ```
 
-The hook layer is important. GitHub’s SDK hooks can run at session start, user prompt submission, before tool use, after tool use, session end, and error handling; the docs explicitly call out permissions, auditing, notifications, prompt enrichment, recovery, and metrics as hook use cases. ([GitHub Docs][7])
-
-## Conditional skills
-
-This is a strong fit for your “load skills for certain tasks” idea.
-
-The SDK’s skills are reusable prompt modules. A skill is a directory containing a `SKILL.md`, and you can pass `skillDirectories` when creating a session. The docs describe using skills to package domain expertise, share specialized behavior, organize complex agent configs, and enable/disable capabilities per session. ([GitHub Docs][8])
-
-I would structure them like this:
+The UI can show these under **Pending Memory**:
 
 ```text
-skills/
-  frontend-react/
+[Approve] [Edit] [Reject] [Convert to rule] [Convert to skill]
+```
+
+This is the right UX because learned memory is powerful but risky. OWASP’s agent security guidance explicitly calls out memory poisoning as malicious data persisted into agent memory to influence future sessions or users. ([OWASP Cheat Sheet Series][7])
+
+## Use citations and verification like Copilot Memory
+
+A memory should usually have evidence. GitHub Copilot Memory stores memories with citations to code locations and validates those citations against the current branch before using the memory. ([GitHub Docs][3])
+
+For your implementation, each memory should have:
+
+```text
+id
+scope
+kind
+title
+body
+evidence[]
+created_at
+updated_at
+last_verified_at
+expires_at
+confidence
+source_session_id
+source_agent
+status: active | stale | rejected | needs_review
+```
+
+Before injecting a memory into a prompt, your app should verify it:
+
+```text
+Does the cited file still exist?
+Do the cited lines still roughly match?
+Has the branch changed materially?
+Is the memory expired?
+Was it approved or agent-only?
+Is it relevant to the current task?
+```
+
+Then format it as “possibly stale learned context,” not as unquestionable truth.
+
+## How to inject memory into Copilot SDK sessions
+
+Copilot SDK hooks are perfect for this. Hooks can run at session start, when a user prompt is submitted, before/after tool use, at session end, and on errors; GitHub explicitly lists context injection, prompt enrichment, permissions, auditing, and metrics as hook use cases. ([GitHub Docs][8])
+
+The simplest design:
+
+```ts
+const session = await client.createSession({
+  sessionId,
+  model,
+  streaming: true,
+  skillDirectories: selectedSkillDirs,
+
+  hooks: {
+    onSessionStart: async () => {
+      const memoryContext = await memory.assemble({
+        repoId,
+        task,
+        agentName,
+        maxTokens: 3000,
+      });
+
+      return {
+        additionalContext: memoryContext,
+      };
+    },
+
+    onUserPromptSubmitted: async (input) => {
+      const relevant = await memory.search({
+        repoId,
+        query: input.prompt,
+        limit: 8,
+      });
+
+      return {
+        prompt: injectMemoryBlock(input.prompt, relevant),
+      };
+    },
+
+    onSessionEnd: async (input) => {
+      await memory.createProposalsFromSession({
+        repoId,
+        sessionId,
+        events: input.events,
+      });
+
+      return null;
+    },
+
+    onPostToolUse: async (input) => {
+      await audit.logToolUse(sessionId, input);
+      await memory.observeToolResult(sessionId, input);
+      return null;
+    },
+  },
+});
+```
+
+Exact hook return shapes may change because the SDK is still preview, but architecturally this is the right place to wire memory in.
+
+## Use skills for domain knowledge, not learned memory
+
+For domain knowledge, I would use Copilot SDK custom skills. GitHub describes SDK skills as reusable prompt modules: a named directory containing a `SKILL.md` file, injected into session context when loaded, useful for packaging domain expertise and enabling/disabling capabilities per session. ([GitHub Docs][9])
+
+That maps directly to your idea of conditionally loading knowledge:
+
+```text
+.agent/skills/
+  react-query/
     SKILL.md
-  frontend-accessibility/
+  accessibility-review/
     SKILL.md
-  code-review/
+  design-system/
     SKILL.md
-  test-writing/
+  playwright-debugging/
     SKILL.md
-  company-style/
-    SKILL.md
-  security-basics/
+  pr-review/
     SKILL.md
 ```
 
-Then the workflow engine chooses skills based on the task:
+Then select skills from the workflow:
 
 ```ts
 function selectSkills(task) {
   return [
-    "company-style",
-    task.type === "review" && "code-review",
-    task.stack === "react" && "frontend-react",
-    task.needsTests && "test-writing",
-    task.touchesAuth && "security-basics",
+    task.stack.includes("react") && ".agent/skills/react-query",
+    task.kind === "review" && ".agent/skills/pr-review",
+    task.files.some(f => f.includes("a11y")) && ".agent/skills/accessibility-review",
+    task.kind === "test-failure" && ".agent/skills/playwright-debugging",
   ].filter(Boolean);
 }
 ```
 
-That gives you conditional behavior without needing MCP yet.
-
-## Auth and PR submission
-
-For the first version, I would use the developer’s local Copilot CLI auth. GitHub’s setup docs say the SDK can use a local CLI that is already signed in, which is the simplest configuration. ([GitHub Docs][9])
-
-For the work/enterprise version, I would move to a GitHub App or OAuth App. GitHub’s SDK OAuth docs say users can authorize your app, you pass the user token to the SDK, Copilot requests are made on behalf of each authenticated user, and usage is billed to that user’s Copilot subscription; the app does not handle model API keys. ([GitHub Docs][10])
-
-For PRs, I would **not** let the agent freely push branches. I would have the app own this:
+Keep the distinction sharp:
 
 ```text
-Agent produces patch
-  → app shows diff
-  → user approves
-  → app creates branch
-  → app pushes branch
-  → app creates PR
-  → agent drafts title/body only
+Rules/instructions = stable expectations
+Skills = reusable procedures
+Memory = learned facts and past mistakes
+Session handoff = current task state
+Raw transcript = evidence/archive
 ```
 
-Copilot CLI does ship with GitHub MCP configured and can interact with GitHub resources, but since you said MCP is probably out of scope for now, I would use the GitHub API or GitHub App permissions for PR creation instead of making PR creation an agent tool. ([GitHub Docs][11])
+## How this should appear in your UI
 
-## Desktop/web packaging
-
-I would build the core in **TypeScript/Node** because the Copilot SDK and ACP examples are already natural in TypeScript, and because Node makes child processes, PTYs, file watching, Git operations, and WebSocket streaming straightforward.
-
-For UI packaging:
+Given your Discord-like design, I’d add:
 
 ```text
+Repo sidebar
+  # Sessions
+    auth-refactor
+    modal-state-machine
+    pr-review-142
+  # Memory
+    Overview
+    Architecture
+    Commands
+    Pitfalls
+    Decisions
+    Failures
+    Pending
+  # Skills
+    React
+    Testing
+    Review
+```
+
+In focus view, next to tool calls and artifacts, show a **Memory Activity** feed:
+
+```text
+Researcher recalled:
+  - “Auth tests require frozen time” from pitfalls.md
+  - “API clients live in src/api/client” from architecture.md
+
+Reviewer proposed:
+  - New failure memory: “Storybook tests fail unless MSW is reset between cases”
+  [Approve] [Edit] [Reject]
+```
+
+That makes memory observable instead of spooky.
+
+## Existing repos/projects worth studying
+
+**Cline Memory Bank** is the cleanest markdown-first pattern. It is not a database; it is a documentation methodology that gives an agent a repeatable way to rebuild context. ([Cline Documentation][2])
+
+**OpenCode rules** are worth copying for instruction loading. OpenCode supports `AGENTS.md`, global rules, Claude Code compatibility, and custom instruction files from `opencode.json`; it also recommends committing project `AGENTS.md` to Git. ([OpenCode][10])
+
+**`opencode-agent-memory`** is directly relevant because it adds self-editable memory blocks around OpenCode and explicitly says it is like `AGENTS.md` with a harness: scoped blocks, metadata, size limits, dedicated memory tools, and prompting that encourages the agent to maintain memory. ([GitHub][11])
+
+**`opencode-supermemory`** is relevant if you want a hosted memory layer; the docs describe it as an OpenCode plugin for persistent memory across sessions and projects. ([supermemory.ai][12])
+
+**Pi Hermes Memory** is probably the closest to your desired pattern on the Pi side: persistent memory, session search, failure memory, procedural skills, background learning, auto-consolidation, secret scanning, and global + per-project memory. ([Pi Dev][4])
+
+**Letta** is worth studying conceptually. Its memory blocks are always-visible structured context sections, can be read-write or read-only, and can be shared across agents; its archival memory is a separate semantically searchable store queried on demand. ([Letta Docs][13])
+
+**LangGraph memory** is a good backend design reference: long-term memories are JSON documents organized by namespace and key, often including user or org IDs; this maps nicely to `repoId`, `agentId`, `sessionId`, and `memoryKind` namespaces in your app. ([LangChain Docs][14])
+
+**Zep/Mem0/Basic Memory** are worth looking at if you later want a managed or self-hosted memory layer. Zep stores chat history and builds a user-level knowledge graph from messages, Mem0 positions itself as a universal self-improving memory layer, and Basic Memory distinguishes simple built-in memories from deeper architecture/project-history knowledge. ([Zep Documentation][15])
+
+## The design I would ship first
+
 MVP:
-  local daemon + browser UI
-  workbench serve
-  opens http://localhost:<port>
-
-Desktop app:
-  Electron first if you want easiest Node/PTY/process integration
-
-More polished/lighter app:
-  Tauri later if you want a smaller desktop shell
-```
-
-Electron is cross-platform and runs on macOS, Windows, and Linux, while embedding Chromium and Node.js. ([Electron][12]) Tauri also supports cross-platform desktop/mobile apps from one codebase, with a JavaScript frontend and Rust application logic. ([Tauri][13])
-
-For your use case, I would choose **Electron first** despite the size because you will be managing local processes, Git, filesystem permissions, and likely a terminal preview. Tauri is attractive later, but the Rust/Node boundary adds complexity early.
-
-## Where raw Copilot CLI still helps
-
-Raw CLI wrapping is useful for simple batch jobs and quick prototypes. Copilot CLI supports non-interactive prompts with `-p`, quiet output with `-s`, custom agents with `--agent`, model selection with `--model`, tool allow/deny flags, `--no-ask-user`, secret redaction, and transcript export with `--share`. ([GitHub Docs][14])
-
-Example:
-
-```bash
-copilot -p "Review the diff against main. Return only high-confidence defects." \
-  -s \
-  --agent=reviewer \
-  --allow-tool='shell(git:*),shell(npm test),read' \
-  --deny-tool='shell(git push)' \
-  --no-ask-user \
-  --share ./agent-review.md
-```
-
-I would use that for early proof-of-concept workflows, but I would not make it the core long-term engine because terminal output is less structured than SDK/ACP events.
-
-## Important security note
-
-Be careful with defaults. The SDK repo says the SDK can operate the CLI in an equivalent of `--allow-all`, enabling broad first-party tools such as filesystem, Git, and web requests, unless you customize tool availability. ([GitHub][1])
-
-So the harness should enforce:
 
 ```text
-No --allow-all in default workflows
-Read-only research/planning stages
-Approval before writes
-Approval before git push
-Deny destructive shell commands
-Per-repo worktree isolation
-Per-stage allowed commands
-Secret redaction
-Full event and tool-call audit log
-User approval before PR creation
+1. Store every session as:
+   - events.jsonl
+   - session.md
+   - handoff.md
+   - artifacts/
+
+2. Add repo memory:
+   - MEMORY.md index
+   - topic markdown files
+   - SQLite FTS index
+
+3. Add memory proposals:
+   - generated at session end
+   - approved by user
+   - stored with evidence and TTL
+
+4. Inject memory through Copilot SDK hooks:
+   - small repo memory summary at session start
+   - relevant memories on each prompt
+   - selected skills per workflow stage
+
+5. Show memory in UI:
+   - recalled memories
+   - proposed memories
+   - approved/rejected state
 ```
 
-## My recommended MVP
-
-Build this first:
+Then v2:
 
 ```text
-workbench serve
-  Starts local daemon
-  Opens web UI
-
-workbench run feature-pr --repo .
-  Creates workflow run
-  Creates git worktree
-  Runs research stage
-  Streams events to UI
-  Runs planning stage
-  Waits for user approval
-  Runs implementation stage
-  Runs tests
-  Runs review stage
-  Shows final diff
+- Semantic/vector search
+- Shared team memory
+- “Convert memory to AGENTS.md rule”
+- “Convert workflow into SKILL.md”
+- Memory staleness scanner
+- Secret/prompt-injection scanner
+- Repo memory export/import
+- GitHub-hosted Copilot Memory awareness if enabled
 ```
 
-Use this stack:
+## Important security guardrails
+
+Persistent memory can become a prompt-injection persistence layer. Anthropic’s memory tool docs explicitly recommend restricting memory operations to a dedicated `/memories` directory when the client executes memory operations locally. ([Claude][16]) Pi Hermes Memory also scans every memory and skill write to prevent malicious content from later being injected into the system prompt. ([Pi Dev][4])
+
+For your app, I would enforce:
 
 ```text
-Core: TypeScript + Node
-UI: React
-Transport: WebSocket or SSE
-Storage: SQLite
-Agent runtime: Copilot SDK
-Protocol adapter: ACP, optional but design for it now
-Terminal preview: later, PTY-based
-Desktop wrapper: Electron after browser MVP
-Auth v1: local Copilot CLI auth
-Auth v2: GitHub App/OAuth App
-PR creation: app-owned GitHub API action
+No secrets in memory
+No unapproved writes to shared repo memory
+No agent-written org policy
+No memory without provenance
+No memory from untrusted external content without review
+TTL for learned facts
+Read-only blocks for org/team rules
+Diff view for every memory update
 ```
 
-The big architectural principle is: **your app should orchestrate the workflow; Copilot should execute stages.** That gives you the Claude-Code-like experience you want, but with better visibility, safer permissions, and a clearer path to work-approved OAuth, PR creation, and auditability.
+## Bottom line
 
-[1]: https://github.com/github/copilot-sdk "GitHub - github/copilot-sdk: Multi-platform SDK for integrating GitHub Copilot Agent into apps and services · GitHub"
-[2]: https://github.com/github/copilot-sdk/blob/main/docs/index.md "copilot-sdk/docs/index.md at main · github/copilot-sdk · GitHub"
-[3]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/streaming-events "Streaming events in the Copilot SDK - GitHub Docs"
-[4]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/custom-agents "Custom agents and sub-agent orchestration - GitHub Docs"
-[5]: https://agentclientprotocol.com/protocol/overview "Overview - Agent Client Protocol"
-[6]: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server "Copilot CLI ACP server - GitHub Docs"
-[7]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/working-with-hooks "Working with hooks - GitHub Docs"
-[8]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/custom-skills "Using custom skills with the Copilot SDK - GitHub Docs"
-[9]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/set-up-copilot-sdk "Set up Copilot SDK - GitHub Docs"
-[10]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/set-up-copilot-sdk/github-oauth "Using GitHub OAuth with Copilot SDK - GitHub Docs"
-[11]: https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli "Using GitHub Copilot CLI - GitHub Docs"
-[12]: https://electronjs.org/ "Build cross-platform desktop apps with JavaScript, HTML, and CSS | Electron"
-[13]: https://v2.tauri.app/ "Tauri 2.0 | Tauri"
-[14]: https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference "GitHub Copilot CLI programmatic reference - GitHub Docs"
+Your instinct is right: use markdown, but make it **structured markdown plus an indexed memory system**.
+
+The best architecture for your app is:
+
+```text
+Session channels produce:
+  events + artifacts + handoff summaries
+
+Repo memory consumes:
+  approved lessons, decisions, quirks, failures
+
+Skills/rules provide:
+  curated domain knowledge and workflows
+
+Copilot SDK hooks inject:
+  only the small, relevant, verified slice of memory needed for the current stage
+```
+
+That gives you Claude-Code-style continuity while keeping the system inspectable, editable, and safe enough for work use.
+
+[1]: https://code.claude.com/docs/en/memory "How Claude remembers your project - Claude Code Docs"
+[2]: https://docs.cline.bot/features/memory-bank "Memory Bank - Cline"
+[3]: https://docs.github.com/en/copilot/concepts/agents/copilot-memory "About agentic memory for GitHub Copilot - GitHub Docs"
+[4]: https://pi.dev/packages/pi-hermes-memory "Pi Coding Agent"
+[5]: https://agents.md/ "AGENTS.md"
+[6]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/streaming-events "Streaming events in the Copilot SDK - GitHub Docs"
+[7]: https://cheatsheetseries.owasp.org/cheatsheets/AI_Agent_Security_Cheat_Sheet.html?utm_source=chatgpt.com "AI Agent Security Cheat Sheet"
+[8]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/working-with-hooks "Working with hooks - GitHub Docs"
+[9]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/custom-skills "Using custom skills with the Copilot SDK - GitHub Docs"
+[10]: https://opencode.ai/docs/rules/ "Rules | OpenCode"
+[11]: https://github.com/joshuadavidthomas/opencode-agent-memory/blob/main/README.md "opencode-agent-memory/README.md at main · joshuadavidthomas/opencode-agent-memory · GitHub"
+[12]: https://supermemory.ai/docs/integrations/opencode "OpenCode - supermemory | Memory API for the AI era"
+[13]: https://docs.letta.com/guides/core-concepts/memory/memory-blocks/ "Memory blocks (core memory) | Letta Docs"
+[14]: https://docs.langchain.com/oss/python/langchain/long-term-memory "Long-term memory - Docs by LangChain"
+[15]: https://help.getzep.com/v2/memory "Memory | Zep Documentation"
+[16]: https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool "Memory tool - Claude API Docs"
