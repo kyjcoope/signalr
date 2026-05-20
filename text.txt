@@ -1,482 +1,132 @@
-I’d implement memory as **four separate layers**, not one catch-all “memory” feature:
+Yes, **Firefox can support H.265 through WebCodecs**, but this is the messy part:
 
-```text
-1. Session record        = what happened in this channel/session
-2. Session handoff       = compact markdown summary for resuming
-3. Repo memory           = durable learned facts/quirks shared across sessions
-4. Domain knowledge      = curated rules/skills/docs loaded conditionally
-```
+**Normal Firefox HEVC playback is more mature than Firefox HEVC WebCodecs support.** The `<video>` / MSE path is the safer bet today.
 
-The key is: **raw sessions are not memory**. They are evidence. Memory should be a distilled, scoped, reviewable layer built from sessions.
+### The key distinction
 
-## What existing tools suggest
+There are two different decode paths:
 
-The strongest pattern I found is from Claude Code and Cline: use **plain markdown for durable, human-editable memory**, but keep it structured and concise. Claude Code now uses two complementary systems: explicit `CLAUDE.md` instruction files written by humans, and auto memory written by Claude based on corrections/preferences; both are loaded at the start of a session, but Claude treats them as context rather than hard enforcement. ([Claude][1])
+| Use case         | API                                     | Firefox HEVC status                                                          |
+| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------- |
+| Normal playback  | `<video src="...">`, MSE, media element | Supported on modern Firefox when platform codecs/hardware are available      |
+| Low-level decode | `VideoDecoder` from WebCodecs           | Exists/has been landing, but more conditional and historically Nightly-first |
 
-Cline’s Memory Bank is even closer to what you are describing. It uses a `memory-bank/` directory with files like `projectbrief.md`, `activeContext.md`, `systemPatterns.md`, `techContext.md`, and `progress.md`; Cline’s docs frame this as a structured markdown system for preserving context across sessions. ([Cline Documentation][2])
+MDN’s Firefox 137 notes say HEVC is hardware-enabled on Android, hardware/software-enabled on Linux, and that this adds to existing Windows/macOS support. That is about Firefox media playback support generally. ([MDN Web Docs][1])
 
-GitHub Copilot’s own new memory system gives another important design principle: memories are **repo-scoped**, stored with citations to code locations, validated against the current codebase before use, and expired after 28 days to reduce stale-memory risk. ([GitHub Docs][3]) That is probably the best pattern to copy even if you implement your own local memory.
+WebCodecs is different: it gives JS low-level access to `VideoDecoder` / `VideoEncoder`, turning `EncodedVideoChunk`s into `VideoFrame`s directly, often with hardware acceleration. ([MDN Web Docs][2])
 
-## My recommendation for your app
+### Do you have to use a video element?
 
-For your Discord-like UI, I would use this model:
+**No, not if WebCodecs H.265 works on that Firefox/platform.**
 
-```text
-Repo = Discord server
-Session = Discord channel
-Workflow stage = thread/status lane
-Memory = repo sidebar + agent-accessible context source
-```
+With WebCodecs you can do:
 
-Then expose memory in the UI as a first-class object, not just hidden files. Give each repo a **Memory** section with tabs like:
-
-```text
-Overview
-Architecture
-Commands
-Testing
-Pitfalls
-Decisions
-Failures
-User/team preferences
-Pending memory proposals
-```
-
-The agent should be able to propose memory updates, but I would not let it silently mutate important shared memory without review at first.
-
-## Use markdown, but do not only use markdown
-
-I would store memory in **two representations**:
-
-```text
-Markdown files = source of truth humans can read/edit/version
-SQLite/FTS/vector index = fast retrieval/search/UI/filtering
-```
-
-This gives you the best of both worlds. Markdown is portable, auditable, and works with other agents. SQLite/FTS gives you fast “what did we learn about auth?” search, memory proposals, stale-memory detection, and UI filtering.
-
-Pi’s `pi-hermes-memory` extension is a useful example here: it advertises SQLite FTS5 search across conversations, persistent markdown memories, failure memory, categorized memories, background learning, auto-consolidation, secret scanning, and a two-tier global/per-project memory model. ([Pi Dev][4])
-
-## Proposed file layout
-
-I would separate **repo-committed guidance** from **local learned memory**.
-
-Inside the repo, commit stable team guidance:
-
-```text
-repo/
-  AGENTS.md
-  .agent/
-    rules/
-      frontend.md
-      testing.md
-      api.md
-      security.md
-    skills/
-      react-review/
-        SKILL.md
-      playwright-debugging/
-        SKILL.md
-```
-
-Outside the repo, store learned local memory and session archives:
-
-```text
-~/Library/Application Support/YourApp/
-  repos/
-    <repo-id>/
-      repo.json
-      memory/
-        MEMORY.md
-        architecture.md
-        commands.md
-        testing.md
-        pitfalls.md
-        decisions.md
-        failures.md
-        tool-quirks.md
-      sessions/
-        <session-id>/
-          session.md
-          handoff.md
-          events.jsonl
-          artifacts/
-            plan.md
-            research.md
-            review.md
-            patch.diff
-      index.sqlite
-```
-
-For macOS, using the user’s Application Support directory is cleaner than dropping hidden state all over the repo. For team-shared memory, you can later add an option to commit selected memories into `.agent/memory/` or convert them into `AGENTS.md` / rules / skills.
-
-## What each file should do
-
-`AGENTS.md` should be the stable, repo-level instruction file. It should include setup commands, build/test commands, code conventions, PR rules, and important repo structure. The AGENTS.md site describes it as a predictable “README for agents,” and OpenCode, Codex, Copilot-related tooling, and many other agents support it or recognize it. ([Agents][5])
-
-`MEMORY.md` should be a compact index, not a giant dump. Claude Code’s auto memory does this: it keeps a `MEMORY.md` entrypoint and moves details into topic files, loading only the first 200 lines or 25 KB of `MEMORY.md` at session start, while topic files are read on demand. ([Claude][1])
-
-`handoff.md` should summarize the current session for continuation. It should include the task, current plan, files touched, commands run, unresolved issues, and next step. Cline’s Memory Bank pattern explicitly distinguishes preserving knowledge from preserving code state; memory keeps project context while checkpoints preserve code snapshots. ([Cline Documentation][2])
-
-`events.jsonl` should be the raw structured event log. Do not rely on markdown alone for replaying the UI. Copilot SDK streaming events include assistant messages, tool events, session lifecycle events, permission/user-input events, sub-agent/skill events, and event metadata like IDs, timestamps, parent IDs, and persisted-vs-ephemeral status. ([GitHub Docs][6])
-
-## Memory scopes I would support
-
-| Scope       | Storage                          |  Shared? | Loaded how                     | Purpose                     |
-| ----------- | -------------------------------- | -------: | ------------------------------ | --------------------------- |
-| Session     | `sessions/<id>/handoff.md`       |       No | Current session only           | Active task state           |
-| Repo memory | `memory/*.md`                    | Optional | Index always, topics on demand | Quirks, decisions, failures |
-| Repo rules  | `AGENTS.md`, `.agent/rules/*.md` |      Yes | At session start or path match | Stable instructions         |
-| Skills      | `.agent/skills/*/SKILL.md`       |      Yes | Conditionally                  | Domain workflows            |
-| User memory | global `user.md`                 |       No | At session start               | Personal preferences        |
-| Org policy  | managed config/rules             |      Yes | Always                         | Non-negotiable standards    |
-
-This split matters because “always run `pnpm test`” belongs in rules, “last auth refactor failed because mocked tokens expire after 5 minutes” belongs in memory, and “current branch is half-way through replacing the modal state machine” belongs in session handoff.
-
-## How memory should be written
-
-I would not let every message become memory. Use a **memory proposal pipeline**.
-
-Memory write triggers:
-
-```text
-1. User explicitly says “remember this”
-2. User corrects the agent
-3. A workflow stage fails and is fixed
-4. Review catches a recurring mistake
-5. Session ends
-6. Before context compaction
-7. Before opening a PR
-```
-
-Then create proposals like this:
-
-```json
-{
-  "scope": "repo",
-  "kind": "pitfall",
-  "title": "Auth tests require frozen time",
-  "memory": "When updating auth tests, freeze the clock because token expiry logic depends on Date.now().",
-  "evidence": [
-    {
-      "type": "file",
-      "path": "src/auth/token.test.ts",
-      "lineStart": 42,
-      "lineEnd": 79
-    },
-    {
-      "type": "session",
-      "sessionId": "sess_123",
-      "artifact": "review.md"
-    }
-  ],
-  "confidence": 0.82,
-  "ttlDays": 60,
-  "createdBy": "reviewer-agent",
-  "requiresApproval": true
-}
-```
-
-The UI can show these under **Pending Memory**:
-
-```text
-[Approve] [Edit] [Reject] [Convert to rule] [Convert to skill]
-```
-
-This is the right UX because learned memory is powerful but risky. OWASP’s agent security guidance explicitly calls out memory poisoning as malicious data persisted into agent memory to influence future sessions or users. ([OWASP Cheat Sheet Series][7])
-
-## Use citations and verification like Copilot Memory
-
-A memory should usually have evidence. GitHub Copilot Memory stores memories with citations to code locations and validates those citations against the current branch before using the memory. ([GitHub Docs][3])
-
-For your implementation, each memory should have:
-
-```text
-id
-scope
-kind
-title
-body
-evidence[]
-created_at
-updated_at
-last_verified_at
-expires_at
-confidence
-source_session_id
-source_agent
-status: active | stale | rejected | needs_review
-```
-
-Before injecting a memory into a prompt, your app should verify it:
-
-```text
-Does the cited file still exist?
-Do the cited lines still roughly match?
-Has the branch changed materially?
-Is the memory expired?
-Was it approved or agent-only?
-Is it relevant to the current task?
-```
-
-Then format it as “possibly stale learned context,” not as unquestionable truth.
-
-## How to inject memory into Copilot SDK sessions
-
-Copilot SDK hooks are perfect for this. Hooks can run at session start, when a user prompt is submitted, before/after tool use, at session end, and on errors; GitHub explicitly lists context injection, prompt enrichment, permissions, auditing, and metrics as hook use cases. ([GitHub Docs][8])
-
-The simplest design:
-
-```ts
-const session = await client.createSession({
-  sessionId,
-  model,
-  streaming: true,
-  skillDirectories: selectedSkillDirs,
-
-  hooks: {
-    onSessionStart: async () => {
-      const memoryContext = await memory.assemble({
-        repoId,
-        task,
-        agentName,
-        maxTokens: 3000,
-      });
-
-      return {
-        additionalContext: memoryContext,
-      };
-    },
-
-    onUserPromptSubmitted: async (input) => {
-      const relevant = await memory.search({
-        repoId,
-        query: input.prompt,
-        limit: 8,
-      });
-
-      return {
-        prompt: injectMemoryBlock(input.prompt, relevant),
-      };
-    },
-
-    onSessionEnd: async (input) => {
-      await memory.createProposalsFromSession({
-        repoId,
-        sessionId,
-        events: input.events,
-      });
-
-      return null;
-    },
-
-    onPostToolUse: async (input) => {
-      await audit.logToolUse(sessionId, input);
-      await memory.observeToolResult(sessionId, input);
-      return null;
-    },
-  },
+```js
+const support = await VideoDecoder.isConfigSupported({
+  codec: 'hvc1.1.6.L93.B0', // example HEVC codec string
 });
+
+console.log(support.supported);
 ```
 
-Exact hook return shapes may change because the SDK is still preview, but architecturally this is the right place to wire memory in.
+Then decode chunks manually:
 
-## Use skills for domain knowledge, not learned memory
+```js
+const decoder = new VideoDecoder({
+  output: frame => {
+    // draw to canvas, WebGL, WebGPU, etc.
+    frame.close();
+  },
+  error: err => console.error(err),
+});
 
-For domain knowledge, I would use Copilot SDK custom skills. GitHub describes SDK skills as reusable prompt modules: a named directory containing a `SKILL.md` file, injected into session context when loaded, useful for packaging domain expertise and enabling/disabling capabilities per session. ([GitHub Docs][9])
+decoder.configure({
+  codec: 'hvc1.1.6.L93.B0',
+});
 
-That maps directly to your idea of conditionally loading knowledge:
+decoder.decode(new EncodedVideoChunk({
+  type: 'key',
+  timestamp: 0,
+  data: encodedHevcBytes,
+}));
+```
+
+But in practice, for Firefox, **you should assume `<video>` / MSE is more reliable than WebCodecs for HEVC**, especially if you need this to work across Windows, macOS, Linux, and Android.
+
+### How Firefox supports HEVC
+
+Firefox does **not** simply bundle a universal “Mozilla HEVC decoder” everywhere. It mostly relies on platform/media decode stacks:
 
 ```text
-.agent/skills/
-  react-query/
-    SKILL.md
-  accessibility-review/
-    SKILL.md
-  design-system/
-    SKILL.md
-  playwright-debugging/
-    SKILL.md
-  pr-review/
-    SKILL.md
+H.265 / HEVC media
+        ↓
+Firefox media pipeline
+        ↓
+Platform decoder
+Windows: Media Foundation / HEVC codec support
+macOS: Apple VideoToolbox
+Linux: FFmpeg / VA-API path depending on distro/build
+Android: platform hardware decoder
+        ↓
+GPU / hardware decode when available
 ```
 
-Then select skills from the workflow:
+Mozilla specifically said the plan for H.265 WebCodecs was to support pass-through/platform-backed decoding, and that H.265 support would only happen where the platform supports it, such as hardware acceleration. ([bugzilla.mozilla.org][3])
 
-```ts
-function selectSkills(task) {
-  return [
-    task.stack.includes("react") && ".agent/skills/react-query",
-    task.kind === "review" && ".agent/skills/pr-review",
-    task.files.some(f => f.includes("a11y")) && ".agent/skills/accessibility-review",
-    task.kind === "test-failure" && ".agent/skills/playwright-debugging",
-  ].filter(Boolean);
-}
+### Current practical answer
+
+For your use case:
+
+* **For simple playback:** use `<video>` or MSE.
+* **For low-level frame access:** try WebCodecs, but feature-detect it.
+* **For broad compatibility:** provide an H.264 or AV1 fallback.
+* **For Firefox specifically:** do not assume HEVC WebCodecs works just because HEVC `<video>` playback works.
+
+Firefox Nightly release notes show H.265 WebCodecs decode being enabled first in Nightly macOS builds starting Firefox 137 and Nightly Linux builds starting Firefox 138, which is a clue that this path has been more experimental/staged than normal media playback. ([Firefox][4])
+
+### Best runtime checks
+
+For `<video>` playback:
+
+```js
+const video = document.createElement('video');
+
+console.log(video.canPlayType(
+  'video/mp4; codecs="hvc1.1.6.L93.B0"'
+));
 ```
 
-Keep the distinction sharp:
+For MSE:
+
+```js
+console.log(MediaSource.isTypeSupported(
+  'video/mp4; codecs="hvc1.1.6.L93.B0"'
+));
+```
+
+For WebCodecs:
+
+```js
+const supported =
+  'VideoDecoder' in window &&
+  (await VideoDecoder.isConfigSupported({
+    codec: 'hvc1.1.6.L93.B0',
+  })).supported;
+
+console.log(supported);
+```
+
+The rule of thumb:
 
 ```text
-Rules/instructions = stable expectations
-Skills = reusable procedures
-Memory = learned facts and past mistakes
-Session handoff = current task state
-Raw transcript = evidence/archive
+<video> HEVC works
+  does NOT guarantee
+WebCodecs HEVC works
 ```
 
-## How this should appear in your UI
+So yes, **Firefox can support H.265 via WebCodecs**, but for production today I would treat it as **detect-and-use**, not **assume-and-rely-on**.
 
-Given your Discord-like design, I’d add:
-
-```text
-Repo sidebar
-  # Sessions
-    auth-refactor
-    modal-state-machine
-    pr-review-142
-  # Memory
-    Overview
-    Architecture
-    Commands
-    Pitfalls
-    Decisions
-    Failures
-    Pending
-  # Skills
-    React
-    Testing
-    Review
-```
-
-In focus view, next to tool calls and artifacts, show a **Memory Activity** feed:
-
-```text
-Researcher recalled:
-  - “Auth tests require frozen time” from pitfalls.md
-  - “API clients live in src/api/client” from architecture.md
-
-Reviewer proposed:
-  - New failure memory: “Storybook tests fail unless MSW is reset between cases”
-  [Approve] [Edit] [Reject]
-```
-
-That makes memory observable instead of spooky.
-
-## Existing repos/projects worth studying
-
-**Cline Memory Bank** is the cleanest markdown-first pattern. It is not a database; it is a documentation methodology that gives an agent a repeatable way to rebuild context. ([Cline Documentation][2])
-
-**OpenCode rules** are worth copying for instruction loading. OpenCode supports `AGENTS.md`, global rules, Claude Code compatibility, and custom instruction files from `opencode.json`; it also recommends committing project `AGENTS.md` to Git. ([OpenCode][10])
-
-**`opencode-agent-memory`** is directly relevant because it adds self-editable memory blocks around OpenCode and explicitly says it is like `AGENTS.md` with a harness: scoped blocks, metadata, size limits, dedicated memory tools, and prompting that encourages the agent to maintain memory. ([GitHub][11])
-
-**`opencode-supermemory`** is relevant if you want a hosted memory layer; the docs describe it as an OpenCode plugin for persistent memory across sessions and projects. ([supermemory.ai][12])
-
-**Pi Hermes Memory** is probably the closest to your desired pattern on the Pi side: persistent memory, session search, failure memory, procedural skills, background learning, auto-consolidation, secret scanning, and global + per-project memory. ([Pi Dev][4])
-
-**Letta** is worth studying conceptually. Its memory blocks are always-visible structured context sections, can be read-write or read-only, and can be shared across agents; its archival memory is a separate semantically searchable store queried on demand. ([Letta Docs][13])
-
-**LangGraph memory** is a good backend design reference: long-term memories are JSON documents organized by namespace and key, often including user or org IDs; this maps nicely to `repoId`, `agentId`, `sessionId`, and `memoryKind` namespaces in your app. ([LangChain Docs][14])
-
-**Zep/Mem0/Basic Memory** are worth looking at if you later want a managed or self-hosted memory layer. Zep stores chat history and builds a user-level knowledge graph from messages, Mem0 positions itself as a universal self-improving memory layer, and Basic Memory distinguishes simple built-in memories from deeper architecture/project-history knowledge. ([Zep Documentation][15])
-
-## The design I would ship first
-
-MVP:
-
-```text
-1. Store every session as:
-   - events.jsonl
-   - session.md
-   - handoff.md
-   - artifacts/
-
-2. Add repo memory:
-   - MEMORY.md index
-   - topic markdown files
-   - SQLite FTS index
-
-3. Add memory proposals:
-   - generated at session end
-   - approved by user
-   - stored with evidence and TTL
-
-4. Inject memory through Copilot SDK hooks:
-   - small repo memory summary at session start
-   - relevant memories on each prompt
-   - selected skills per workflow stage
-
-5. Show memory in UI:
-   - recalled memories
-   - proposed memories
-   - approved/rejected state
-```
-
-Then v2:
-
-```text
-- Semantic/vector search
-- Shared team memory
-- “Convert memory to AGENTS.md rule”
-- “Convert workflow into SKILL.md”
-- Memory staleness scanner
-- Secret/prompt-injection scanner
-- Repo memory export/import
-- GitHub-hosted Copilot Memory awareness if enabled
-```
-
-## Important security guardrails
-
-Persistent memory can become a prompt-injection persistence layer. Anthropic’s memory tool docs explicitly recommend restricting memory operations to a dedicated `/memories` directory when the client executes memory operations locally. ([Claude][16]) Pi Hermes Memory also scans every memory and skill write to prevent malicious content from later being injected into the system prompt. ([Pi Dev][4])
-
-For your app, I would enforce:
-
-```text
-No secrets in memory
-No unapproved writes to shared repo memory
-No agent-written org policy
-No memory without provenance
-No memory from untrusted external content without review
-TTL for learned facts
-Read-only blocks for org/team rules
-Diff view for every memory update
-```
-
-## Bottom line
-
-Your instinct is right: use markdown, but make it **structured markdown plus an indexed memory system**.
-
-The best architecture for your app is:
-
-```text
-Session channels produce:
-  events + artifacts + handoff summaries
-
-Repo memory consumes:
-  approved lessons, decisions, quirks, failures
-
-Skills/rules provide:
-  curated domain knowledge and workflows
-
-Copilot SDK hooks inject:
-  only the small, relevant, verified slice of memory needed for the current stage
-```
-
-That gives you Claude-Code-style continuity while keeping the system inspectable, editable, and safe enough for work use.
-
-[1]: https://code.claude.com/docs/en/memory "How Claude remembers your project - Claude Code Docs"
-[2]: https://docs.cline.bot/features/memory-bank "Memory Bank - Cline"
-[3]: https://docs.github.com/en/copilot/concepts/agents/copilot-memory "About agentic memory for GitHub Copilot - GitHub Docs"
-[4]: https://pi.dev/packages/pi-hermes-memory "Pi Coding Agent"
-[5]: https://agents.md/ "AGENTS.md"
-[6]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/streaming-events "Streaming events in the Copilot SDK - GitHub Docs"
-[7]: https://cheatsheetseries.owasp.org/cheatsheets/AI_Agent_Security_Cheat_Sheet.html?utm_source=chatgpt.com "AI Agent Security Cheat Sheet"
-[8]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/working-with-hooks "Working with hooks - GitHub Docs"
-[9]: https://docs.github.com/en/copilot/how-tos/copilot-sdk/use-copilot-sdk/custom-skills "Using custom skills with the Copilot SDK - GitHub Docs"
-[10]: https://opencode.ai/docs/rules/ "Rules | OpenCode"
-[11]: https://github.com/joshuadavidthomas/opencode-agent-memory/blob/main/README.md "opencode-agent-memory/README.md at main · joshuadavidthomas/opencode-agent-memory · GitHub"
-[12]: https://supermemory.ai/docs/integrations/opencode "OpenCode - supermemory | Memory API for the AI era"
-[13]: https://docs.letta.com/guides/core-concepts/memory/memory-blocks/ "Memory blocks (core memory) | Letta Docs"
-[14]: https://docs.langchain.com/oss/python/langchain/long-term-memory "Long-term memory - Docs by LangChain"
-[15]: https://help.getzep.com/v2/memory "Memory | Zep Documentation"
-[16]: https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool "Memory tool - Claude API Docs"
+[1]: https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/137 "Firefox 137 release notes for developers - Mozilla | MDN"
+[2]: https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API "WebCodecs API - Web APIs | MDN"
+[3]: https://bugzilla.mozilla.org/show_bug.cgi?id=1849392 "1849392 - [wmfme] support HEVC via the media engine"
+[4]: https://www.firefox.com/en-US/firefox/138.0a1/releasenotes/ "Firefox Nightly 138.0a1, See All New Features, Updates and Fixes"
