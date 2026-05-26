@@ -1,132 +1,825 @@
-Yes, **Firefox can support H.265 through WebCodecs**, but this is the messy part:
+Yes — here is the full **macOS-local GBrain setup** using **local Ollama embeddings**, with commands for Claude Code and a Pi harness-style setup.
 
-**Normal Firefox HEVC playback is more mature than Firefox HEVC WebCodecs support.** The `<video>` / MSE path is the safer bet today.
-
-### The key distinction
-
-There are two different decode paths:
-
-| Use case         | API                                     | Firefox HEVC status                                                          |
-| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------- |
-| Normal playback  | `<video src="...">`, MSE, media element | Supported on modern Firefox when platform codecs/hardware are available      |
-| Low-level decode | `VideoDecoder` from WebCodecs           | Exists/has been landing, but more conditional and historically Nightly-first |
-
-MDN’s Firefox 137 notes say HEVC is hardware-enabled on Android, hardware/software-enabled on Linux, and that this adds to existing Windows/macOS support. That is about Firefox media playback support generally. ([MDN Web Docs][1])
-
-WebCodecs is different: it gives JS low-level access to `VideoDecoder` / `VideoEncoder`, turning `EncodedVideoChunk`s into `VideoFrame`s directly, often with hardware acceleration. ([MDN Web Docs][2])
-
-### Do you have to use a video element?
-
-**No, not if WebCodecs H.265 works on that Firefox/platform.**
-
-With WebCodecs you can do:
-
-```js
-const support = await VideoDecoder.isConfigSupported({
-  codec: 'hvc1.1.6.L93.B0', // example HEVC codec string
-});
-
-console.log(support.supported);
-```
-
-Then decode chunks manually:
-
-```js
-const decoder = new VideoDecoder({
-  output: frame => {
-    // draw to canvas, WebGL, WebGPU, etc.
-    frame.close();
-  },
-  error: err => console.error(err),
-});
-
-decoder.configure({
-  codec: 'hvc1.1.6.L93.B0',
-});
-
-decoder.decode(new EncodedVideoChunk({
-  type: 'key',
-  timestamp: 0,
-  data: encodedHevcBytes,
-}));
-```
-
-But in practice, for Firefox, **you should assume `<video>` / MSE is more reliable than WebCodecs for HEVC**, especially if you need this to work across Windows, macOS, Linux, and Android.
-
-### How Firefox supports HEVC
-
-Firefox does **not** simply bundle a universal “Mozilla HEVC decoder” everywhere. It mostly relies on platform/media decode stacks:
+This version assumes everything lives on the Mac:
 
 ```text
-H.265 / HEVC media
-        ↓
-Firefox media pipeline
-        ↓
-Platform decoder
-Windows: Media Foundation / HEVC codec support
-macOS: Apple VideoToolbox
-Linux: FFmpeg / VA-API path depending on distro/build
-Android: platform hardware decoder
-        ↓
-GPU / hardware decode when available
+~/ai-brain       = your Markdown memory repo
+~/.gbrain        = GBrain local PGLite database/config
+Ollama           = local embedding provider
+Claude Code/Pi   = local MCP clients
 ```
 
-Mozilla specifically said the plan for H.265 WebCodecs was to support pass-through/platform-backed decoding, and that H.265 support would only happen where the platform supports it, such as hardware acceleration. ([bugzilla.mozilla.org][3])
+GBrain’s own CLI standalone path is basically: install with Bun, `gbrain init --pglite`, `gbrain doctor`, import Markdown, then query it. The README describes PGLite as the no-server/no-Docker local path. ([GitHub][1])
 
-### Current practical answer
+---
 
-For your use case:
+## 0. Install Homebrew if needed
 
-* **For simple playback:** use `<video>` or MSE.
-* **For low-level frame access:** try WebCodecs, but feature-detect it.
-* **For broad compatibility:** provide an H.264 or AV1 fallback.
-* **For Firefox specifically:** do not assume HEVC WebCodecs works just because HEVC `<video>` playback works.
-
-Firefox Nightly release notes show H.265 WebCodecs decode being enabled first in Nightly macOS builds starting Firefox 137 and Nightly Linux builds starting Firefox 138, which is a clue that this path has been more experimental/staged than normal media playback. ([Firefox][4])
-
-### Best runtime checks
-
-For `<video>` playback:
-
-```js
-const video = document.createElement('video');
-
-console.log(video.canPlayType(
-  'video/mp4; codecs="hvc1.1.6.L93.B0"'
-));
+```bash
+command -v brew >/dev/null 2>&1 || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-For MSE:
+Load Homebrew into the current shell:
 
-```js
-console.log(MediaSource.isTypeSupported(
-  'video/mp4; codecs="hvc1.1.6.L93.B0"'
-));
+```bash
+if [ -x /opt/homebrew/bin/brew ]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [ -x /usr/local/bin/brew ]; then
+  eval "$(/usr/local/bin/brew shellenv)"
+fi
 ```
 
-For WebCodecs:
+Persist Homebrew for future shells:
 
-```js
-const supported =
-  'VideoDecoder' in window &&
-  (await VideoDecoder.isConfigSupported({
-    codec: 'hvc1.1.6.L93.B0',
-  })).supported;
+```bash
+SHELL_PROFILE="$HOME/.zshrc"
 
-console.log(supported);
+if [ -x /opt/homebrew/bin/brew ]; then
+  grep -q 'eval "$(/opt/homebrew/bin/brew shellenv)"' "$SHELL_PROFILE" 2>/dev/null || \
+    echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> "$SHELL_PROFILE"
+elif [ -x /usr/local/bin/brew ]; then
+  grep -q 'eval "$(/usr/local/bin/brew shellenv)"' "$SHELL_PROFILE" 2>/dev/null || \
+    echo 'eval "$(/usr/local/bin/brew shellenv)"' >> "$SHELL_PROFILE"
+fi
+
+source "$SHELL_PROFILE"
 ```
 
-The rule of thumb:
+Install basic dependencies:
+
+```bash
+brew install git jq curl
+```
+
+---
+
+## 1. Install Bun
+
+GBrain is installed via Bun. Bun’s docs say Bun can be installed on macOS/Linux with the official install script and verified with `bun --version` and `bun --revision`. ([Bun][2])
+
+```bash
+curl -fsSL https://bun.com/install | bash
+```
+
+Add Bun to your current shell:
+
+```bash
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+Persist it:
+
+```bash
+grep -q 'export PATH="$HOME/.bun/bin:$PATH"' ~/.zshrc 2>/dev/null || \
+  echo 'export PATH="$HOME/.bun/bin:$PATH"' >> ~/.zshrc
+
+source ~/.zshrc
+```
+
+Verify:
+
+```bash
+bun --version
+bun --revision
+```
+
+---
+
+## 2. Install GBrain
+
+```bash
+bun install -g github:garrytan/gbrain
+```
+
+Verify:
+
+```bash
+which gbrain
+gbrain --version
+```
+
+If the global install acts weird, use the source fallback:
+
+```bash
+cd ~
+git clone https://github.com/garrytan/gbrain.git ~/gbrain
+cd ~/gbrain
+bun install
+bun link
+gbrain --version
+```
+
+---
+
+## 3. Install Ollama locally on macOS
+
+Ollama’s official macOS docs say the preferred method is installing the `.dmg` app into `/Applications`, and that the app will prompt to create the `/usr/local/bin/ollama` CLI link if needed. They also note macOS Sonoma or newer and Apple Silicon / x86 support. ([Ollama][3])
+
+For a CLI/Homebrew setup:
+
+```bash
+brew install ollama
+```
+
+Start Ollama:
+
+```bash
+brew services start ollama
+```
+
+Verify:
+
+```bash
+ollama --version
+curl http://localhost:11434/api/tags | jq
+```
+
+If `brew services` does not start it cleanly, run Ollama manually in a terminal:
+
+```bash
+ollama serve
+```
+
+Leave that terminal open, then use a second terminal for the rest.
+
+---
+
+## 4. Pull a local embedding model
+
+For a smooth GBrain setup, start with `nomic-embed-text`. It returns **768-dimensional** embeddings in Ollama, which avoids the Qwen 1024-vs-768 mismatch you hit earlier.
+
+```bash
+ollama pull nomic-embed-text
+```
+
+Test embeddings:
+
+```bash
+curl http://localhost:11434/api/embed \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nomic-embed-text",
+    "input": "GBrain stores project decisions, repo memory, and workflow notes."
+  }' | jq '.embeddings[0] | length'
+```
+
+Expected:
 
 ```text
-<video> HEVC works
-  does NOT guarantee
-WebCodecs HEVC works
+768
 ```
 
-So yes, **Firefox can support H.265 via WebCodecs**, but for production today I would treat it as **detect-and-use**, not **assume-and-rely-on**.
+Ollama’s docs describe embeddings as numeric vectors for semantic search/RAG, and the vector length depends on the model. They also document the `/api/embed` endpoint. ([Ollama][4])
 
-[1]: https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/137 "Firefox 137 release notes for developers - Mozilla | MDN"
-[2]: https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API "WebCodecs API - Web APIs | MDN"
-[3]: https://bugzilla.mozilla.org/show_bug.cgi?id=1849392 "1849392 - [wmfme] support HEVC via the media engine"
-[4]: https://www.firefox.com/en-US/firefox/138.0a1/releasenotes/ "Firefox Nightly 138.0a1, See All New Features, Updates and Fixes"
+---
+
+## 5. Initialize GBrain with local PGLite + Ollama embeddings
+
+Do **not** pass `--embedding-dimensions` here. Let GBrain use the model’s default.
+
+```bash
+gbrain init --pglite --embedding-model ollama:nomic-embed-text
+```
+
+Check health:
+
+```bash
+gbrain doctor
+gbrain providers test --touchpoint embedding
+```
+
+If `gbrain providers test` passes, your local embedding setup is good.
+
+---
+
+## 6. Create your `ai-brain` repo
+
+This is your durable Markdown memory repo. Keep it separate from `~/gbrain`.
+
+```bash
+cd ~
+
+mkdir -p ~/ai-brain/{inbox,projects,repos,workflows,decisions,prompts,concepts,sources,people,companies,archive}
+
+cd ~/ai-brain
+git init
+```
+
+Create starter files:
+
+```bash
+cat > README.md <<'EOF'
+# AI Brain
+
+Personal/project knowledge base for GBrain.
+
+This repo contains durable project decisions, repo summaries, workflows, prompts, concepts, and source notes.
+EOF
+
+cat > RESOLVER.md <<'EOF'
+# Resolver
+
+Use this file to decide where new knowledge belongs.
+
+- inbox/ — temporary captures that need sorting
+- projects/ — long-running projects
+- repos/ — repo-specific architecture summaries and current state
+- workflows/ — Claude Code, Codex, Pi, GStack, PR review, CI/CD patterns
+- decisions/ — durable decisions and why they were made
+- prompts/ — reusable prompts for agents
+- concepts/ — explanations and mental models
+- sources/ — article/research/source notes
+- people/ — people notes
+- companies/ — company/tool/vendor notes
+- archive/ — old or superseded material
+
+Before creating a new page, search for an existing page first.
+Do not store secrets, private keys, tokens, passwords, or raw credentials.
+EOF
+
+cat > index.md <<'EOF'
+# Index
+
+Start here for the brain.
+
+Important areas:
+- projects/
+- repos/
+- workflows/
+- decisions/
+- prompts/
+- concepts/
+- sources/
+EOF
+
+cat > schema.md <<'EOF'
+# Schema
+
+Preferred page shape:
+
+# Title
+
+## Current truth
+
+The current best understanding.
+
+## Details
+
+Supporting details.
+
+## Timeline / evidence
+
+- YYYY-MM-DD — Source or event.
+
+## Links
+
+Related pages.
+EOF
+
+cat > log.md <<'EOF'
+# Log
+
+Append important brain maintenance notes here.
+EOF
+
+for d in inbox projects repos workflows decisions prompts concepts sources people companies archive; do
+  cat > "$d/README.md" <<EOF
+# ${d}
+
+Purpose: see root RESOLVER.md.
+EOF
+done
+```
+
+Commit the initial brain repo:
+
+```bash
+git add .
+git commit -m "Initialize AI brain"
+```
+
+Optional private GitHub remote later:
+
+```bash
+# Replace this with your actual private repo URL
+git remote add origin git@github.com:YOUR_USER_OR_ORG/ai-brain.git
+git branch -M main
+git push -u origin main
+```
+
+---
+
+## 7. Import and embed the brain
+
+```bash
+gbrain import ~/ai-brain
+gbrain embed --stale
+gbrain query "What is this brain for?"
+```
+
+GBrain’s README shows the standalone workflow as `gbrain import ~/notes/` and `gbrain query ...` after init. ([GitHub][5])
+
+---
+
+## 8. Create a robust local MCP wrapper
+
+This avoids PATH/cwd problems when Claude Code or Pi starts GBrain.
+
+```bash
+mkdir -p ~/bin
+
+cat > ~/bin/gbrain-mcp <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$HOME/ai-brain"
+
+export PATH="$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+
+exec gbrain serve
+EOF
+
+chmod +x ~/bin/gbrain-mcp
+```
+
+Test it:
+
+```bash
+~/bin/gbrain-mcp
+```
+
+Expected behavior: it will appear to hang silently. That is normal; stdio MCP servers wait for MCP JSON-RPC messages on stdin/stdout. Press `Ctrl+C`.
+
+---
+
+## 9. Connect GBrain to Claude Code locally
+
+Use stdio MCP locally:
+
+```bash
+claude mcp add --scope user gbrain -- "$HOME/bin/gbrain-mcp"
+```
+
+Check:
+
+```bash
+claude mcp list
+```
+
+You want `gbrain` to show as connected.
+
+Then test inside a repo:
+
+```bash
+cd ~/GitHub/YOUR_REPO
+claude
+```
+
+Inside Claude Code:
+
+```text
+/mcp
+```
+
+Then ask:
+
+```text
+Use GBrain first. Search my brain for project context and summarize what you know before reading local files.
+```
+
+GBrain’s docs describe `gbrain serve` as the local stdio MCP path for Claude Code/Cursor/Windsurf-style clients, while HTTP mode is the remote/OAuth path. ([GitHub][1])
+
+---
+
+## 10. Add repo instructions so Claude Code actually uses it
+
+In each project repo:
+
+```bash
+cd ~/GitHub/YOUR_REPO
+touch CLAUDE.md
+```
+
+Append:
+
+```bash
+cat >> CLAUDE.md <<'EOF'
+
+## GBrain usage
+
+GBrain is available as an MCP server.
+
+Before broad repo exploration, search GBrain first.
+
+Use GBrain for:
+- project architecture
+- repo conventions
+- prior decisions
+- previous bugs/fixes
+- implementation plans
+- workflow notes
+- related files, symbols, and subsystem context
+
+Workflow:
+1. Search GBrain for the feature, subsystem, symbol, or decision.
+2. Use the result to narrow local file reads.
+3. Use Grep/Glob/Read for exact code inspection after GBrain narrows the area.
+4. If durable repo knowledge is learned, write it back to GBrain or update project docs.
+
+Do not store secrets, credentials, private keys, tokens, customer secrets, or one-off noisy details in GBrain.
+EOF
+```
+
+Commit:
+
+```bash
+git add CLAUDE.md
+git commit -m "Add GBrain usage guidance"
+```
+
+Now start Claude Code:
+
+```bash
+claude
+```
+
+Use prompts like:
+
+```text
+Use GBrain first. Search for architecture decisions and repo conventions before reading files.
+```
+
+```text
+Before implementing this, search GBrain for related prior decisions, bugs, and plans.
+```
+
+```text
+We just learned something durable about this repo. Add a concise GBrain note for future sessions.
+```
+
+---
+
+## 11. Add your first repo memory page
+
+Example for a repo named `coupir`:
+
+```bash
+mkdir -p ~/ai-brain/repos/coupir
+
+cat > ~/ai-brain/repos/coupir/README.md <<'EOF'
+# Coupir
+
+## Current truth
+
+Coupir is Kyle's self-hosted, privacy-focused Discord-like chat project.
+
+## Useful context
+
+- Claude Code should search GBrain before broad repo exploration.
+- Durable architecture decisions should be recorded here.
+- Do not store secrets or raw credentials.
+
+## Open questions
+
+- Document current auth/session architecture.
+- Document client/server boundaries.
+- Document deployment and self-hosting assumptions.
+
+## Links
+
+- ../../decisions/
+- ../../workflows/
+- ../../prompts/
+EOF
+
+cd ~/ai-brain
+git add repos/coupir/README.md
+git commit -m "Add Coupir brain page"
+
+gbrain import ~/ai-brain
+gbrain embed --stale
+gbrain query "What do we know about Coupir?"
+```
+
+---
+
+## 12. Optional: local GBrain admin dashboard
+
+For local-only dashboard access:
+
+```bash
+cd ~/ai-brain
+gbrain serve --http --port 3131
+```
+
+Open:
+
+```bash
+open http://localhost:3131/admin
+```
+
+Use stdio MCP for Claude Code day-to-day. Use HTTP/admin mostly for local inspection/debugging.
+
+---
+
+# Pi harness integration
+
+Pi is a minimal terminal coding harness that is meant to be customized with extensions, skills, prompt templates, themes, and packages. Its site explicitly describes it as a minimal harness and says it can be adapted via packages/extensions. ([Pi.dev][6])
+
+Pi itself may not expose MCP the same way Claude Code does out of the box. The clean path is to install a Pi MCP adapter package. The Pi package page for `pi-mcp-adapter` says it is an MCP adapter extension for Pi, installed with `pi install npm:pi-mcp-adapter`, and it reads standard MCP files like `.mcp.json` or `~/.config/mcp/mcp.json`. ([Pi.dev][7]) The adapter docs say it gives Pi a single proxy tool that discovers and calls MCP tools on demand rather than loading every MCP tool definition into the context. ([Pi MCP Adapter][8])
+
+## 13. Install Pi on macOS
+
+Use one of these. I’d use Bun since you already installed it:
+
+```bash
+bun add -g --ignore-scripts @earendil-works/pi-coding-agent
+```
+
+Or the Pi installer:
+
+```bash
+curl -fsSL https://pi.dev/install.sh | sh
+```
+
+Verify:
+
+```bash
+pi --version
+```
+
+---
+
+## 14. Install MCP adapter for Pi
+
+```bash
+pi install npm:pi-mcp-adapter
+```
+
+Restart Pi after installing the package.
+
+---
+
+## 15. Create a standard MCP config for Pi
+
+Use the wrapper script you already created.
+
+```bash
+mkdir -p ~/.config/mcp
+
+cat > ~/.config/mcp/mcp.json <<EOF
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "$HOME/bin/gbrain-mcp",
+      "args": []
+    }
+  }
+}
+EOF
+```
+
+Check the file:
+
+```bash
+cat ~/.config/mcp/mcp.json | jq
+```
+
+Start Pi in a project:
+
+```bash
+cd ~/GitHub/YOUR_REPO
+pi
+```
+
+Inside Pi, try:
+
+```text
+/mcp
+```
+
+Then ask:
+
+```text
+Search the gbrain MCP server for project context and summarize what you find before reading local files.
+```
+
+If the adapter needs setup, run inside Pi:
+
+```text
+/mcp setup
+```
+
+The Pi MCP Adapter package page says it can scan/import host-specific configs and prefers `.mcp.json` or `~/.config/mcp/mcp.json`; it also notes `/mcp setup` as the setup flow when nothing is configured yet. ([Pi.dev][7])
+
+---
+
+## 16. Add Pi project guidance too
+
+Pi loads project instructions from `AGENTS.md`, according to the Pi site. ([Pi.dev][6]) Add this next to `CLAUDE.md`:
+
+```bash
+cd ~/GitHub/YOUR_REPO
+touch AGENTS.md
+
+cat >> AGENTS.md <<'EOF'
+
+## GBrain usage
+
+GBrain is available through MCP.
+
+Before broad repo exploration, search GBrain first.
+
+Use GBrain for:
+- project architecture
+- repo conventions
+- prior decisions
+- previous bugs/fixes
+- workflow notes
+- durable project context
+
+Workflow:
+1. Search GBrain for the topic.
+2. Use GBrain results to narrow local file reads.
+3. Inspect exact code locally after narrowing.
+4. Write durable discoveries back to GBrain or project docs.
+
+Do not store secrets, credentials, private keys, tokens, or one-off noisy details in GBrain.
+EOF
+
+git add AGENTS.md
+git commit -m "Add GBrain usage guidance for Pi"
+```
+
+---
+
+# Optional: code repo indexing
+
+GBrain is useful even without code indexing: use it for architecture decisions, repo conventions, project memory, and prompts. If you want to test code indexing later, do it separately and verify it works before relying on it.
+
+Basic shape:
+
+```bash
+cd ~/GitHub/YOUR_REPO
+
+gbrain sources --help
+gbrain sync --help
+```
+
+Then try the current source/sync flow your installed version supports. Because GBrain’s code-indexing CLI has been moving quickly, I would not blindly depend on exact commands until `gbrain sources --help` and `gbrain sync --help` confirm them.
+
+A safe immediate workflow is:
+
+```text
+GBrain = durable memory and decisions
+Claude/Pi = exact local code reading
+```
+
+That is already valuable.
+
+---
+
+# One-shot condensed setup
+
+For a fresh Mac, this is the short practical version:
+
+```bash
+# Homebrew + deps
+command -v brew >/dev/null 2>&1 || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+if [ -x /opt/homebrew/bin/brew ]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [ -x /usr/local/bin/brew ]; then
+  eval "$(/usr/local/bin/brew shellenv)"
+fi
+
+brew install git jq curl ollama
+brew services start ollama
+
+# Bun
+curl -fsSL https://bun.com/install | bash
+export PATH="$HOME/.bun/bin:$PATH"
+grep -q 'export PATH="$HOME/.bun/bin:$PATH"' ~/.zshrc 2>/dev/null || \
+  echo 'export PATH="$HOME/.bun/bin:$PATH"' >> ~/.zshrc
+
+# GBrain
+bun install -g github:garrytan/gbrain
+gbrain --version
+
+# Ollama embedding model
+ollama pull nomic-embed-text
+
+curl http://localhost:11434/api/embed \
+  -H "Content-Type: application/json" \
+  -d '{"model":"nomic-embed-text","input":"test"}' | jq '.embeddings[0] | length'
+
+# Init GBrain
+gbrain init --pglite --embedding-model ollama:nomic-embed-text
+gbrain doctor
+gbrain providers test --touchpoint embedding
+
+# Brain repo
+mkdir -p ~/ai-brain/{inbox,projects,repos,workflows,decisions,prompts,concepts,sources,people,companies,archive}
+cd ~/ai-brain
+git init
+
+cat > README.md <<'EOF'
+# AI Brain
+
+Personal/project knowledge base for GBrain.
+EOF
+
+cat > RESOLVER.md <<'EOF'
+# Resolver
+
+- inbox/ — temporary captures
+- projects/ — long-running projects
+- repos/ — repo-specific architecture/current-state notes
+- workflows/ — Claude Code, Codex, Pi, GStack, CI/CD, PR review patterns
+- decisions/ — durable decisions and rationale
+- prompts/ — reusable prompts
+- concepts/ — explanations and mental models
+- sources/ — article/research/source notes
+- people/ — people notes
+- companies/ — company/tool/vendor notes
+- archive/ — old or superseded material
+
+Before creating a new page, search for an existing page first.
+Do not store secrets, credentials, private keys, or tokens.
+EOF
+
+git add .
+git commit -m "Initialize AI brain"
+
+gbrain import ~/ai-brain
+gbrain embed --stale
+gbrain query "What is this brain for?"
+
+# Local MCP wrapper
+mkdir -p ~/bin
+cat > ~/bin/gbrain-mcp <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$HOME/ai-brain"
+
+export PATH="$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+
+exec gbrain serve
+EOF
+chmod +x ~/bin/gbrain-mcp
+
+# Claude Code MCP
+claude mcp add --scope user gbrain -- "$HOME/bin/gbrain-mcp"
+claude mcp list
+```
+
+For Pi:
+
+```bash
+bun add -g --ignore-scripts @earendil-works/pi-coding-agent
+pi --version
+
+pi install npm:pi-mcp-adapter
+
+mkdir -p ~/.config/mcp
+cat > ~/.config/mcp/mcp.json <<EOF
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "$HOME/bin/gbrain-mcp",
+      "args": []
+    }
+  }
+}
+EOF
+
+cat ~/.config/mcp/mcp.json | jq
+```
+
+Then:
+
+```bash
+cd ~/GitHub/YOUR_REPO
+pi
+```
+
+Inside Pi:
+
+```text
+/mcp setup
+Search GBrain for this project’s context before reading files.
+```
+
+That gives you a fully local macOS stack: **Ollama embeddings + GBrain PGLite + local MCP into Claude Code and Pi**.
+
+[1]: https://github.com/garrytan/gbrain "GitHub - garrytan/gbrain: Garry's Opinionated OpenClaw/Hermes Agent Brain · GitHub"
+[2]: https://bun.com/docs/installation "Installation - Bun"
+[3]: https://docs.ollama.com/macos "macOS - Ollama"
+[4]: https://docs.ollama.com/capabilities/embeddings "Embeddings - Ollama"
+[5]: https://github.com/garrytan/gbrain/blob/master/README.md "gbrain/README.md at master · garrytan/gbrain · GitHub"
+[6]: https://pi.dev/ "Pi Coding Agent"
+[7]: https://pi.dev/packages/pi-mcp-adapter "pi-mcp-adapter · Packages · Pi"
+[8]: https://nicobailon-pi-mcp-adapter.mintlify.app/introduction "Introduction - Pi MCP Adapter"
