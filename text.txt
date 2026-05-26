@@ -1,15 +1,8 @@
-That new error is from your **`models.json` shape**, not the original Copilot API error.
+Yep — just add each model ID under `modelOverrides` and apply the same compat setting to each one.
 
-Two likely issues:
+Use this:
 
-1. You have a typo:
-   `github-coilot` → should be `github-copilot`
-
-2. Pi does **not** accept a provider entry that only contains top-level `compat`. The validator says a provider must include one of `baseUrl`, `headers`, `compact`, `modelOverrides`, or `models`. Pi’s docs show `compat` is supported inside `modelOverrides`, and `modelOverrides` is specifically for customizing built-in provider models without replacing the full model list. Unknown model IDs are ignored, so the ID has to match the model you are actually using. ([Pi][1])
-
-Use this format instead:
-
-```json
+```json id="s7hwah"
 {
   "providers": {
     "github-copilot": {
@@ -18,43 +11,13 @@ Use this format instead:
           "compat": {
             "supportsEagerToolInputStreaming": false
           }
-        }
-      }
-    }
-  }
-}
-```
-
-Replace `claude-haiku-4-5` with the exact Copilot model ID Pi shows for the model you selected.
-
-The reason this fixes the original error is that Pi normally sends `tools[].eager_input_streaming`; Pi’s docs say if a proxy or Anthropic-compatible backend rejects that field, setting `supportsEagerToolInputStreaming: false` makes Pi omit it and use the legacy fine-grained tool streaming header instead. ([Pi][1])
-
-A cleaner debugging flow:
-
-```bash
-cat ~/.pi/agent/models.json | jq .
-```
-
-Then list models so you can get the exact model ID:
-
-```bash
-pi --list-models | grep -i copilot
-```
-
-Then edit:
-
-```bash
-nano ~/.pi/agent/models.json
-```
-
-Final file should look like:
-
-```json
-{
-  "providers": {
-    "github-copilot": {
-      "modelOverrides": {
-        "EXACT_MODEL_ID_HERE": {
+        },
+        "claude-sonnet-4-5": {
+          "compat": {
+            "supportsEagerToolInputStreaming": false
+          }
+        },
+        "claude-opus-4-5": {
           "compat": {
             "supportsEagerToolInputStreaming": false
           }
@@ -65,13 +28,35 @@ Final file should look like:
 }
 ```
 
-Most important part: **do not put `compat` directly under `github-copilot` by itself**. Put it under:
+Pi’s docs say `modelOverrides` is the right place to customize built-in provider models, and `compat` is one of the supported per-model override fields. They also say unknown model IDs are ignored, so the only catch is that these IDs need to exactly match what Pi lists. ([GitHub][1])
 
-```text
-providers → github-copilot → modelOverrides → exact-model-id → compat
+To verify the exact Copilot IDs:
+
+```bash id="l6u5jf"
+pi --list-models | grep -i claude
 ```
 
-[1]: https://pi.dev/docs/latest/models "Custom Models · Docs · Pi"
+Then edit:
+
+```bash id="6zu9fl"
+nano ~/.pi/agent/models.json
+```
+
+Validate JSON:
+
+```bash id="hkrrpr"
+cat ~/.pi/agent/models.json | jq .
+```
+
+Then open Pi and reselect the model:
+
+```bash id="fcpv3l"
+pi
+```
+
+The setting tells Pi to omit `tools[].eager_input_streaming`, which is exactly what Pi recommends when an Anthropic-compatible backend rejects that field. ([GitHub][1])
+
+[1]: https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md "pi/packages/coding-agent/docs/models.md at main · earendil-works/pi · GitHub"
 
 
 
