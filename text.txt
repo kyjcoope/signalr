@@ -369,3 +369,9 @@ At this point, GBrain is useful as **repo memory**: architecture notes, prior de
 [1]: https://ollama.com/library/nomic-embed-text?utm_source=chatgpt.com "nomic-embed-text"
 [2]: https://github.com/garrytan/gbrain/blob/master/README.md?utm_source=chatgpt.com "README.md - garrytan/gbrain"
 [3]: https://github.com/garrytan/gbrain/blob/master/docs/mcp/DEPLOY.md?utm_source=chatgpt.com "gbrain/docs/mcp/DEPLOY.md at master"
+
+
+
+
+https://blog.saeloun.com/2026/04/28/private-karpathy-llm-wiki-gbrain-gstack-rails-ai-workflow/
+https://ai.gopubby.com/rag-llm-wiki-or-gbrain-how-your-agent-remembers-changes-everything-56829e66725c
