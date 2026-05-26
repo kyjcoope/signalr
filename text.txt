@@ -1,374 +1,78 @@
-Good — that means the **embedding side is finally healthy** with `ollama:nomic-embed-text`. `nomic-embed-text` is an Ollama embedding-only model, and Ollama explicitly describes it as usable only for generating embeddings. ([Ollama][1])
+That new error is from your **`models.json` shape**, not the original Copilot API error.
 
-Now do these steps.
+Two likely issues:
 
-## 1. Confirm the model dimension once
+1. You have a typo:
+   `github-coilot` → should be `github-copilot`
 
-```bash
-curl http://localhost:11434/api/embed \
-  -H "Content-Type: application/json" \
-  -d '{"model":"nomic-embed-text","input":"test"}' \
-  | jq '.embeddings[0] | length'
+2. Pi does **not** accept a provider entry that only contains top-level `compat`. The validator says a provider must include one of `baseUrl`, `headers`, `compact`, `modelOverrides`, or `models`. Pi’s docs show `compat` is supported inside `modelOverrides`, and `modelOverrides` is specifically for customizing built-in provider models without replacing the full model list. Unknown model IDs are ignored, so the ID has to match the model you are actually using. ([Pi][1])
+
+Use this format instead:
+
+```json
+{
+  "providers": {
+    "github-copilot": {
+      "modelOverrides": {
+        "claude-haiku-4-5": {
+          "compat": {
+            "supportsEagerToolInputStreaming": false
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
-Expected:
+Replace `claude-haiku-4-5` with the exact Copilot model ID Pi shows for the model you selected.
+
+The reason this fixes the original error is that Pi normally sends `tools[].eager_input_streaming`; Pi’s docs say if a proxy or Anthropic-compatible backend rejects that field, setting `supportsEagerToolInputStreaming: false` makes Pi omit it and use the legacy fine-grained tool streaming header instead. ([Pi][1])
+
+A cleaner debugging flow:
+
+```bash
+cat ~/.pi/agent/models.json | jq .
+```
+
+Then list models so you can get the exact model ID:
+
+```bash
+pi --list-models | grep -i copilot
+```
+
+Then edit:
+
+```bash
+nano ~/.pi/agent/models.json
+```
+
+Final file should look like:
+
+```json
+{
+  "providers": {
+    "github-copilot": {
+      "modelOverrides": {
+        "EXACT_MODEL_ID_HERE": {
+          "compat": {
+            "supportsEagerToolInputStreaming": false
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Most important part: **do not put `compat` directly under `github-copilot` by itself**. Put it under:
 
 ```text
-768
+providers → github-copilot → modelOverrides → exact-model-id → compat
 ```
 
-Then:
+[1]: https://pi.dev/docs/latest/models "Custom Models · Docs · Pi"
 
-```bash
-gbrain providers test --touchpoint embedding
-gbrain doctor
-```
-
-If those pass, move on.
-
----
-
-## 2. Create or verify your `ai-brain` repo
-
-Do **not** put this inside `~/gbrain`. Use a separate repo:
-
-```bash
-cd ~
-
-mkdir -p ~/ai-brain/{inbox,projects,repos,workflows,decisions,prompts,concepts,sources,people,companies,archive}
-
-cd ~/ai-brain
-git init
-```
-
-Create the starter files:
-
-```bash
-cat > README.md <<'EOF'
-# AI Brain
-
-Personal/project knowledge base for GBrain.
-EOF
-
-cat > RESOLVER.md <<'EOF'
-# Resolver
-
-- inbox/ — temporary captures that need sorting
-- projects/ — long-running projects
-- repos/ — repo-specific architecture summaries and current state
-- workflows/ — Claude Code, Codex, Pi, GStack, PR review, CI/CD patterns
-- decisions/ — durable decisions and why they were made
-- prompts/ — reusable prompts for agents
-- concepts/ — explanations and mental models
-- sources/ — article/research/source notes
-- people/ — people notes
-- companies/ — company/tool/vendor notes
-- archive/ — old or superseded material
-
-Before creating a new page, search for an existing page first.
-Do not store secrets, private keys, tokens, passwords, or raw credentials.
-EOF
-
-cat > index.md <<'EOF'
-# Index
-
-Start here for the brain.
-
-Important areas:
-- projects/
-- repos/
-- workflows/
-- decisions/
-- prompts/
-- concepts/
-- sources/
-EOF
-
-cat > schema.md <<'EOF'
-# Schema
-
-Preferred page shape:
-
-# Title
-
-## Current truth
-
-The current best understanding.
-
-## Details
-
-Supporting details.
-
-## Timeline / evidence
-
-- YYYY-MM-DD — Source or event.
-
-## Links
-
-Related pages.
-EOF
-
-for d in inbox projects repos workflows decisions prompts concepts sources people companies archive; do
-  [ -f "$d/README.md" ] || echo "# $d" > "$d/README.md"
-done
-```
-
-Commit it:
-
-```bash
-git add .
-git commit -m "Initialize AI brain"
-```
-
-GBrain’s README describes the brain repo as the source-of-truth Markdown/git repo, while GBrain syncs it into PGLite/Postgres for retrieval. ([GitHub][2])
-
----
-
-## 3. Import and embed the brain
-
-```bash
-gbrain import ~/ai-brain
-gbrain embed --stale
-gbrain query "What is this brain for?"
-```
-
-If that query returns your README/RESOLVER content, the core loop works.
-
----
-
-## 4. Add a real repo memory page
-
-Example for `coupir`:
-
-```bash
-mkdir -p ~/ai-brain/repos/coupir
-
-cat > ~/ai-brain/repos/coupir/README.md <<'EOF'
-# Coupir
-
-## Current truth
-
-Coupir is Kyle's self-hosted, privacy-focused Discord-like chat/project communication app.
-
-## Useful context
-
-- Claude Code should search GBrain before broad repo exploration.
-- Durable architecture decisions should be recorded here.
-- Repo conventions, prior bugs, and workflow decisions should be written here when they become stable.
-- Do not store secrets, credentials, private keys, or tokens.
-
-## Open questions
-
-- Document the current auth/session architecture.
-- Document client/server boundaries.
-- Document deployment and self-hosting assumptions.
-- Document key repo conventions.
-
-## Links
-
-- ../../decisions/
-- ../../workflows/
-- ../../prompts/
-EOF
-
-cd ~/ai-brain
-git add repos/coupir/README.md
-git commit -m "Add Coupir brain page"
-
-gbrain import ~/ai-brain
-gbrain embed --stale
-gbrain query "What do we know about Coupir?"
-```
-
----
-
-## 5. Connect Claude Code locally
-
-Create a wrapper:
-
-```bash
-mkdir -p ~/bin
-
-cat > ~/bin/gbrain-mcp <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-cd "$HOME/ai-brain"
-
-export PATH="$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-
-exec gbrain serve
-EOF
-
-chmod +x ~/bin/gbrain-mcp
-```
-
-Test it:
-
-```bash
-~/bin/gbrain-mcp
-```
-
-It should hang silently. Press `Ctrl+C`.
-
-Add to Claude Code:
-
-```bash
-claude mcp remove gbrain 2>/dev/null || true
-claude mcp add --scope user gbrain -- "$HOME/bin/gbrain-mcp"
-claude mcp list
-```
-
-GBrain’s MCP docs say local stdio via `gbrain serve` works with Claude Code, Cursor, Windsurf, and other stdio MCP clients, with no server/tunnel/token needed. ([GitHub][3])
-
----
-
-## 6. Add repo instructions so Claude actually uses it
-
-In your project repo:
-
-```bash
-cd ~/GitHub/coupir
-touch CLAUDE.md
-```
-
-Append:
-
-```bash
-cat >> CLAUDE.md <<'EOF'
-
-## GBrain usage
-
-GBrain is available as an MCP server.
-
-Before broad repo exploration, search GBrain first.
-
-Use GBrain for:
-- Coupir architecture and repo conventions
-- prior decisions
-- previous bugs/fixes
-- implementation plans
-- workflow notes
-- related files, symbols, and subsystem context
-
-Workflow:
-1. Search GBrain for the feature, subsystem, symbol, or decision.
-2. Use the result to narrow local file reads.
-3. Use Grep/Glob/Read for exact code inspection after GBrain narrows the area.
-4. If durable repo knowledge is learned, write it back to GBrain or update project docs.
-
-Do not store secrets, credentials, private keys, tokens, customer secrets, or one-off noisy details in GBrain.
-EOF
-```
-
-Commit:
-
-```bash
-git add CLAUDE.md
-git commit -m "Add GBrain usage guidance"
-```
-
-Then start Claude Code:
-
-```bash
-claude
-```
-
-Ask:
-
-```text
-Use GBrain first. Search my brain for Coupir project context, architecture decisions, and repo conventions before reading local files.
-```
-
----
-
-## 7. Your normal workflow after this
-
-When you add/change notes:
-
-```bash
-cd ~/ai-brain
-git status
-git add .
-git commit -m "Update brain notes"
-
-gbrain import ~/ai-brain
-gbrain embed --stale
-```
-
-When you start coding:
-
-```bash
-cd ~/GitHub/coupir
-claude
-```
-
-Then prompt:
-
-```text
-Use GBrain first. Search for related decisions, repo conventions, and prior bugs before making a plan.
-```
-
-When Claude learns something durable:
-
-```text
-Write a concise GBrain note for this durable repo decision, then continue.
-```
-
----
-
-## 8. Optional: create a tiny maintenance command
-
-```bash
-mkdir -p ~/bin
-
-cat > ~/bin/gbrain-refresh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-gbrain import "$HOME/ai-brain"
-gbrain embed --stale
-gbrain doctor
-EOF
-
-chmod +x ~/bin/gbrain-refresh
-```
-
-Use:
-
-```bash
-gbrain-refresh
-```
-
----
-
-## The short version
-
-You are now past the hard part. Next steps are:
-
-```bash
-# 1. Make/import brain repo
-gbrain import ~/ai-brain
-gbrain embed --stale
-gbrain query "What is this brain for?"
-
-# 2. Add Claude MCP
-claude mcp add --scope user gbrain -- "$HOME/bin/gbrain-mcp"
-
-# 3. Add CLAUDE.md guidance to your repo
-cd ~/GitHub/coupir
-nano CLAUDE.md
-
-# 4. Use it
-claude
-```
-
-At this point, GBrain is useful as **repo memory**: architecture notes, prior decisions, prompts, workflow rules, bugs, and “don’t repeat this mistake” knowledge. Full code indexing is optional later; the stable win is making Claude Code search your durable project memory before it starts blindly reading files.
-
-[1]: https://ollama.com/library/nomic-embed-text?utm_source=chatgpt.com "nomic-embed-text"
-[2]: https://github.com/garrytan/gbrain/blob/master/README.md?utm_source=chatgpt.com "README.md - garrytan/gbrain"
-[3]: https://github.com/garrytan/gbrain/blob/master/docs/mcp/DEPLOY.md?utm_source=chatgpt.com "gbrain/docs/mcp/DEPLOY.md at master"
 
 
 
