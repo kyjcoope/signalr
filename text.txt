@@ -1,66 +1,19 @@
-Yep — just add each model ID under `modelOverrides` and apply the same compat setting to each one.
-
-Use this:
-
-```json id="s7hwah"
 {
   "providers": {
-    "github-copilot": {
-      "modelOverrides": {
-        "claude-haiku-4-5": {
-          "compat": {
-            "supportsEagerToolInputStreaming": false
-          }
+    "ollama": {
+      "baseUrl": "http://localhost:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "models": [
+        {
+          "id": "qwen3.6:27b",
+          "name": "Qwen 3.6 27B Local"
         },
-        "claude-sonnet-4-5": {
-          "compat": {
-            "supportsEagerToolInputStreaming": false
-          }
-        },
-        "claude-opus-4-5": {
-          "compat": {
-            "supportsEagerToolInputStreaming": false
-          }
+        {
+          "id": "qwen3-coder:30b",
+          "name": "Qwen3 Coder 30B Local"
         }
-      }
+      ]
     }
   }
 }
-```
-
-Pi’s docs say `modelOverrides` is the right place to customize built-in provider models, and `compat` is one of the supported per-model override fields. They also say unknown model IDs are ignored, so the only catch is that these IDs need to exactly match what Pi lists. ([GitHub][1])
-
-To verify the exact Copilot IDs:
-
-```bash id="l6u5jf"
-pi --list-models | grep -i claude
-```
-
-Then edit:
-
-```bash id="6zu9fl"
-nano ~/.pi/agent/models.json
-```
-
-Validate JSON:
-
-```bash id="hkrrpr"
-cat ~/.pi/agent/models.json | jq .
-```
-
-Then open Pi and reselect the model:
-
-```bash id="fcpv3l"
-pi
-```
-
-The setting tells Pi to omit `tools[].eager_input_streaming`, which is exactly what Pi recommends when an Anthropic-compatible backend rejects that field. ([GitHub][1])
-
-[1]: https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md "pi/packages/coding-agent/docs/models.md at main · earendil-works/pi · GitHub"
-
-
-
-
-
-https://blog.saeloun.com/2026/04/28/private-karpathy-llm-wiki-gbrain-gstack-rails-ai-workflow/
-https://ai.gopubby.com/rag-llm-wiki-or-gbrain-how-your-agent-remembers-changes-everything-56829e66725c
