@@ -14,24 +14,6 @@
           "name": "Qwen 3.6 27B",
           "contextWindow": 32768,
           "maxTokens": 4096
-        },
-        {
-          "id": "qwen3.6:27b-coding-nvfp4",
-          "name": "Qwen 3.6 27B Coding NVFP4",
-          "contextWindow": 32768,
-          "maxTokens": 4096
-        },
-        {
-          "id": "gemma4:26b",
-          "name": "Gemma 4 26B",
-          "contextWindow": 32768,
-          "maxTokens": 4096
-        },
-        {
-          "id": "gemma4:e4b",
-          "name": "Gemma 4 E4B Fast",
-          "contextWindow": 32768,
-          "maxTokens": 4096
         }
       ]
     }
