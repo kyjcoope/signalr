@@ -11,8 +11,32 @@
       "models": [
         {
           "id": "qwen3.6:27b",
-          "name": "Qwen 3.6 27B",
-          "contextWindow": 32768,
+          "name": "Qwen 3.6 27B Default",
+          "contextWindow": 16384,
+          "maxTokens": 4096
+        },
+        {
+          "id": "qwen3.6:27b-coding-nvfp4",
+          "name": "Qwen 3.6 27B Coding",
+          "contextWindow": 16384,
+          "maxTokens": 4096
+        },
+        {
+          "id": "qwen3.6:27b-nvfp4",
+          "name": "Qwen 3.6 27B NVFP4",
+          "contextWindow": 16384,
+          "maxTokens": 4096
+        },
+        {
+          "id": "gemma4:26b-nvfp4",
+          "name": "Gemma 4 26B NVFP4",
+          "contextWindow": 16384,
+          "maxTokens": 4096
+        },
+        {
+          "id": "gemma4:e4b-mlx",
+          "name": "Gemma 4 E4B MLX Fast",
+          "contextWindow": 16384,
           "maxTokens": 4096
         }
       ]
