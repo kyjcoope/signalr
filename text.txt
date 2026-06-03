@@ -1,80 +1,36 @@
-Yep — replace the `.clamp(...)` call with a small `Duration` clamp helper.
-
-`clamp()` is only on `num`, not `Duration`, which is why this fails. `Duration` can still be compared using `<` / `>` / `compareTo`, so this helper is the clean fix. Dart’s docs show `num.clamp(...)` exists on `num`, while `Duration` is a separate class with comparison support. ([Flutter API Docs][1])
-
-Change this:
-
-```dart
-return switch (errorCount) {
-  1 => Duration.zero,
-  2 => const Duration(milliseconds: 250),
-  3 => const Duration(milliseconds: 500),
-  _ => const Duration(seconds: 1),
-}.clamp(Duration.zero, const Duration(seconds: 2));
-```
-
-to this:
-
-```dart
-return _clampDuration(
-  switch (errorCount) {
-    1 => Duration.zero,
-    2 => const Duration(milliseconds: 250),
-    3 => const Duration(milliseconds: 500),
-    _ => const Duration(seconds: 1),
-  },
-  Duration.zero,
-  const Duration(seconds: 2),
-);
-```
-
-Then add this helper above or below the class:
-
-```dart
-Duration _clampDuration(
-  Duration value,
-  Duration min,
-  Duration max,
-) {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
+bool isAdtsAac(Uint8List data) {
+  return data.length >= 7 &&
+      data[0] == 0xFF &&
+      (data[1] & 0xF0) == 0xF0;
 }
-```
 
-So your file should look like:
+bool looksLikeRtpMpeg4GenericAac(Uint8List data) {
+  return data.length >= 4 &&
+      data[0] == 0x00 &&
+      data[1] == 0x10;
+}
 
-```dart
-/// Step-function backoff: 1 error → 0ms, 2 → 250ms, 3 → 500ms, 4+ → 1s.
-class StepBackoffStrategy implements BackoffStrategy {
-  const StepBackoffStrategy();
-
-  @override
-  Duration computeDelay(int errorCount) {
-    return _clampDuration(
-      switch (errorCount) {
-        1 => Duration.zero,
-        2 => const Duration(milliseconds: 250),
-        3 => const Duration(milliseconds: 500),
-        _ => const Duration(seconds: 1),
-      },
-      Duration.zero,
-      const Duration(seconds: 2),
-    );
+Uint8List prepareAacData(AudioStreamInfo info, Uint8List current) {
+  // Already ADTS AAC, so send as-is.
+  if (isAdtsAac(current)) {
+    return current;
   }
+
+  // Your current getAacData() appears to handle this packet shape:
+  // 00 10 | AU header | raw AAC
+  if (looksLikeRtpMpeg4GenericAac(current)) {
+    final rawAac = getAacData(current);
+    if (rawAac.isEmpty) return rawAac;
+
+    final header = getAdtsHeader(info, rawAac.length);
+
+    return Uint8List.fromList([
+      ...header,
+      ...rawAac,
+    ]);
+  }
+
+  // Unknown / maybe already raw AAC.
+  // This may or may not work depending on what the bridge decoder expects.
+  return current;
 }
-
-Duration _clampDuration(
-  Duration value,
-  Duration min,
-  Duration max,
-) {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
-}
-```
-
-That should fix the red underline on `.clamp`.
-
-[1]: https://api.flutter.dev/flutter/dart-core/num/clamp.html?utm_source=chatgpt.com "clamp method - num class - dart:core library"
