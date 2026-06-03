@@ -1,573 +1,80 @@
-Yes. This is the full `firebase-messaging-sw.js` I’d use for your goal: **data-only FCM**, custom Chrome notification display, **one selected Flutter instance navigates**, and cold-start clicks are stored until Flutter asks for them.
+Yep — replace the `.clamp(...)` call with a small `Duration` clamp helper.
 
-This uses the Firebase **compat** style because your screenshot is using `firebase.messaging()`. Firebase’s docs say compat packages are the simpler no-bundler path for service workers, and background web messages are handled through `onBackgroundMessage`. The custom click routing uses the service worker `notificationclick` event, `clients.matchAll()`, `focus()`, `openWindow()`, and `postMessage()`. ([Firebase][1])
+`clamp()` is only on `num`, not `Duration`, which is why this fails. `Duration` can still be compared using `<` / `>` / `compareTo`, so this helper is the clean fix. Dart’s docs show `num.clamp(...)` exists on `num`, while `Duration` is a separate class with comparison support. ([Flutter API Docs][1])
 
-```js
-// firebase-messaging-sw.js
+Change this:
 
-/* global firebase, indexedDB, clients */
+```dart
+return switch (errorCount) {
+  1 => Duration.zero,
+  2 => const Duration(milliseconds: 250),
+  3 => const Duration(milliseconds: 500),
+  _ => const Duration(seconds: 1),
+}.clamp(Duration.zero, const Duration(seconds: 2));
+```
 
-'use strict';
+to this:
 
-/**
- * IMPORTANT:
- * Use the same Firebase JS SDK major/version style as the rest of your web app.
- * This compat form matches code like:
- *
- *   const messaging = firebase.messaging();
- *
- * If your app already imports a specific Firebase CDN version, keep it consistent.
- */
-importScripts('https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js');
-importScripts('https://www.gstatic.com/firebasejs/10.12.5/firebase-messaging-compat.js');
+```dart
+return _clampDuration(
+  switch (errorCount) {
+    1 => Duration.zero,
+    2 => const Duration(milliseconds: 250),
+    3 => const Duration(milliseconds: 500),
+    _ => const Duration(seconds: 1),
+  },
+  Duration.zero,
+  const Duration(seconds: 2),
+);
+```
 
-/**
- * Replace this with your real Firebase config.
- */
-firebase.initializeApp({
-  apiKey: 'YOUR_API_KEY',
-  authDomain: 'YOUR_PROJECT.firebaseapp.com',
-  projectId: 'YOUR_PROJECT_ID',
-  storageBucket: 'YOUR_PROJECT.appspot.com',
-  messagingSenderId: 'YOUR_MESSAGING_SENDER_ID',
-  appId: 'YOUR_APP_ID',
-});
+Then add this helper above or below the class:
 
-const messaging = firebase.messaging();
+```dart
+Duration _clampDuration(
+  Duration value,
+  Duration min,
+  Duration max,
+) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+```
 
-/**
- * Open the Flutter app root when no app tab/window exists.
- * Since your Flutter navigation is bespoke, do NOT encode routing into this URL.
- */
-const APP_OPEN_URL = '/';
+So your file should look like:
 
-/**
- * Pending notification-click handoff storage.
- * This is used for cold starts:
- *
- * notification click -> service worker opens "/" -> Flutter boots -> Flutter asks for pending clicks
- */
-const DB_NAME = 'exacqvision_push_clicks';
-const DB_VERSION = 1;
-const STORE_PENDING_CLICKS = 'pending_clicks';
+```dart
+/// Step-function backoff: 1 error → 0ms, 2 → 250ms, 3 → 500ms, 4+ → 1s.
+class StepBackoffStrategy implements BackoffStrategy {
+  const StepBackoffStrategy();
 
-/**
- * Keep stale click intents from hanging around forever.
- */
-const MAX_PENDING_CLICK_AGE_MS = 10 * 60 * 1000; // 10 minutes
-
-const MESSAGE_TYPE_PUSH_CLICK = 'PUSH_NOTIFICATION_CLICK';
-const MESSAGE_TYPE_GET_PENDING = 'GET_PENDING_PUSH_CLICKS';
-const MESSAGE_TYPE_PENDING_CLICKS = 'PENDING_PUSH_CLICKS';
-
-console.log('[firebase-messaging-sw.js] Service worker loaded and Firebase messaging initialized');
-
-/**
- * Optional diagnostic logging.
- *
- * This should not show a notification by itself. Firebase Messaging owns the
- * actual FCM background handling below.
- */
-self.addEventListener('push', (event) => {
-  try {
-    console.log(
-      '[firebase-messaging-sw.js] RAW push event received:',
-      event.data ? event.data.text() : null,
+  @override
+  Duration computeDelay(int errorCount) {
+    return _clampDuration(
+      switch (errorCount) {
+        1 => Duration.zero,
+        2 => const Duration(milliseconds: 250),
+        3 => const Duration(milliseconds: 500),
+        _ => const Duration(seconds: 1),
+      },
+      Duration.zero,
+      const Duration(seconds: 2),
     );
-  } catch (error) {
-    console.warn('[firebase-messaging-sw.js] Failed to log raw push event:', error);
-  }
-});
-
-/**
- * Background FCM handler.
- *
- * Best server-side payload style for this file:
- *
- * {
- *   "message": {
- *     "token": "FCM_TOKEN",
- *     "data": {
- *       "notification_id": "motion_12345",
- *       "title": "Motion detected",
- *       "body": "Back driveway camera",
- *       "intent_json": "{\"screen\":\"eventDetails\",\"eventId\":\"12345\",\"cameraId\":\"back_driveway\"}"
- *     }
- *   }
- * }
- *
- * Avoid putting a top-level "notification" block in the FCM payload if you are
- * manually calling showNotification() here, otherwise Firebase/browser behavior
- * can cause duplicate notifications.
- */
-messaging.onBackgroundMessage((payload) => {
-  console.log('[firebase-messaging-sw.js] Background FCM message received:', payload);
-
-  const clickMessage = buildClickMessageFromPayload(payload);
-
-  const notificationOptions = {
-    body: clickMessage.body,
-    icon: clickMessage.icon,
-    badge: clickMessage.badge,
-
-    /**
-     * tag prevents stacking duplicates for the same logical event.
-     * Example: multiple updates for motion_event_12345 replace each other.
-     */
-    tag: clickMessage.notificationId,
-    renotify: false,
-
-    /**
-     * This is what we get back in event.notification.data inside notificationclick.
-     */
-    data: clickMessage,
-  };
-
-  return self.registration.showNotification(clickMessage.title, notificationOptions);
-});
-
-/**
- * Notification click handler.
- *
- * This will NOT navigate every open tab/window.
- * It chooses one target Flutter window and sends the click intent only to that window.
- */
-self.addEventListener('notificationclick', (event) => {
-  console.log('[firebase-messaging-sw.js] Notification clicked:', event.notification.data);
-
-  event.notification.close();
-
-  const clickMessage = {
-    ...normalizeClickMessage(event.notification.data),
-    action: event.action || '',
-    clickedAt: Date.now(),
-  };
-
-  event.waitUntil(handleNotificationClick(clickMessage));
-});
-
-/**
- * Flutter can call this after boot:
- *
- * navigator.serviceWorker.ready.then((registration) {
- *   registration.active?.postMessage(jsonEncode({
- *     'type': 'GET_PENDING_PUSH_CLICKS',
- *   }));
- * });
- *
- * Then listen for:
- *
- * {
- *   type: 'PENDING_PUSH_CLICKS',
- *   clicks: [...]
- * }
- */
-self.addEventListener('message', (event) => {
-  const message = normalizeIncomingMessage(event.data);
-
-  if (!message || message.type !== MESSAGE_TYPE_GET_PENDING) {
-    return;
-  }
-
-  event.waitUntil((async () => {
-    const pendingClicks = await takePendingPushClicks();
-
-    if (event.source) {
-      event.source.postMessage({
-        type: MESSAGE_TYPE_PENDING_CLICKS,
-        clicks: pendingClicks,
-      });
-    }
-  })());
-});
-
-async function handleNotificationClick(clickMessage) {
-  await removeExpiredPendingClicks();
-
-  const appClients = await getAppWindowClients();
-  const targetClient = chooseTargetClient(appClients);
-
-  if (targetClient) {
-    /**
-     * Warm app path:
-     * Focus exactly one app instance and message only that instance.
-     */
-    if ('focus' in targetClient) {
-      await targetClient.focus();
-    }
-
-    targetClient.postMessage({
-      type: MESSAGE_TYPE_PUSH_CLICK,
-      ...clickMessage,
-    });
-
-    return;
-  }
-
-  /**
-   * Cold app path:
-   * No Flutter window exists yet. Store the click, open the app root,
-   * then Flutter asks for pending clicks after it finishes booting.
-   */
-  await savePendingPushClick(clickMessage);
-
-  if (clients.openWindow) {
-    await clients.openWindow(APP_OPEN_URL);
   }
 }
 
-async function getAppWindowClients() {
-  const allClients = await clients.matchAll({
-    type: 'window',
-    includeUncontrolled: true,
-  });
-
-  return allClients.filter((client) => {
-    try {
-      const url = new URL(client.url);
-
-      /**
-       * Keep this simple: same origin = app candidate.
-       * If you have multiple web apps on the same origin, tighten this check
-       * to something like:
-       *
-       *   return url.origin === self.location.origin && url.pathname.startsWith('/app');
-       */
-      return url.origin === self.location.origin;
-    } catch (_) {
-      return false;
-    }
-  });
-}
-
-function chooseTargetClient(appClients) {
-  if (!appClients || appClients.length === 0) {
-    return null;
-  }
-
-  /**
-   * Prefer the currently focused app window.
-   */
-  const focusedClient = appClients.find((client) => client.focused === true);
-
-  if (focusedClient) {
-    return focusedClient;
-  }
-
-  /**
-   * Then prefer a visible app window.
-   */
-  const visibleClient = appClients.find((client) => client.visibilityState === 'visible');
-
-  if (visibleClient) {
-    return visibleClient;
-  }
-
-  /**
-   * Otherwise use the first returned client.
-   * Modern Chrome/Firefox generally return clients in recently-focused order.
-   */
-  return appClients[0];
-}
-
-function buildClickMessageFromPayload(payload) {
-  const data = payload && payload.data ? payload.data : {};
-  const notification = payload && payload.notification ? payload.notification : {};
-
-  const intent =
-    safeJsonParse(data.intent_json) ||
-    safeJsonParse(data.nav_intent) ||
-    buildIntentFromFlatData(data);
-
-  const notificationId =
-    data.notification_id ||
-    data.event_id ||
-    data.message_id ||
-    data.camera_id ||
-    data.channel_id ||
-    `push_${Date.now()}`;
-
-  const title =
-    data.title ||
-    notification.title ||
-    'exacqVision';
-
-  const body =
-    data.body ||
-    notification.body ||
-    '';
-
-  return {
-    type: MESSAGE_TYPE_PUSH_CLICK,
-
-    notificationId,
-    title,
-    body,
-
-    icon: data.icon || '/icons/android-chrome-192x192.png',
-    badge: data.badge || '/icons/android-chrome-192x192.png',
-
-    /**
-     * Flutter should switch on this object and call your bespoke navigation.
-     */
-    intent,
-
-    /**
-     * Keep rawData for debugging/fallback handling in Flutter.
-     * Avoid putting sensitive details here if the notification could be visible
-     * on a shared machine.
-     */
-    rawData: data,
-
-    receivedAt: Date.now(),
-  };
-}
-
-function buildIntentFromFlatData(data) {
-  return removeNullishValues({
-    screen: data.screen || data.intent_screen || data.route_screen || null,
-
-    eventId: data.event_id || null,
-    cameraId: data.camera_id || null,
-    serverId: data.server_id || null,
-    channelId: data.channel_id || null,
-    messageId: data.message_id || null,
-
-    /**
-     * Optional escape hatch if you want Flutter to parse a custom route key
-     * without using browser URL routing.
-     */
-    routeKey: data.route_key || null,
-
-    /**
-     * Optional JSON args string:
-     *   args_json: "{\"tab\":\"events\",\"autoplay\":true}"
-     */
-    args: safeJsonParse(data.args_json) || null,
-  });
-}
-
-function normalizeClickMessage(value) {
-  if (!value || typeof value !== 'object') {
-    return {
-      type: MESSAGE_TYPE_PUSH_CLICK,
-      notificationId: `push_${Date.now()}`,
-      title: 'exacqVision',
-      body: '',
-      intent: {},
-      rawData: {},
-      receivedAt: Date.now(),
-    };
-  }
-
-  return {
-    type: MESSAGE_TYPE_PUSH_CLICK,
-    notificationId: value.notificationId || `push_${Date.now()}`,
-    title: value.title || 'exacqVision',
-    body: value.body || '',
-    intent: value.intent || {},
-    rawData: value.rawData || {},
-    receivedAt: value.receivedAt || Date.now(),
-  };
-}
-
-function normalizeIncomingMessage(data) {
-  if (!data) {
-    return null;
-  }
-
-  if (typeof data === 'string') {
-    return safeJsonParse(data);
-  }
-
-  if (typeof data === 'object') {
-    return data;
-  }
-
-  return null;
-}
-
-function safeJsonParse(value) {
-  if (!value || typeof value !== 'string') {
-    return null;
-  }
-
-  try {
-    return JSON.parse(value);
-  } catch (_) {
-    return null;
-  }
-}
-
-function removeNullishValues(value) {
-  const output = {};
-
-  for (const [key, entryValue] of Object.entries(value)) {
-    if (entryValue !== null && entryValue !== undefined && entryValue !== '') {
-      output[key] = entryValue;
-    }
-  }
-
-  return output;
-}
-
-/**
- * IndexedDB helpers
- */
-
-function openPushDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = () => {
-      const db = request.result;
-
-      if (!db.objectStoreNames.contains(STORE_PENDING_CLICKS)) {
-        db.createObjectStore(STORE_PENDING_CLICKS, {
-          keyPath: 'id',
-        });
-      }
-    };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function savePendingPushClick(clickMessage) {
-  const db = await openPushDb();
-
-  const row = {
-    id: clickMessage.notificationId || `push_${Date.now()}`,
-    value: clickMessage,
-    createdAt: Date.now(),
-  };
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_PENDING_CLICKS, 'readwrite');
-    const store = tx.objectStore(STORE_PENDING_CLICKS);
-
-    store.put(row);
-
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error);
-    };
-  });
-}
-
-async function takePendingPushClicks() {
-  const db = await openPushDb();
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_PENDING_CLICKS, 'readwrite');
-    const store = tx.objectStore(STORE_PENDING_CLICKS);
-
-    const getAllRequest = store.getAll();
-
-    getAllRequest.onsuccess = () => {
-      const now = Date.now();
-
-      const rows = getAllRequest.result || [];
-      const freshClicks = rows
-        .filter((row) => now - row.createdAt <= MAX_PENDING_CLICK_AGE_MS)
-        .map((row) => row.value);
-
-      /**
-       * Clear after reading so the app does not navigate again on refresh.
-       */
-      store.clear();
-
-      resolve(freshClicks);
-    };
-
-    getAllRequest.onerror = () => reject(getAllRequest.error);
-
-    tx.oncomplete = () => db.close();
-
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error);
-    };
-  });
-}
-
-async function removeExpiredPendingClicks() {
-  const db = await openPushDb();
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_PENDING_CLICKS, 'readwrite');
-    const store = tx.objectStore(STORE_PENDING_CLICKS);
-
-    const now = Date.now();
-    const cursorRequest = store.openCursor();
-
-    cursorRequest.onsuccess = () => {
-      const cursor = cursorRequest.result;
-
-      if (!cursor) {
-        return;
-      }
-
-      const row = cursor.value;
-
-      if (row && now - row.createdAt > MAX_PENDING_CLICK_AGE_MS) {
-        cursor.delete();
-      }
-
-      cursor.continue();
-    };
-
-    cursorRequest.onerror = () => reject(cursorRequest.error);
-
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error);
-    };
-  });
+Duration _clampDuration(
+  Duration value,
+  Duration min,
+  Duration max,
+) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
 }
 ```
 
-The important behavior is here:
+That should fix the red underline on `.clamp`.
 
-```js
-const targetClient = chooseTargetClient(appClients);
-
-if (targetClient) {
-  await targetClient.focus();
-  targetClient.postMessage({ type: MESSAGE_TYPE_PUSH_CLICK, ...clickMessage });
-  return;
-}
-```
-
-That means **only one** open Flutter web instance gets the navigation message. You only navigate every tab/window if you loop over `appClients` and post to all of them.
-
-For your server payloads, I’d aim for this style:
-
-```json
-{
-  "message": {
-    "token": "FCM_TOKEN",
-    "data": {
-      "notification_id": "motion_12345",
-      "title": "Motion detected",
-      "body": "Back driveway camera",
-      "intent_json": "{\"screen\":\"eventDetails\",\"eventId\":\"12345\",\"cameraId\":\"back_driveway\"}"
-    }
-  }
-}
-```
-
-Then your Flutter web side should listen for `PUSH_NOTIFICATION_CLICK` and call your existing bespoke navigator, not URL routing.
-
-[1]: https://firebase.google.com/docs/cloud-messaging/web/receive-messages "Receive messages in Web apps  |  Firebase Cloud Messaging"
+[1]: https://api.flutter.dev/flutter/dart-core/num/clamp.html?utm_source=chatgpt.com "clamp method - num class - dart:core library"
