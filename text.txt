@@ -1,36 +1,19 @@
-bool isAdtsAac(Uint8List data) {
-  return data.length >= 7 &&
-      data[0] == 0xFF &&
-      (data[1] & 0xF0) == 0xF0;
-}
+Paste this to your agent:
 
-bool looksLikeRtpMpeg4GenericAac(Uint8List data) {
-  return data.length >= 4 &&
-      data[0] == 0x00 &&
-      data[1] == 0x10;
-}
+```text
+The current fisheye dewarp looks like a rectilinear PTZ/center crop. Add a true curvilinear fisheye dewarp mode.
 
-Uint8List prepareAacData(AudioStreamInfo info, Uint8List current) {
-  // Already ADTS AAC, so send as-is.
-  if (isAdtsAac(current)) {
-    return current;
-  }
+Use the original full-resolution fisheye video texture, not a scaled preview. Configure/detect fisheye center, radiusX/radiusY, FOV, rotation, and lens model. Implement inverse mapping in WebGL: output pixel → 3D ray → source fisheye UV.
 
-  // Your current getAacData() appears to handle this packet shape:
-  // 00 10 | AU header | raw AAC
-  if (looksLikeRtpMpeg4GenericAac(current)) {
-    final rawAac = getAacData(current);
-    if (rawAac.isEmpty) return rawAac;
+Add at least:
+- Raw fisheye
+- Rectilinear PTZ
+- Cylindrical panorama
+- Panini/Pannini wide-angle
 
-    final header = getAdtsHeader(info, rawAac.length);
+For wide dewarp, default to cylindrical or Panini, not rectilinear. It is okay for lines/grid squares to curve; the goal is to show more of the full fisheye without looking like a zoomed-in crop.
 
-    return Uint8List.fromList([
-      ...header,
-      ...rawAac,
-    ]);
-  }
+Also fix blur by matching canvas backing resolution to CSS size × devicePixelRatio, sampling directly from the video texture, and avoiding repeated canvas/CSS rescaling.
 
-  // Unknown / maybe already raw AAC.
-  // This may or may not work depending on what the bridge decoder expects.
-  return current;
-}
+Add a debug overlay showing the detected fisheye circle on the raw image.
+```
