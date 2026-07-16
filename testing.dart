@@ -781,6 +781,11 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     // and stale delta frames can still be in flight from the worker.
     // The keyframe gate in [_decodeVideoFrame] admits the keyframe and
     // clears this flag.
+    logger.info(
+      '[WebCodec] resetForKeyframe called '
+      '(decoderState=${_decoder?.state} '
+      'sinceConfigure=${DateTime.now().difference(_configuredAt).inMilliseconds}ms)',
+    );
     _needsKeyframe = true;
     _framePacer?.flush();
     // The stream is alive (keyframe just arrived) — cancel any pending
@@ -1452,7 +1457,17 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       } else {
         frameData = data;
       }
-      final avccData = _toAvcc(frameData);
+      final avccData = _prepareChunkData(frameData, isKeyframe: isKeyframe);
+      if (avccData == null) {
+        // Structurally invalid (truncated / mis-assembled) frame. Feeding
+        // it to VideoToolbox kills the session with
+        // kVTVideoDecoderBadDataErr (-12909) and forces a full decoder
+        // recreate. Drop it and resynchronise at the next keyframe
+        // instead: a short freeze beats a decoder teardown.
+        droppedLast = true;
+        _needsKeyframe = true;
+        return;
+      }
       final chunk = _JSEncodedVideoChunk(
         _ChunkInit(
           type: (isKeyframe ? 'key' : 'delta').toJS,
@@ -1462,6 +1477,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       ); // _JSEncodedVideoChunk
       _decoder!.decode(chunk);
       droppedLast = false;
+      _recordChunk(isKeyframe, data.length, avccData);
     } catch (e) {
       logger.error(
         '[WebCodec][DBG] decode() threw: $e '
@@ -1611,6 +1627,138 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     }
 
     return buf.toBytes();
+  }
+
+  // — Bitstream integrity guard ——————————————————————————————————
+
+  /// Frames dropped because they failed structural validation.  Included
+  /// in the decoder-error diagnostics so corrupt input is visible in logs.
+  int _corruptFrameCount = 0;
+  DateTime _lastCorruptFrameLog = DateTime(0);
+
+  /// Compact fingerprints of the last frames fed to decode(), dumped when
+  /// the decoder errors so the offending pattern is visible in logs.
+  final List<String> _recentChunkLog = [];
+
+  /// Convert [frameData] for WebCodecs, refusing frames that would poison
+  /// VideoToolbox.  Returns null when the frame is structurally invalid
+  /// (truncated NAL, garbage prefix, bogus length) — the classic
+  /// kVTVideoDecoderBadDataErr (-12909) trigger.
+  Uint8List? _prepareChunkData(
+    Uint8List frameData, {
+    required bool isKeyframe,
+  }) {
+    if (parser is! H264Parser) return frameData;
+    final h264 = parser as H264Parser;
+
+    final first = _firstNalBoundary(h264, frameData);
+    var zeroPrefix = first > 0;
+    if (zeroPrefix) {
+      for (int i = 0; i < first; i++) {
+        if (frameData[i] != 0) {
+          zeroPrefix = false;
+          break;
+        }
+      }
+    }
+
+    if (first == 0 || zeroPrefix) {
+      // Annex B (possibly with harmless zero padding before the first
+      // start code): convert, then verify the converted layout.
+      final avcc = _toAvcc(frameData);
+      final reason = _validateAvcc(avcc);
+      if (reason == null) return avcc;
+      _noteCorruptFrame('after conversion: $reason', frameData, isKeyframe);
+      return null;
+    }
+
+    // No start code at the head: acceptable only when the frame is already
+    // length-prefixed (AVCC/HVCC) end to end.  Anything else is a truncated
+    // or mis-assembled frame.
+    final reason = _validateAvcc(frameData);
+    if (reason == null) return frameData;
+    _noteCorruptFrame(
+      first < 0
+          ? 'no start code ($reason)'
+          : 'garbage before first start code at byte $first ($reason)',
+      frameData,
+      isKeyframe,
+    );
+    return null;
+  }
+
+  static int _firstNalBoundary(H264Parser h264, Uint8List frame) {
+    int pos = 0;
+    while (pos < frame.length - 2) {
+      if (h264.isNalStart(frame, pos) > 0) return pos;
+      pos++;
+    }
+    return -1;
+  }
+
+  /// Walk a length-prefixed AVCC/HVCC buffer.  Returns null when the
+  /// structure is sound, otherwise a short reason string.
+  String? _validateAvcc(Uint8List avcc) {
+    if (avcc.length < 5) return 'frame too small (${avcc.length}B)';
+    int pos = 0;
+    int nals = 0;
+    while (pos < avcc.length) {
+      if (pos + 4 > avcc.length) {
+        return 'trailing ${avcc.length - pos}B after NAL $nals';
+      }
+      final len =
+          (avcc[pos] << 24) |
+          (avcc[pos + 1] << 16) |
+          (avcc[pos + 2] << 8) |
+          avcc[pos + 3];
+      if (len <= 0 || pos + 4 + len > avcc.length) {
+        return 'NAL $nals length $len with ${avcc.length - pos - 4}B remaining';
+      }
+      if (avcc[pos + 4] & 0x80 != 0) {
+        return 'NAL $nals forbidden_zero_bit set';
+      }
+      nals++;
+      pos += 4 + len;
+    }
+    return nals == 0 ? 'no NAL units' : null;
+  }
+
+  void _noteCorruptFrame(String reason, Uint8List frame, bool isKeyframe) {
+    _corruptFrameCount++;
+    final now = DateTime.now();
+    if (now.difference(_lastCorruptFrameLog).inSeconds < 5) return;
+    _lastCorruptFrameLog = now;
+    final headLen = frame.length < 8 ? frame.length : 8;
+    final head = frame
+        .sublist(0, headLen)
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join(' ');
+    logger.warn(
+      '[WebCodec] Dropped corrupt frame #$_corruptFrameCount: $reason '
+      '(key=$isKeyframe len=${frame.length} head=[$head]) — '
+      'waiting for next keyframe',
+    );
+  }
+
+  /// Record a compact fingerprint of a frame that entered decode():
+  /// K/D marker, raw byte size, and the leading NAL type sequence.
+  void _recordChunk(bool isKeyframe, int rawLen, Uint8List avcc) {
+    final isH265 = parser is H265Parser;
+    final types = <int>[];
+    int pos = 0;
+    while (pos + 4 < avcc.length && types.length < 8) {
+      final len =
+          (avcc[pos] << 24) |
+          (avcc[pos + 1] << 16) |
+          (avcc[pos + 2] << 8) |
+          avcc[pos + 3];
+      if (len <= 0 || pos + 4 + len > avcc.length) break;
+      final header = avcc[pos + 4];
+      types.add(isH265 ? (header >> 1) & 0x3F : header & 0x1F);
+      pos += 4 + len;
+    }
+    if (_recentChunkLog.length >= 8) _recentChunkLog.removeAt(0);
+    _recentChunkLog.add('${isKeyframe ? 'K' : 'D'}$rawLen$types');
   }
 
   // — Decode JPEG frame using ImageDecoder or canvas ——————————————
@@ -2525,7 +2673,12 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       'needsKeyframe=$_needsKeyframe '
       'pacerRunning=${_framePacer?.isRunning ?? false} '
       'consecutiveErrors=${_errorBackoff.consecutiveErrors} '
-      'recoveryFailures=$_recoveryFailures',
+      'recoveryFailures=$_recoveryFailures '
+      'res=${parser.resolution.width}x${parser.resolution.height} '
+      'hwAccel=$_hwAccelPreference sinceConfigure='
+      '${DateTime.now().difference(_configuredAt).inMilliseconds}ms '
+      'corruptFrames=$_corruptFrameCount '
+      'recentChunks=[${_recentChunkLog.join(' ')}]',
     );
     callbacks?.onDecodeError?.call(msg);
   }
