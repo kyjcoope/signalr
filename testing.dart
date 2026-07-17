@@ -219,7 +219,9 @@ class _HwSlotGate {
   /// Time to wait before the next configure() is allowed (staggering).
   static Duration spacingDelay(DateTime now) {
     final since = now.difference(_lastConfigureAt);
-    return since >= configureSpacing ? Duration.zero : configureSpacing - since;
+    return since >= configureSpacing
+        ? Duration.zero
+        : configureSpacing - since;
   }
 
   static void markConfigured(DateTime now) => _lastConfigureAt = now;
@@ -333,20 +335,23 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   /// queue state rather than a latched flag from the last decode attempt.
   /// Maximum decode queue depth before triggering back-pressure.
   ///
-  /// Sized to hold ~0.5 seconds of frames based on the camera's configured
-  /// FPS.  This keeps decode latency bounded while still absorbing normal
-  /// jitter regardless of whether the stream is 15fps, 30fps, or 60fps.
-  /// Falls back to a codec-based default when FPS is unknown (0).
+  /// Sized to hold ~1 second of frames based on the camera's configured
+  /// FPS.  Falls back to 16 when FPS is unknown (0).
   ///
-  /// Clamped to [4, 16] to give the HW pipeline room during ramp-up while
-  /// preventing unbounded latency growth.
+  /// The floor matters: VideoToolbox keeps a deep pipeline in flight for
+  /// high-resolution HEVC (decodeQueueSize sits at 9-12 on healthy 4-5MP
+  /// streams), so a cap below that natural depth reads as *permanent*
+  /// back-pressure.  The resulting delta-frame drops break the reference
+  /// chain and the session dies with kVTVideoDecoderBadDataErr (-12909)
+  /// within a GOP.  The queue holds encoded chunks (cheap); decoded-frame
+  /// memory is bounded separately by the presentation pacer.
   int get _maxDecodeQueueSize {
     final fps = pacer.camFPS;
     if (fps > 0) {
-      return (fps * 0.5).ceil().clamp(4, 16);
+      return (fps * 1.0).ceil().clamp(16, 60);
     }
     // Fallback when FPS is unknown.
-    return 8;
+    return 16;
   }
 
   @override
@@ -414,6 +419,19 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   /// "recovered then immediately failed" from "recovered and ran fine for a
   /// while before a new transient error".
   DateTime _lastSuccessfulDecode = DateTime(0);
+
+  /// Timestamp of the last VideoFrame emitted by the decoder.  The stall
+  /// detector uses this to distinguish "deep queue but still flowing"
+  /// from a genuinely dead VT session.
+  DateTime _lastOutputAt = DateTime(0);
+
+  /// Rate limiter for the back-pressure GOP-skip warning.
+  DateTime _lastDropSkipLog = DateTime(0);
+
+  /// Software-decode availability per codec string, shared across all
+  /// decoder instances.  H.265 on macOS never has a software decoder, so
+  /// recovery storms should not re-probe isConfigSupported every time.
+  static final Map<String, bool> _softwareDecodeSupport = {};
 
   /// Timestamp of the last [_emitFrameAvailable] capture.
   /// Used to throttle GPU readbacks to at most once per second.
@@ -489,10 +507,10 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     this.headless = false,
     this.optimizeForLatency = true,
     this.usePresentationPacer = true,
-  }) : _streamInfo = streamInfo,
-       viewType =
-           viewId ?? 'web-codec-canvas-${streamInfo.id}-${streamInfo.slug}',
-       super(streamInfo: streamInfo) {
+  })  : _streamInfo = streamInfo,
+        viewType =
+            viewId ?? 'web-codec-canvas-${streamInfo.id}-${streamInfo.slug}',
+        super(streamInfo: streamInfo) {
     if (!headless) {
       // Create the canvas element only once per viewType.
       if (!_canvasElements.containsKey(viewType)) {
@@ -672,6 +690,12 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
   /// Buffer a frame while waiting for hardware-slot admission.
   void _queuePendingFrame(Uint8List data, bool isKeyframe, DateTime dt) {
+    if (isKeyframe) {
+      // Live view only needs the latest GOP.  Restarting the buffer at
+      // each keyframe keeps the eventual drain small instead of
+      // burst-feeding a stale GOP into a freshly configured decoder.
+      _pendingFrames.clear();
+    }
     if (_pendingFrames.length >= _maxPendingFrames) {
       // Overflow: drop the buffer and resynchronise on the next keyframe.
       _pendingFrames.clear();
@@ -797,7 +821,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         // Rebuild the description from the parser's current parameter
         // sets — reusing the cached record risks configuring against
         // stale SPS/PPS after a mid-stream change.
-        _decoderDescription = _buildDecoderDescription() ?? _decoderDescription;
+        _decoderDescription =
+            _buildDecoderDescription() ?? _decoderDescription;
         _activeParamsSignature = _computeParamsSignature();
         _decoder!.configure(_decoderConfig());
         _configuredAt = DateTime.now();
@@ -841,9 +866,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (offscreen == null) return null;
       try {
         final options = {'type': 'image/jpeg', 'quality': 0.90}.jsify();
-        final blobAny = await offscreen
-            .convertToBlob(options as JSObject?)
-            .toDart;
+        final blobAny =
+            await offscreen.convertToBlob(options as JSObject?).toDart;
         final blob = blobAny as web.Blob;
         final reader = web.FileReader();
         final completer = Completer<Uint8List?>();
@@ -1126,9 +1150,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final spacing = _HwSlotGate.spacingDelay(now);
     if ((!_HwSlotGate.hasFreeSlot || spacing > Duration.zero) &&
         waited < _HwSlotGate.maxAdmissionWait) {
-      final retryIn = spacing > Duration.zero
-          ? spacing
-          : const Duration(milliseconds: 100);
+      final retryIn =
+          spacing > Duration.zero ? spacing : const Duration(milliseconds: 100);
       _reconfigureTimer = Timer(retryIn, () {
         _reconfigureTimer = null;
         if (!_released && !_configured && parser.isReady()) {
@@ -1182,13 +1205,11 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
       _configured = true;
       _configuredAt = DateTime.now();
-      logger.info(
-        '[WebCodec] Decoder configured: $_codecString '
-        'format=$videoFormat res=${parser.resolution.width}x${parser.resolution.height} '
-        'maxQueue=$_maxDecodeQueueSize hwAccel=$_hwAccelPreference '
-        'slots=${_HwSlotGate.slotsInUse}/${_HwSlotGate.maxSlots} '
-        'description=${_decoderDescription != null ? '${_decoderDescription!.length}B' : 'none'}',
-      );
+      logger.info('[WebCodec] Decoder configured: $_codecString '
+          'format=$videoFormat res=${parser.resolution.width}x${parser.resolution.height} '
+          'maxQueue=$_maxDecodeQueueSize hwAccel=$_hwAccelPreference '
+          'slots=${_HwSlotGate.slotsInUse}/${_HwSlotGate.maxSlots} '
+          'description=${_decoderDescription != null ? '${_decoderDescription!.length}B' : 'none'}');
 
       // Probe the browser to see if it actually chose HW or SW decoding.
       _probeHardwareAcceleration();
@@ -1388,32 +1409,50 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       _errorBackoff.reset(); // successful keyframe — reset error streak
     }
 
-    // Stall detection: if the decode queue has grown to 3× the maximum
-    // without any frames being output, the VT session is effectively dead
-    // (accepts decode() calls but never fires the output callback).
-    // Proactively reset to free the stalled GPU memory before it causes OOM.
+    // Stall detection: the VT session is considered dead only when the
+    // queue is very deep AND no frame has come out of the decoder for a
+    // sustained period after startup.  A deep queue by itself is normal
+    // right after configure — the stream source fast-starts a whole GOP
+    // burst (25+ frames arrive within milliseconds) and VideoToolbox needs
+    // hundreds of ms before its first output.  The previous hair-trigger
+    // (queue > 3x max with no grace) reset every decoder within
+    // milliseconds of configure, and each reset froze the stream for a
+    // full GOP waiting for the next keyframe.
     if (_decoder!.decodeQueueSize > _maxDecodeQueueSize * 3) {
-      logger.warn(
-        '[WebCodec] Decode queue stalled at ${_decoder!.decodeQueueSize} '
-        '(max=$_maxDecodeQueueSize) — resetting decoder to free GPU memory',
-      );
-      _needsKeyframe = true;
-      _framePacer?.flush();
-      try {
-        if (_decoder!.state != 'closed') {
-          _decoder!.reset();
-          // Rebuild the description — the stall may have been caused by a
-          // parameter-set change the cached record doesn't reflect.
-          _decoderDescription =
-              _buildDecoderDescription() ?? _decoderDescription;
-          _activeParamsSignature = _computeParamsSignature();
-          _decoder!.configure(_decoderConfig());
-          _configuredAt = DateTime.now();
+      final now = DateTime.now();
+      final sinceConfigure = now.difference(_configuredAt);
+      final lastOutput = _lastOutputAt.isAfter(_configuredAt)
+          ? _lastOutputAt
+          : _configuredAt;
+      final sinceOutput = now.difference(lastOutput);
+      if (sinceConfigure > const Duration(seconds: 3) &&
+          sinceOutput > const Duration(seconds: 2)) {
+        logger.warn(
+          '[WebCodec] Decode queue stalled at ${_decoder!.decodeQueueSize} '
+          '(max=$_maxDecodeQueueSize, no output for '
+          '${sinceOutput.inMilliseconds}ms) — resetting decoder to free '
+          'GPU memory',
+        );
+        _needsKeyframe = true;
+        _framePacer?.flush();
+        try {
+          if (_decoder!.state != 'closed') {
+            _decoder!.reset();
+            // Rebuild the description — the stall may have been caused by a
+            // parameter-set change the cached record doesn't reflect.
+            _decoderDescription =
+                _buildDecoderDescription() ?? _decoderDescription;
+            _activeParamsSignature = _computeParamsSignature();
+            _decoder!.configure(_decoderConfig());
+            _configuredAt = DateTime.now();
+          }
+        } catch (e) {
+          logger.error('[WebCodec] stall-reset failed: $e');
         }
-      } catch (e) {
-        logger.error('[WebCodec] stall-reset failed: $e');
+        return;
       }
-      return;
+      // Deep but still flowing (or still ramping up) — fall through to the
+      // normal back-pressure handling below.
     }
 
     // Back-pressure: skip if queue is too deep (but never skip keyframes).
@@ -1423,15 +1462,23 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         DateTime.now().difference(_configuredAt) >= _startupGrace) {
       droppedLast = true;
       _droppedFrameCount++;
-      if (_droppedFrameCount % _dropWarningInterval == 0) {
+      // Dropping a single delta frame poisons every later delta in this
+      // GOP — they reference the dropped picture, and feeding them anyway
+      // is exactly what produced the -12909/EncodingError storms (the
+      // frames are structurally valid; the reference chain is not).  Skip
+      // cleanly to the next keyframe instead.
+      _needsKeyframe = true;
+      final now = DateTime.now();
+      if (now.difference(_lastDropSkipLog) > const Duration(seconds: 5)) {
+        _lastDropSkipLog = now;
         logger.warn(
-          '[WebCodec] back-pressure: $_droppedFrameCount frames dropped '
-          '(decodeQueueSize=${_decoder!.decodeQueueSize})',
+          '[WebCodec] back-pressure: skipping to next keyframe '
+          '(decodeQueueSize=${_decoder!.decodeQueueSize} '
+          'max=$_maxDecodeQueueSize totalDropped=$_droppedFrameCount)',
         );
         callbacks?.onWarning?.call(
           0,
         ); // Pass 0 (no degraded state) instead of frame count to avoid false Video Loss
-        _droppedFrameCount = 0;
       }
       return;
     }
@@ -1550,9 +1597,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     bool stripped = false;
     for (int i = 0; i < boundaries.length; i++) {
       final nalDataStart = boundaries[i] + startCodeLens[i];
-      final nalDataEnd = (i + 1 < boundaries.length)
-          ? boundaries[i + 1]
-          : frame.length;
+      final nalDataEnd =
+          (i + 1 < boundaries.length) ? boundaries[i + 1] : frame.length;
       if (nalDataStart >= frame.length) continue;
 
       final nalHeader = frame[nalDataStart];
@@ -1612,9 +1658,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final buf = BytesBuilder(copy: false);
     for (int i = 0; i < boundaries.length; i++) {
       final nalDataStart = boundaries[i] + startCodeLens[i];
-      final nalDataEnd = (i + 1 < boundaries.length)
-          ? boundaries[i + 1]
-          : frame.length;
+      final nalDataEnd =
+          (i + 1 < boundaries.length) ? boundaries[i + 1] : frame.length;
       final nalLength = nalDataEnd - nalDataStart;
 
       // 4-byte big-endian length prefix
@@ -1706,8 +1751,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (pos + 4 > avcc.length) {
         return 'trailing ${avcc.length - pos}B after NAL $nals';
       }
-      final len =
-          (avcc[pos] << 24) |
+      final len = (avcc[pos] << 24) |
           (avcc[pos + 1] << 16) |
           (avcc[pos + 2] << 8) |
           avcc[pos + 3];
@@ -1747,8 +1791,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final types = <int>[];
     int pos = 0;
     while (pos + 4 < avcc.length && types.length < 8) {
-      final len =
-          (avcc[pos] << 24) |
+      final len = (avcc[pos] << 24) |
           (avcc[pos + 1] << 16) |
           (avcc[pos + 2] << 8) |
           avcc[pos + 3];
@@ -1792,56 +1835,52 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         web.BlobPropertyBag(type: 'image/jpeg'),
       ); // web.Blob
 
-      web.window
-          .createImageBitmap(blob)
-          .toDart
-          .then((web.ImageBitmap bitmap) {
-            _jpegInFlight--;
+      web.window.createImageBitmap(blob).toDart.then((web.ImageBitmap bitmap) {
+        _jpegInFlight--;
 
-            // Guard: decoder was released while the async decode was in-flight.
-            if (_released || !_canvasElements.containsKey(viewType)) {
-              bitmap.close();
-              return;
-            }
+        // Guard: decoder was released while the async decode was in-flight.
+        if (_released || !_canvasElements.containsKey(viewType)) {
+          bitmap.close();
+          return;
+        }
 
-            final w = bitmap.width;
-            final h = bitmap.height;
+        final w = bitmap.width;
+        final h = bitmap.height;
 
-            if (headless) {
-              // In headless mode, skip canvas rendering — just deliver raw JPEG.
-              bitmap.close();
-              _frameCount++;
-              renderedFrame = true;
-              pixelResolution = VideoDecoderSize(w, h);
-              callbacks?.onFrameAvailable?.call(data);
-              return;
-            }
+        if (headless) {
+          // In headless mode, skip canvas rendering — just deliver raw JPEG.
+          bitmap.close();
+          _frameCount++;
+          renderedFrame = true;
+          pixelResolution = VideoDecoderSize(w, h);
+          callbacks?.onFrameAvailable?.call(data);
+          return;
+        }
 
-            // Route through WebGPU dewarper when active.
-            if (_dewarper != null && _dewarper!.isActive) {
-              _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
-              return;
-            }
+        // Route through WebGPU dewarper when active.
+        if (_dewarper != null && _dewarper!.isActive) {
+          _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
+          return;
+        }
 
-            if (canvas.width != w) canvas.width = w;
-            if (canvas.height != h) canvas.height = h;
+        if (canvas.width != w) canvas.width = w;
+        if (canvas.height != h) canvas.height = h;
 
-            ctx.drawImage(bitmap as JSObject, 0, 0, w, h);
-            bitmap.close();
+        ctx.drawImage(bitmap as JSObject, 0, 0, w, h);
+        bitmap.close();
 
-            _frameCount++;
-            renderedFrame = true;
-            pixelResolution = VideoDecoderSize(w, h);
+        _frameCount++;
+        renderedFrame = true;
+        pixelResolution = VideoDecoderSize(w, h);
 
-            pacer.renderFrame(dt, renderManager.pbTime, true);
-            callbacks?.onFrameDecoded?.call((dt, null));
-            callbacks?.onFrameAvailable?.call(data);
-            onFrameRendered?.call(w, h);
-          })
-          .catchError((Object e) {
-            _jpegInFlight--;
-            logger.error('[WebCodec] JPEG decode error: $e');
-          });
+        pacer.renderFrame(dt, renderManager.pbTime, true);
+        callbacks?.onFrameDecoded?.call((dt, null));
+        callbacks?.onFrameAvailable?.call(data);
+        onFrameRendered?.call(w, h);
+      }).catchError((Object e) {
+        _jpegInFlight--;
+        logger.error('[WebCodec] JPEG decode error: $e');
+      });
     } catch (e) {
       _jpegInFlight--;
       logger.error('[WebCodec] JPEG feed error: $e');
@@ -1902,9 +1941,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         _useWasmFallback = true;
         _wasmInitializing = true;
         final codecName = _wasmCodecName;
-        logger.info(
-          '[WebCodec] $codecName: using WASM FFmpeg fallback decoder',
-        );
+        logger
+            .info('[WebCodec] $codecName: using WASM FFmpeg fallback decoder');
         _initWasmDecoder().then((_) {
           _wasmInitializing = false;
           // Retry this frame if it was a keyframe (needed to start decoding).
@@ -1992,16 +2030,12 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (yuvFrame == null) {
         _wasmConsecutiveNulls++;
         if (_wasmConsecutiveNulls == 30) {
-          logger.warn(
-            '[WebCodec] WASM: 30 consecutive null frames — '
-            'decoder may be stuck, waiting for keyframe to flush',
-          );
+          logger.warn('[WebCodec] WASM: 30 consecutive null frames — '
+              'decoder may be stuck, waiting for keyframe to flush');
           _wasmNeedsKeyframe = true;
         } else if (_wasmConsecutiveNulls % 100 == 0) {
-          logger.warn(
-            '[WebCodec] WASM: $_wasmConsecutiveNulls consecutive '
-            'null frames (waiting for keyframe)',
-          );
+          logger.warn('[WebCodec] WASM: $_wasmConsecutiveNulls consecutive '
+              'null frames (waiting for keyframe)');
         }
         return;
       }
@@ -2073,15 +2107,14 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
           .createImageBitmap(imageData as JSObject)
           .toDart
           .then((web.ImageBitmap bitmap) {
-            if (_released || !_canvasElements.containsKey(viewType)) {
-              bitmap.close();
-              return;
-            }
-            _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
-          })
-          .catchError((Object e) {
-            logger.error('[WebCodec] MPEG4 dewarp bitmap creation failed: $e');
-          });
+        if (_released || !_canvasElements.containsKey(viewType)) {
+          bitmap.close();
+          return;
+        }
+        _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
+      }).catchError((Object e) {
+        logger.error('[WebCodec] MPEG4 dewarp bitmap creation failed: $e');
+      });
       return;
     }
 
@@ -2112,23 +2145,17 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       try {
         _webglYuvRenderer = _JSWebGLYuvRenderer(canvas as JSObject);
         if (!_webglYuvRenderer!.init()) {
-          logger.warn(
-            '[WebCodec] WebGL YUV renderer init failed, '
-            'falling back to RGBA path',
-          );
+          logger.warn('[WebCodec] WebGL YUV renderer init failed, '
+              'falling back to RGBA path');
           _webglYuvRenderer = null;
           _webglYuvFailed = true;
           return;
         }
-        logger.info(
-          '[WebCodec] WebGL YUV renderer active — '
-          'GPU color conversion enabled',
-        );
+        logger.info('[WebCodec] WebGL YUV renderer active — '
+            'GPU color conversion enabled');
       } catch (e) {
-        logger.warn(
-          '[WebCodec] WebGL YUV renderer error: $e, '
-          'falling back to RGBA path',
-        );
+        logger.warn('[WebCodec] WebGL YUV renderer error: $e, '
+            'falling back to RGBA path');
         _webglYuvFailed = true;
         return;
       }
@@ -2167,6 +2194,9 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       } catch (_) {}
       return;
     }
+
+    // Any output means the VT session is alive — feeds the stall detector.
+    _lastOutputAt = DateTime.now();
 
     try {
       final ts = frame.timestamp.toInt();
@@ -2268,7 +2298,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     // If we've been decoding successfully for a while, clear the recovery
     // failure counter so the next transient error doesn't immediately throttle.
     if (_recoveryFailures > 0 &&
-        DateTime.now().difference(_configuredAt) > const Duration(seconds: 5)) {
+        DateTime.now().difference(_configuredAt) >
+            const Duration(seconds: 5)) {
       _recoveryFailures = 0;
     }
   }
@@ -2509,43 +2540,38 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         'hardwareAcceleration': _hwAccelPreference,
         if (_decoderDescription != null)
           'description': _decoderDescription!.toJS,
-        if (parser.resolution.width > 0) 'codedWidth': parser.resolution.width,
+        if (parser.resolution.width > 0)
+          'codedWidth': parser.resolution.width,
         if (parser.resolution.height > 0)
           'codedHeight': parser.resolution.height,
       }.jsify();
-      _JSVideoDecoderStatic.isConfigSupported(probeConfig as JSObject).toDart
+      _JSVideoDecoderStatic.isConfigSupported(probeConfig as JSObject)
+          .toDart
           .then((result) {
-            final r = result as _ConfigSupportResult;
-            if (r.supported && r.config != null) {
-              _hwAccelStatus = r.config!.hardwareAcceleration;
-              logger.info(
-                '[WebCodec] HW accel probe: $_hwAccelStatus '
-                '(codec=$_codecString format=$videoFormat)',
-              );
-            } else if (!r.supported) {
-              _hwAccelStatus = 'unsupported';
-              // Don't dispose an already-configured decoder based solely on
-              // isConfigSupported — configure() is authoritative.  Some browsers
-              // (Firefox) return false from isConfigSupported for HEVC but still
-              // decode successfully once configured.  Let actual decode errors
-              // trigger the WASM fallback instead.
-              logger.warn(
-                '[WebCodec] isConfigSupported returned false for '
-                '"$_codecString" — decoder already configured, will attempt '
-                'decoding and fall back on actual error',
-              );
-            } else {
-              _hwAccelStatus = 'supported (detail N/A)';
-              logger.info(
-                '[WebCodec] HW accel probe: $_hwAccelStatus '
-                '(codec=$_codecString format=$videoFormat)',
-              );
-            }
-          })
-          .catchError((Object e) {
-            _hwAccelStatus = 'probe-failed';
-            logger.warn('[WebCodec] HW accel probe failed: $e');
-          });
+        final r = result as _ConfigSupportResult;
+        if (r.supported && r.config != null) {
+          _hwAccelStatus = r.config!.hardwareAcceleration;
+          logger.info('[WebCodec] HW accel probe: $_hwAccelStatus '
+              '(codec=$_codecString format=$videoFormat)');
+        } else if (!r.supported) {
+          _hwAccelStatus = 'unsupported';
+          // Don't dispose an already-configured decoder based solely on
+          // isConfigSupported — configure() is authoritative.  Some browsers
+          // (Firefox) return false from isConfigSupported for HEVC but still
+          // decode successfully once configured.  Let actual decode errors
+          // trigger the WASM fallback instead.
+          logger.warn('[WebCodec] isConfigSupported returned false for '
+              '"$_codecString" — decoder already configured, will attempt '
+              'decoding and fall back on actual error');
+        } else {
+          _hwAccelStatus = 'supported (detail N/A)';
+          logger.info('[WebCodec] HW accel probe: $_hwAccelStatus '
+              '(codec=$_codecString format=$videoFormat)');
+        }
+      }).catchError((Object e) {
+        _hwAccelStatus = 'probe-failed';
+        logger.warn('[WebCodec] HW accel probe failed: $e');
+      });
     } catch (e) {
       _hwAccelStatus = 'probe-error';
       logger.warn('[WebCodec] HW accel probe error: $e');
@@ -2569,11 +2595,9 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     if (msg.contains('NotSupportedError')) {
       _notSupportedStrikes++;
       if (_notSupportedStrikes >= _maxNotSupportedStrikes) {
-        logger.warn(
-          '[WebCodec] Codec "$_codecString" is not supported by this '
-          'browser — stream cannot be decoded '
-          '(format=$videoFormat)',
-        );
+        logger.warn('[WebCodec] Codec "$_codecString" is not supported by this '
+            'browser — stream cannot be decoded '
+            '(format=$videoFormat)');
         _codecUnsupported = true;
         _disposeDecoder();
         _configured = false;
@@ -2756,56 +2780,63 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       // capacity for H.265 and other codecs that require VT.
       // H.265 on macOS typically has no software fallback — isConfigSupported
       // will either return supported:false or resolve to hardware, and we fall
-      // through to the slot-gated hardware path below.
+      // through to the slot-gated hardware path below.  The probe result is
+      // cached per codec string so error storms don't spam isConfigSupported
+      // round-trips for codecs that are known to have no software decoder.
       bool recoveredViaSoftware = false;
-      try {
-        final probeConfig = <String, dynamic>{
-          'codec': _codecString,
-          'hardwareAcceleration': 'prefer-software',
-        }.jsify();
-        final result = await _JSVideoDecoderStatic.isConfigSupported(
-          probeConfig as JSObject,
-        ).toDart;
-        final r = result as _ConfigSupportResult;
-        final resolvedAccel = r.config?.hardwareAcceleration ?? '';
-
-        if (_outputCallback == null) {
-          _recovering = false;
-          return; // released while awaiting probe
-        }
-
-        if (r.supported && resolvedAccel == 'prefer-software') {
-          // Browser confirmed a true software decoder is available.
-          _decoder = _JSVideoDecoder(
-            _DecoderInit(output: _outputCallback!, error: _errorCallback!),
-          ); // _JSVideoDecoder
-          _decoder!.configure(
-            _decoderConfig(hardwareAcceleration: 'prefer-software'),
-          );
-          _hwAccelPreference = 'prefer-software';
-          _configured = true;
-          _configuredAt = DateTime.now();
-          recoveredViaSoftware = true;
-          logger.info(
-            '[WebCodec] Recovering via software decoder — VT slot released '
-            '(codec=$_codecString)',
-          );
-        } else {
-          logger.info(
-            '[WebCodec] Software decode unavailable '
-            '(codec=$_codecString supported=${r.supported} accel=$resolvedAccel) '
-            '— waiting for a hardware slot',
-          );
-        }
-      } catch (e) {
-        logger.warn(
-          '[WebCodec] Software decode probe failed: $e — falling back to hardware',
-        );
+      final cachedSoftwareSupport = _softwareDecodeSupport[_codecString];
+      if (cachedSoftwareSupport != false) {
         try {
-          _decoder?.close();
-        } catch (_) {}
-        _decoder = null;
-        _configured = false;
+          final probeConfig = <String, dynamic>{
+            'codec': _codecString,
+            'hardwareAcceleration': 'prefer-software',
+          }.jsify();
+          final result = await _JSVideoDecoderStatic.isConfigSupported(
+            probeConfig as JSObject,
+          ).toDart;
+          final r = result as _ConfigSupportResult;
+          final resolvedAccel = r.config?.hardwareAcceleration ?? '';
+          _softwareDecodeSupport[_codecString] =
+              r.supported && resolvedAccel == 'prefer-software';
+
+          if (_outputCallback == null) {
+            _recovering = false;
+            return; // released while awaiting probe
+          }
+
+          if (r.supported && resolvedAccel == 'prefer-software') {
+            // Browser confirmed a true software decoder is available.
+            _decoder = _JSVideoDecoder(
+              _DecoderInit(output: _outputCallback!, error: _errorCallback!),
+            ); // _JSVideoDecoder
+            _decoder!.configure(
+              _decoderConfig(hardwareAcceleration: 'prefer-software'),
+            );
+            _hwAccelPreference = 'prefer-software';
+            _configured = true;
+            _configuredAt = DateTime.now();
+            recoveredViaSoftware = true;
+            logger.info(
+              '[WebCodec] Recovering via software decoder — VT slot released '
+              '(codec=$_codecString)',
+            );
+          } else {
+            logger.info(
+              '[WebCodec] Software decode unavailable '
+              '(codec=$_codecString supported=${r.supported} accel=$resolvedAccel) '
+              '— waiting for a hardware slot',
+            );
+          }
+        } catch (e) {
+          logger.warn(
+            '[WebCodec] Software decode probe failed: $e — falling back to hardware',
+          );
+          try {
+            _decoder?.close();
+          } catch (_) {}
+          _decoder = null;
+          _configured = false;
+        }
       }
 
       if (recoveredViaSoftware || _outputCallback == null) return;
@@ -2897,7 +2928,9 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     switch (videoFormat) {
       case VideoFormat.h265:
         if (parser is! H265Parser) return null;
-        return config.buildHEVCDecoderConfigurationRecord(parser as H265Parser);
+        return config.buildHEVCDecoderConfigurationRecord(
+          parser as H265Parser,
+        );
       case VideoFormat.h264:
         if (parser is! H264Parser) return null;
         return config.buildAVCDecoderConfigurationRecord(parser as H264Parser);
