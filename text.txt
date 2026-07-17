@@ -1,19 +1,16 @@
-Paste this to your agent:
+1. Canvas/container ownership across view switches (_canvasOwners) — this is the likely culprit. Before my fix, when you switched A→B→A, the old instance's release() deleted the shared canvas/container registry entries out from under the new instance, and the new decoder silently dropped every frame (that was part of your original fps-death bug — decode stopped). My fix keeps the entries alive and lets the new instance adopt them, so decode keeps running. But there's a second half to that trap which my fix exposes rather than causes: the canvas/container is one DOM node shared across every HtmlElementView instantiation of that camera. When a camera appears in consecutive views, the new platform view adopts the same container node, and when Flutter later disposes the old platform view, that disposal can detach the shared node from the DOM. Result: the decoder happily draws every frame into a canvas that's no longer connected to the page — decoded fps looks perfect, screen is black. Previously this manifested as "decode stops + errors"; now it manifests as "decode fine + black," which matches what you're describing, including the "sometimes" (it depends on the mount/dispose ordering race, and only hits cameras present in both the outgoing and incoming view — or re-keyed rebuilds of the same camera).
+2. Dewarp canvas cleanup in _disposeDecoder — I now remove the hidden WebGPU canvas and restore the 2D canvas to display: block on dispose. If any of the black cameras use dewarp, this path is worth suspecting too, but it only runs when a dewarper existed.
 
-```text
-The current fisheye dewarp looks like a rectilinear PTZ/center crop. Add a true curvilinear fisheye dewarp mode.
+Everything else I touched (queue sizing, drop-to-keyframe, stall detector, admission gate, param-change reconfigure, probe cache) is decode-side — none of it can produce black-with-healthy-dfps. The frame-close-on-error additions only fire on exceptions, which would show render error lines in your logs.
 
-Use the original full-resolution fisheye video texture, not a scaled preview. Configure/detect fisheye center, radiusX/radiusY, FOV, rotation, and lens model. Implement inverse mapping in WebGL: output pixel → 3D ray → source fisheye UV.
+30-second confirmation, no code changes needed: when a camera goes black, run this in the DevTools console (adjust the id/slug to that camera):
 
-Add at least:
-- Raw fisheye
-- Rectilinear PTZ
-- Cylindrical panorama
-- Panini/Pannini wide-angle
+[...document.querySelectorAll('canvas')].filter(c => !c.isConnected).length
+// or check the specific element:
+document.contains(document.querySelector('[id*="web-codec"]'))
 
-For wide dewarp, default to cylindrical or Panini, not rectilinear. It is okay for lines/grid squares to curve; the goal is to show more of the full fisheye without looking like a zoomed-in crop.
+Simplest version: in DevTools → Elements, find that camera's container div — if the canvas being drawn to isn't in the live DOM (or its container's parent slot belongs to a disposed platform view), it's confirmed. Also check whether black cameras are always ones that existed in the previous view too — that alone is strong confirmation.
 
-Also fix blur by matching canvas backing resolution to CSS size × devicePixelRatio, sampling directly from the video texture, and avoiding repeated canvas/CSS rescaling.
+If it's confirmed, the eventual fix lives in the platform-view factory pattern (return a fresh wrapper div per instantiation and reparent the shared canvas into the newest wrapper, so old-view disposal only removes its own dead wrapper) — happy to make that change on the branch whenever you want it.
 
-Add a debug overlay showing the detected fisheye circle on the raw image.
-```
+result: confirmed one of my changes plausibly explains the black cameras — the canvas-ownership fix keeps decode alive across view switches, but the shared container DOM node can be detached when Flutter disposes the old platform view, so frames draw into a disconnected canvas (dfps fine, screen black); gave a 30-second DevTools check and the shape of the eventual factory-side fix, no code changed as requested
