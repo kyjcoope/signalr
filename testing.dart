@@ -49,15 +49,69 @@ final _containerElements = <String, web.HTMLDivElement>{};
 // runs AFTER the new decoder adopted the entries.
 final _canvasOwners = <String, Object>{};
 
-// The most recent per-instantiation platform-view wrapper for each viewType.
-// Flutter caches and disposes the element returned by the view factory per
-// viewId, so the factory hands out a fresh disposable wrapper each time and
-// REPARENTS the shared container into it. Without this indirection, handing
-// the shared container to Flutter directly meant a view switch (new viewId
-// adopts the node) followed by disposal of the OLD platform view detached the
-// shared canvas from the DOM — decode kept running with a healthy dfps while
-// the camera rendered black.
-final _activeWrappers = <String, web.HTMLDivElement>{};
+// Per-instantiation platform-view surfaces for each viewType. Flutter caches
+// and disposes the element returned by the view factory per viewId, so the
+// factory hands out a fresh disposable wrapper each time. The NEWEST wrapper
+// hosts the real (shared) container; every other still-connected wrapper gets
+// a lightweight mirror canvas that is repainted from the decoder's output
+// after each rendered frame. This both prevents an old platform view's
+// disposal from detaching the shared canvas (black tile with healthy dfps)
+// and lets the SAME stream appear in multiple tiles of one view — e.g. a
+// camera tile switched to its sub-stream plus that sub-stream's own tile —
+// with a single decode.
+class _ViewSurface {
+  _ViewSurface(this.wrapper);
+
+  final web.HTMLDivElement wrapper;
+  web.HTMLCanvasElement? mirrorCanvas;
+  _CanvasCtx? mirrorCtx;
+}
+
+final _viewSurfaces = <String, List<_ViewSurface>>{};
+
+/// Prune disposed wrappers, keep the real container hosted in the newest
+/// wrapper, and give every other live wrapper a mirror canvas.
+void _rehostContainer(String viewType) {
+  final surfaces = _viewSurfaces[viewType];
+  final container = _containerElements[viewType];
+  if (surfaces == null || surfaces.isEmpty || container == null) return;
+  final newest = surfaces.last;
+  // Drop wrappers Flutter has detached — but never the newest: right after
+  // the factory call it has not been attached to the DOM yet.
+  surfaces.removeWhere((s) => !identical(s, newest) && !s.wrapper.isConnected);
+  if (!newest.wrapper.contains(container)) {
+    newest.mirrorCanvas?.remove();
+    newest.mirrorCanvas = null;
+    newest.mirrorCtx = null;
+    // appendChild MOVES the container out of any previous wrapper.
+    newest.wrapper.appendChild(container);
+  }
+  for (final s in surfaces) {
+    if (identical(s, newest)) continue;
+    if (s.mirrorCanvas == null) {
+      final mirror =
+          web.document.createElement('canvas') as web.HTMLCanvasElement
+            ..style.width = '100%'
+            ..style.height = '100%'
+            ..style.objectFit = 'contain'
+            ..style.pointerEvents = 'none';
+      s.wrapper.appendChild(mirror);
+      s.mirrorCanvas = mirror;
+      s.mirrorCtx = null;
+    }
+  }
+}
+
+// — Duplicate-stream decode dedupe ————————————————————————————
+// A view can display the same underlying stream twice: a camera tile that
+// was switched to its lower-resolution sub-stream to save bandwidth, plus
+// the sub-stream shown as its own tile. Decoding the same bits twice wastes
+// a VideoToolbox session and fights over the shared canvas. Instead, the
+// first live (non-headless) instance per stream is the PRIMARY and decodes;
+// later instances register as render mirrors that repaint the primary's
+// output and keep their own per-tile bookkeeping. Keyed by stream id+slug.
+final _primaryByStream = <String, WebCodecDecoder>{};
+final _mirrorsByStream = <String, List<WebCodecDecoder>>{};
 
 // — JS interop for WebCodecs API ————————————————————————————————
 
@@ -490,6 +544,17 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   /// Stream info reference for creating fallback decoders.
   final IStreamInfo _streamInfo;
 
+  /// Key identifying the underlying stream for duplicate-decode dedupe.
+  String get _streamKey => '${_streamInfo.id}-${_streamInfo.slug}';
+
+  /// True when another live instance is already decoding this stream and
+  /// this instance only mirrors its rendered output.  See
+  /// [_primaryByStream].
+  bool _isMirror = false;
+
+  /// Whether this instance mirrors another decoder instead of decoding.
+  bool get isMirrorInstance => _isMirror;
+
   /// Called after every decoded frame is drawn to the canvas.
   void Function(int width, int height)? onFrameRendered;
 
@@ -549,40 +614,44 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       // viewType.  See [_canvasOwners].
       _canvasOwners[viewType] = this;
 
-      // If a platform-view wrapper for this camera is already mounted, make
-      // sure it displays THIS instance's container — after a decoder reinit
-      // that did not rebuild the widget tree, the wrapper may still hold a
-      // released predecessor's container.
-      final wrapper = _activeWrappers[viewType];
-      final container = _containerElements[viewType]!;
-      if (wrapper != null &&
-          wrapper.isConnected &&
-          !wrapper.contains(container)) {
-        while (wrapper.firstChild != null) {
-          wrapper.removeChild(wrapper.firstChild!);
-        }
-        wrapper.appendChild(container);
+      // After a decoder reinit that did not rebuild the widget tree, a
+      // mounted wrapper may still display a released predecessor's
+      // container — rehost so the newest wrapper shows THIS container.
+      _rehostContainer(viewType);
+
+      // — Duplicate-stream dedupe (see [_primaryByStream]) ————————
+      final existingPrimary = _primaryByStream[_streamKey];
+      if (existingPrimary != null &&
+          !existingPrimary._released &&
+          !identical(existingPrimary, this)) {
+        _isMirror = true;
+        _mirrorsByStream.putIfAbsent(_streamKey, () => []).add(this);
+        logger.info(
+          '[WebCodec] Duplicate stream detected (stream=$_streamKey) — '
+          'mirroring the existing decoder instead of decoding twice',
+        );
+      } else {
+        _primaryByStream[_streamKey] = this;
       }
 
       // Register the platform-view factory exactly once per viewType.
       if (!_registeredViewTypes.contains(viewType)) {
         _registeredViewTypes.add(viewType);
         ui_web.platformViewRegistry.registerViewFactory(viewType, (int viewId) {
-          // Return a FRESH wrapper per platform-view instantiation and
-          // reparent the shared container into it (appendChild moves the
-          // node out of any previous wrapper). Flutter owns and disposes
-          // the wrapper per viewId; disposal of an older platform view can
-          // therefore only remove its own, already-empty wrapper — never
-          // the shared canvas stack. See [_activeWrappers].
+          // Return a FRESH wrapper per platform-view instantiation. Flutter
+          // owns and disposes the wrapper per viewId; disposal of an older
+          // platform view can therefore only remove its own wrapper — never
+          // the shared canvas stack. [_rehostContainer] moves the real
+          // container into this (newest) wrapper and downgrades previous
+          // live wrappers to mirror canvases. See [_viewSurfaces].
           final viewWrapper =
               web.document.createElement('div') as web.HTMLDivElement
                 ..style.width = '100%'
                 ..style.height = '100%';
-          _activeWrappers[viewType] = viewWrapper;
-          final shared = _containerElements[viewType];
-          if (shared != null) {
-            viewWrapper.appendChild(shared);
-          }
+          _viewSurfaces
+              .putIfAbsent(viewType, () => [])
+              .add(_ViewSurface(viewWrapper));
+          _rehostContainer(viewType);
           return viewWrapper;
         });
       }
@@ -645,6 +714,12 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   @override
   void onSendFrame(T frame) {
     if (_released) {
+      return;
+    }
+
+    // Duplicate-stream mirror: rendering is driven by the primary
+    // decoder's output — do not parse or decode a second copy.
+    if (_isMirror) {
       return;
     }
 
@@ -809,6 +884,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
   @override
   void sendFlush() {
+    if (_isMirror) return;
     _needsKeyframe = true;
     _framePacer?.flush();
     pacer.cancelNoFramesTimer();
@@ -822,6 +898,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
   @override
   void resetForKeyframe() {
+    if (_isMirror) return;
     // Discard all queued frames via reset() instead of flush().
     // flush() tries to decode all pending frames — if they reference
     // dropped pictures (common during back-pressure), the decoder
@@ -871,6 +948,44 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     _disposeDecoder();
     await _mseFallback?.release();
     _mseFallback = null;
+
+    // — Duplicate-stream dedupe bookkeeping ————————————————————
+    if (!headless) {
+      final key = _streamKey;
+      if (_isMirror) {
+        final mirrors = _mirrorsByStream[key];
+        mirrors?.remove(this);
+        if (mirrors != null && mirrors.isEmpty) _mirrorsByStream.remove(key);
+        // If this mirror holds registry ownership (it was constructed
+        // last), hand it back to the live primary so the shared canvas
+        // is not torn down underneath it.
+        final primary = _primaryByStream[key];
+        if (primary != null &&
+            !primary._released &&
+            identical(_canvasOwners[viewType], this)) {
+          _canvasOwners[viewType] = primary;
+        }
+      } else if (identical(_primaryByStream[key], this)) {
+        _primaryByStream.remove(key);
+        // Promote a live duplicate-tile mirror so the stream keeps
+        // decoding; it resumes at the next keyframe from its own feed.
+        final mirrors = _mirrorsByStream[key];
+        if (mirrors != null && mirrors.isNotEmpty) {
+          final promoted = mirrors.removeAt(0);
+          if (mirrors.isEmpty) _mirrorsByStream.remove(key);
+          promoted._isMirror = false;
+          _primaryByStream[key] = promoted;
+          if (identical(_canvasOwners[viewType], this)) {
+            _canvasOwners[promoted.viewType] = promoted;
+          }
+          logger.info(
+            '[WebCodec] Promoted duplicate-stream mirror to primary '
+            'decoder (stream=$key) — awaiting keyframe',
+          );
+        }
+      }
+    }
+
     // Remove canvas/container entries to free DOM elements — but only if
     // this instance still owns them.  A newer decoder for the same stream
     // may have adopted the elements while this one was being torn down
@@ -960,6 +1075,16 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
   @override
   Future<void> setDewarpMode(DewarpType? mode) async {
+    if (_isMirror) {
+      // The mirror repaints the primary's flat output; running a second
+      // WebGPU dewarper against a canvas nothing decodes into would show
+      // black.  Dewarp the primary tile instead.
+      logger.warn(
+        '[WebCodec] setDewarpMode ignored on duplicate-stream mirror '
+        '(stream=$_streamKey)',
+      );
+      return;
+    }
     logger.info('[WebCodec] setDewarpMode called: $mode (was: $_dewarpMode)');
     _dewarpMode = mode ?? DewarpType.none;
     if (_dewarpMode == DewarpType.none) {
@@ -1916,6 +2041,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
             callbacks?.onFrameDecoded?.call((dt, null));
             callbacks?.onFrameAvailable?.call(data);
             onFrameRendered?.call(w, h);
+            _notifyMirrors(w, h, dt);
           })
           .catchError((Object e) {
             _jpegInFlight--;
@@ -2179,6 +2305,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     callbacks?.onFrameDecoded?.call((dt, null));
     callbacks?.onFrameAvailable?.call(data);
     onFrameRendered?.call(w, h);
+    _notifyMirrors(w, h, dt);
   }
 
   /// Render a YUV420P frame via WebGL (GPU-accelerated color conversion).
@@ -2233,6 +2360,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     callbacks?.onFrameDecoded?.call((dt, null));
     callbacks?.onFrameAvailable?.call(data);
     onFrameRendered?.call(w, h);
+    _notifyMirrors(w, h, dt);
   }
 
   // — Decoded frame callback ————————————————————————————————————
@@ -2334,6 +2462,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     callbacks?.onFrameDecoded?.call((contentDt, null));
     _emitFrameAvailable();
     onFrameRendered?.call(w, h);
+    _notifyMirrors(w, h, contentDt);
   }
 
   /// Record a successfully rendered frame for the recovery heuristics:
@@ -2352,6 +2481,84 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     if (_recoveryFailures > 0 &&
         DateTime.now().difference(_configuredAt) > const Duration(seconds: 5)) {
       _recoveryFailures = 0;
+    }
+  }
+
+  // — Duplicate-stream / duplicate-tile mirroring ————————————————
+
+  /// The canvas currently showing this decoder's output (WebGPU dewarp
+  /// canvas when dewarping, otherwise the shared 2D canvas).
+  web.HTMLCanvasElement? get _visibleSourceCanvas =>
+      (_dewarper?.isActive ?? false) && _dewarpCanvas != null
+      ? _dewarpCanvas
+      : _canvasElements[viewType];
+
+  /// Called after every rendered frame: repaint the extra platform-view
+  /// wrappers of this viewType (same stream shown in several tiles of one
+  /// view) and any duplicate-stream mirror instances.
+  void _notifyMirrors(int w, int h, DateTime dt) {
+    if (headless || _isMirror) return;
+    final source = _visibleSourceCanvas;
+    if (source == null) return;
+
+    // Wrapper-level mirrors (same viewType, several platform views).
+    final surfaces = _viewSurfaces[viewType];
+    if (surfaces != null && surfaces.length > 1) {
+      var sawDisconnected = false;
+      for (final s in surfaces) {
+        if (!s.wrapper.isConnected) {
+          sawDisconnected = true;
+          continue;
+        }
+        final mirror = s.mirrorCanvas;
+        if (mirror == null) continue; // hosts the real container
+        if (mirror.width != w) mirror.width = w;
+        if (mirror.height != h) mirror.height = h;
+        s.mirrorCtx ??= _CanvasCtx(mirror.getContext('2d')!);
+        s.mirrorCtx!.drawImage(source as JSObject, 0, 0, w, h);
+      }
+      if (sawDisconnected) _rehostContainer(viewType);
+    }
+
+    // Instance-level mirrors (duplicate stream under a different viewType,
+    // e.g. when explicit viewIds were passed).
+    final mirrors = _mirrorsByStream[_streamKey];
+    if (mirrors != null) {
+      for (final mirror in List<WebCodecDecoder>.of(mirrors)) {
+        mirror._onPrimaryRender(source, w, h, dt);
+      }
+    }
+  }
+
+  /// Mirror-side handler: repaint this tile from the primary's output and
+  /// keep per-tile bookkeeping (dfps, no-video timer, callbacks) alive.
+  void _onPrimaryRender(
+    web.HTMLCanvasElement source,
+    int w,
+    int h,
+    DateTime dt,
+  ) {
+    if (_released || headless) return;
+    try {
+      final own = _canvasElements[viewType];
+      if (own != null && !identical(own, source)) {
+        // Distinct canvas (different viewType): blit the primary's output.
+        if (own.width != w) own.width = w;
+        if (own.height != h) own.height = h;
+        ctx.drawImage(source as JSObject, 0, 0, w, h);
+      }
+      // Same shared canvas: the pixels are already there (and extra tiles
+      // are covered by the wrapper-level mirrors) — bookkeeping only.
+      _frameCount++;
+      renderedFrame = true;
+      pixelResolution = VideoDecoderSize(w, h);
+      pacer.feedFrame(dt);
+      pacer.renderFrame(dt, renderManager.pbTime, true);
+      callbacks?.onFrameDecoded?.call((dt, null));
+      _emitFrameAvailable();
+      onFrameRendered?.call(w, h);
+    } catch (e) {
+      logger.error('[WebCodec] mirror render error: $e');
     }
   }
 
@@ -2420,6 +2627,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       pacer.renderFrame(contentDt, renderManager.pbTime, true);
       callbacks?.onFrameDecoded?.call((contentDt, null));
       onFrameRendered?.call(w, h);
+      _notifyMirrors(outW, outH, contentDt);
     } catch (e) {
       logger.error('[WebCodec] dewarp render error: $e');
       try {
@@ -2486,6 +2694,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       pacer.renderFrame(dt, renderManager.pbTime, true);
       callbacks?.onFrameDecoded?.call((dt, null));
       onFrameRendered?.call(w, h);
+      _notifyMirrors(outW, outH, dt);
     } catch (e) {
       logger.error('[WebCodec] JPEG dewarp render error: $e');
       try {
