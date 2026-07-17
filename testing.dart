@@ -65,20 +65,44 @@ class _ViewSurface {
   final web.HTMLDivElement wrapper;
   web.HTMLCanvasElement? mirrorCanvas;
   _CanvasCtx? mirrorCtx;
+
+  /// When the wrapper was first observed detached from the DOM, or null
+  /// while connected.  Flutter re-slots platform views during layout
+  /// changes, so a wrapper can be briefly disconnected and come back —
+  /// surfaces are only pruned after a sustained disconnection.
+  DateTime? disconnectedSince;
 }
 
 final _viewSurfaces = <String, List<_ViewSurface>>{};
 
-/// Prune disposed wrappers, keep the real container hosted in the newest
-/// wrapper, and give every other live wrapper a mirror canvas.
+/// Grace period before a detached wrapper is considered disposed for good.
+const _surfacePruneGrace = Duration(seconds: 5);
+
+/// Prune long-disposed wrappers, keep the real container hosted in the
+/// newest wrapper, and give every other live wrapper a mirror canvas.
 void _rehostContainer(String viewType) {
   final surfaces = _viewSurfaces[viewType];
   final container = _containerElements[viewType];
   if (surfaces == null || surfaces.isEmpty || container == null) return;
+  final now = DateTime.now();
+  for (final s in surfaces) {
+    if (s.wrapper.isConnected) {
+      s.disconnectedSince = null;
+    } else {
+      s.disconnectedSince ??= now;
+    }
+  }
   final newest = surfaces.last;
-  // Drop wrappers Flutter has detached — but never the newest: right after
-  // the factory call it has not been attached to the DOM yet.
-  surfaces.removeWhere((s) => !identical(s, newest) && !s.wrapper.isConnected);
+  // Drop wrappers that have been out of the DOM past the grace period —
+  // but never the newest: right after the factory call it has not been
+  // attached yet.  A transiently detached wrapper keeps its mirror canvas
+  // and resumes repainting when Flutter re-attaches it.
+  surfaces.removeWhere(
+    (s) =>
+        !identical(s, newest) &&
+        s.disconnectedSince != null &&
+        now.difference(s.disconnectedSince!) > _surfacePruneGrace,
+  );
   if (!newest.wrapper.contains(container)) {
     newest.mirrorCanvas?.remove();
     newest.mirrorCanvas = null;
@@ -634,6 +658,18 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         _primaryByStream[_streamKey] = this;
       }
 
+      // Topology diagnostic: with one line per instance it is visible in
+      // logs whether duplicate tiles produce two instances of the SAME
+      // stream key (dedupe handles them) or two different stream keys for
+      // identical content (dedupe cannot know — the caller must pass the
+      // sub-stream's streamInfo when auto-switching a tile to it).
+      logger.info(
+        '[WebCodec] Instance created: viewType=$viewType '
+        'stream=$_streamKey explicitViewId=${viewId != null} '
+        'role=${_isMirror ? 'mirror' : 'primary'} '
+        'liveStreams=${_primaryByStream.length}',
+      );
+
       // Register the platform-view factory exactly once per viewType.
       if (!_registeredViewTypes.contains(viewType)) {
         _registeredViewTypes.add(viewType);
@@ -648,10 +684,13 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
               web.document.createElement('div') as web.HTMLDivElement
                 ..style.width = '100%'
                 ..style.height = '100%';
-          _viewSurfaces
-              .putIfAbsent(viewType, () => [])
-              .add(_ViewSurface(viewWrapper));
+          final surfaces = _viewSurfaces.putIfAbsent(viewType, () => []);
+          surfaces.add(_ViewSurface(viewWrapper));
           _rehostContainer(viewType);
+          logger.info(
+            '[WebCodec] Platform view #$viewId created for $viewType '
+            '(surfaces=${surfaces.length})',
+          );
           return viewWrapper;
         });
       }
