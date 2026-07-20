@@ -97,12 +97,13 @@ void _rehostContainer(String viewType) {
   // but never the newest: right after the factory call it has not been
   // attached yet.  A transiently detached wrapper keeps its mirror canvas
   // and resumes repainting when Flutter re-attaches it.
-  surfaces.removeWhere(
-    (s) =>
-        !identical(s, newest) &&
+  surfaces.removeWhere((s) {
+    final drop = !identical(s, newest) &&
         s.disconnectedSince != null &&
-        now.difference(s.disconnectedSince!) > _surfacePruneGrace,
-  );
+        now.difference(s.disconnectedSince!) > _surfacePruneGrace;
+    if (drop) _scrapSurface(s, container);
+    return drop;
+  });
   if (!newest.wrapper.contains(container)) {
     newest.mirrorCanvas?.remove();
     newest.mirrorCanvas = null;
@@ -124,6 +125,68 @@ void _rehostContainer(String viewType) {
       s.mirrorCtx = null;
     }
   }
+}
+
+/// Zero and detach every canvas under a pruned wrapper so raster/GPU
+/// backing stores are reclaimed immediately.  Merely dropping the Dart
+/// reference is NOT enough: a full-resolution canvas in a detached DOM
+/// subtree keeps a multi-MB (GPU-side) backing store alive until the
+/// browser collects it, which under load is effectively never — this is
+/// the classic "memory grows, devtools GC does nothing" pattern.
+///
+/// [sharedContainer] (the live container, when it happens to sit inside
+/// this wrapper) is detached first so it survives for re-hosting instead
+/// of being zeroed with the rest.
+void _scrapSurface(_ViewSurface s, web.Element? sharedContainer) {
+  if (sharedContainer != null && s.wrapper.contains(sharedContainer)) {
+    sharedContainer.remove();
+  }
+  final canvases = s.wrapper.querySelectorAll('canvas');
+  for (var i = 0; i < canvases.length; i++) {
+    final c = canvases.item(i) as web.HTMLCanvasElement?;
+    if (c == null) continue;
+    c.width = 0;
+    c.height = 0;
+    c.remove();
+  }
+  s.mirrorCanvas = null;
+  s.mirrorCtx = null;
+}
+
+/// Remove every static-registry reference for [viewType] and zero the
+/// associated canvas backing stores.  Called when the LAST owning
+/// instance for the viewType releases (nobody adopted the elements, so
+/// the stream is going away for good).
+///
+/// Wrappers still CONNECTED to the DOM (Flutter has not yet disposed
+/// their platform views) are left in [_viewSurfaces] so a decoder reinit
+/// that reuses a still-mounted HtmlElementView can re-adopt them; the
+/// audit sweeper ([WebCodecDecoder._auditTick]) prunes them once Flutter
+/// detaches them.  Without that sweeper, nothing runs for a viewType
+/// after its last release and the final wrapper→container→canvas chain
+/// stayed referenced forever — one leaked full-resolution canvas per
+/// stream per visit.
+void _purgeViewTypeState(String viewType) {
+  final container = _containerElements.remove(viewType);
+  final canvas = _canvasElements.remove(viewType);
+  _canvasOwners.remove(viewType);
+
+  final surfaces = _viewSurfaces[viewType];
+  if (surfaces != null) {
+    surfaces.removeWhere((s) {
+      if (s.wrapper.isConnected) return false;
+      _scrapSurface(s, container);
+      return true;
+    });
+    if (surfaces.isEmpty) _viewSurfaces.remove(viewType);
+  }
+
+  if (canvas != null) {
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.remove();
+  }
+  container?.remove();
 }
 
 // — Duplicate-stream decode dedupe ————————————————————————————
@@ -307,7 +370,9 @@ class _HwSlotGate {
   /// Time to wait before the next configure() is allowed (staggering).
   static Duration spacingDelay(DateTime now) {
     final since = now.difference(_lastConfigureAt);
-    return since >= configureSpacing ? Duration.zero : configureSpacing - since;
+    return since >= configureSpacing
+        ? Duration.zero
+        : configureSpacing - since;
   }
 
   static void markConfigured(DateTime now) => _lastConfigureAt = now;
@@ -593,6 +658,153 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   /// Defaults to `true` to preserve historical behaviour.
   final bool optimizeForLatency;
 
+  // — Leak audit ————————————————————————————————————————————————
+  //
+  // Every instance registers here at construction and deregisters in
+  // release().  A single periodic timer (only while any static state
+  // exists) logs one compact [WebCodec][AUDIT] line and sweeps orphaned
+  // platform-view surfaces.  The line is designed to answer, at a glance:
+  //   * created − released growing  → the app is not releasing decoders
+  //     (instances stay pinned by the static registries: memory AND CPU).
+  //   * framesRendered10s > 0 while no video page is visible → frames are
+  //     still being fed/decoded (stream subscription leak upstream).
+  //   * estCanvasMB growing → canvas backing stores accumulating.
+  //   * decodersOpen > live tiles → leaked WebCodecs decoder sessions.
+
+  static final Set<WebCodecDecoder> _liveInstances = {};
+  static int _createdCount = 0;
+  static int _releasedCount = 0;
+  static int _totalFramesRendered = 0;
+  static int _lastAuditFrameTotal = 0;
+  static Timer? _auditTimer;
+
+  /// Logger borrowed from the most recently constructed instance so audit
+  /// lines survive after the last instance releases (the exact window
+  /// where leaks are visible).  Typed dynamic: the concrete logger type
+  /// lives in video_decoder.dart.
+  static dynamic _auditLogger;
+
+  static void _ensureAuditTimer() {
+    _auditTimer ??= Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => _auditTick(),
+    );
+  }
+
+  /// Prune surfaces of viewTypes with no live owner, then log the audit
+  /// snapshot.  Cancels itself once all static state is gone.
+  static void _auditTick() {
+    // — Sweep: viewTypes whose owner is gone get the same grace-based
+    // pruning that live decoders perform in _rehostContainer.  Without
+    // this, nothing ever runs for a viewType after its last release and
+    // its wrappers/canvases stay referenced forever.
+    final now = DateTime.now();
+    final deadViewTypes = <String>[];
+    _viewSurfaces.forEach((vt, surfaces) {
+      final owner = _canvasOwners[vt];
+      if (owner is WebCodecDecoder && !owner._released) return;
+      for (final s in surfaces) {
+        if (s.wrapper.isConnected) {
+          s.disconnectedSince = null;
+        } else {
+          s.disconnectedSince ??= now;
+        }
+      }
+      surfaces.removeWhere((s) {
+        final drop = s.disconnectedSince != null &&
+            now.difference(s.disconnectedSince!) > _surfacePruneGrace;
+        if (drop) _scrapSurface(s, _containerElements[vt]);
+        return drop;
+      });
+      if (surfaces.isEmpty) deadViewTypes.add(vt);
+    });
+    for (final vt in deadViewTypes) {
+      _viewSurfaces.remove(vt);
+    }
+
+    final allEmpty = _liveInstances.isEmpty &&
+        _canvasElements.isEmpty &&
+        _containerElements.isEmpty &&
+        _canvasOwners.isEmpty &&
+        _viewSurfaces.isEmpty &&
+        _primaryByStream.isEmpty &&
+        _mirrorsByStream.isEmpty;
+    if (allEmpty) {
+      _auditLogger?.info(
+        '[WebCodec][AUDIT] all decoder state clear — audit stopped '
+        '(created=$_createdCount released=$_releasedCount)',
+      );
+      _auditTimer?.cancel();
+      _auditTimer = null;
+      return;
+    }
+
+    var primaries = 0, mirrors = 0, headlessN = 0;
+    var decodersOpen = 0, queueSum = 0, zombies = 0;
+    var estBytes = 0;
+    for (final d in _liveInstances) {
+      if (d.headless) {
+        headlessN++;
+      } else if (d._isMirror) {
+        mirrors++;
+      } else {
+        primaries++;
+      }
+      final dec = d._decoder;
+      if (dec != null && dec.state != 'closed') {
+        decodersOpen++;
+        queueSum += dec.decodeQueueSize;
+      }
+      final dc = d._dewarpCanvas;
+      if (dc != null) estBytes += dc.width * dc.height * 4;
+      final oc = d._offscreenCanvas;
+      if (oc != null) estBytes += oc.width * oc.height * 4;
+      if (!d.headless) {
+        final surfaces = _viewSurfaces[d.viewType];
+        final connected =
+            surfaces?.where((s) => s.wrapper.isConnected).length ?? 0;
+        if (connected == 0) zombies++;
+      }
+    }
+    for (final c in _canvasElements.values) {
+      estBytes += c.width * c.height * 4;
+    }
+    var surfaceCount = 0, surfaceConnected = 0, mirrorCanvases = 0;
+    _viewSurfaces.forEach((_, ss) {
+      surfaceCount += ss.length;
+      for (final s in ss) {
+        if (s.wrapper.isConnected) surfaceConnected++;
+        final m = s.mirrorCanvas;
+        if (m != null) {
+          mirrorCanvases++;
+          estBytes += m.width * m.height * 4;
+        }
+      }
+    });
+    final framesSince = _totalFramesRendered - _lastAuditFrameTotal;
+    _lastAuditFrameTotal = _totalFramesRendered;
+    _auditLogger?.info(
+      '[WebCodec][AUDIT] inst=${_liveInstances.length} '
+      '(P=$primaries M=$mirrors H=$headlessN) '
+      'created=$_createdCount released=$_releasedCount '
+      'decodersOpen=$decodersOpen queueSum=$queueSum '
+      'slots=${_HwSlotGate.slotsInUse}/${_HwSlotGate.maxSlots} '
+      'viewTypes=${_canvasElements.length} '
+      'surfaces=$surfaceCount (connected=$surfaceConnected '
+      'mirrorCanvases=$mirrorCanvases) '
+      'estCanvasMB=${(estBytes / (1024 * 1024)).toStringAsFixed(1)} '
+      'framesRendered10s=$framesSince zombies=$zombies '
+      'streams=${_primaryByStream.length}p/${_mirrorsByStream.length}m',
+    );
+  }
+
+  /// Bump per-instance and global rendered-frame counters (the global
+  /// total feeds the audit's frames-per-interval figure).
+  void _countFrame() {
+    _frameCount += 1;
+    _totalFramesRendered += 1;
+  }
+
   // ignore: use_super_parameters
   WebCodecDecoder({
     required IStreamInfo streamInfo,
@@ -604,10 +816,14 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     this.headless = false,
     this.optimizeForLatency = true,
     this.usePresentationPacer = true,
-  }) : _streamInfo = streamInfo,
-       viewType =
-           viewId ?? 'web-codec-canvas-${streamInfo.id}-${streamInfo.slug}',
-       super(streamInfo: streamInfo) {
+  })  : _streamInfo = streamInfo,
+        viewType =
+            viewId ?? 'web-codec-canvas-${streamInfo.id}-${streamInfo.slug}',
+        super(streamInfo: streamInfo) {
+    _createdCount++;
+    _liveInstances.add(this);
+    _auditLogger = logger;
+    _ensureAuditTimer();
     if (!headless) {
       // Create the canvas element only once per viewType.
       if (!_canvasElements.containsKey(viewType)) {
@@ -966,7 +1182,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         // Rebuild the description from the parser's current parameter
         // sets — reusing the cached record risks configuring against
         // stale SPS/PPS after a mid-stream change.
-        _decoderDescription = _buildDecoderDescription() ?? _decoderDescription;
+        _decoderDescription =
+            _buildDecoderDescription() ?? _decoderDescription;
         _activeParamsSignature = _computeParamsSignature();
         _decoder!.configure(_decoderConfig());
         _configuredAt = DateTime.now();
@@ -980,12 +1197,28 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
   @override
   Future<void> release() async {
+    if (_released) return;
     _released = true;
+    _releasedCount++;
+    _liveInstances.remove(this);
+    onFrameRendered = null;
     _reconfigureTimer?.cancel();
     _reconfigureTimer = null;
     _pendingFrames.clear();
-    _disposeDecoder();
-    await _mseFallback?.release();
+    // A dispose failure (WASM/WebGL/dewarper teardown throwing) must not
+    // abort the static-registry cleanup below — a half-released instance
+    // pinned in _primaryByStream/_canvasOwners leaks its decoder session,
+    // canvases, and (if frames keep arriving) CPU, forever.
+    try {
+      _disposeDecoder();
+    } catch (e) {
+      logger.error('[WebCodec] release: dispose error (continuing): $e');
+    }
+    try {
+      await _mseFallback?.release();
+    } catch (e) {
+      logger.error('[WebCodec] release: MSE release error (continuing): $e');
+    }
     _mseFallback = null;
 
     // — Duplicate-stream dedupe bookkeeping ————————————————————
@@ -995,12 +1228,18 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         final mirrors = _mirrorsByStream[key];
         mirrors?.remove(this);
         if (mirrors != null && mirrors.isEmpty) _mirrorsByStream.remove(key);
-        // If this mirror holds registry ownership (it was constructed
-        // last), hand it back to the live primary so the shared canvas
-        // is not torn down underneath it.
+        // If this mirror SHARES the primary's viewType and holds registry
+        // ownership (it was constructed last), hand ownership back to the
+        // live primary so the shared canvas is not torn down underneath
+        // it.  A mirror with its OWN viewType (explicit viewId) must NOT
+        // hand over: the primary only ever cleans up its own viewType on
+        // release, so handing it this one would orphan the mirror's
+        // canvas/container/owner entries forever.  Keeping ownership lets
+        // the purge below reclaim them.
         final primary = _primaryByStream[key];
         if (primary != null &&
             !primary._released &&
+            primary.viewType == viewType &&
             identical(_canvasOwners[viewType], this)) {
           _canvasOwners[viewType] = primary;
         }
@@ -1014,8 +1253,12 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
           if (mirrors.isEmpty) _mirrorsByStream.remove(key);
           promoted._isMirror = false;
           _primaryByStream[key] = promoted;
-          if (identical(_canvasOwners[viewType], this)) {
-            _canvasOwners[promoted.viewType] = promoted;
+          // Shared viewType: hand the canvas over.  Distinct viewType:
+          // the promoted instance already owns its own entries — do not
+          // touch them (and never steal ownership a newer instance holds).
+          if (identical(_canvasOwners[viewType], this) &&
+              promoted.viewType == viewType) {
+            _canvasOwners[viewType] = promoted;
           }
           logger.info(
             '[WebCodec] Promoted duplicate-stream mirror to primary '
@@ -1023,18 +1266,19 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
           );
         }
       }
-    }
 
-    // Remove canvas/container entries to free DOM elements — but only if
-    // this instance still owns them.  A newer decoder for the same stream
-    // may have adopted the elements while this one was being torn down
-    // (view switches dispose the old instance after the new one is
-    // created); deleting the entries here would kill the live instance's
-    // rendering.
-    if (identical(_canvasOwners[viewType], this)) {
-      _canvasOwners.remove(viewType);
-      _canvasElements.remove(viewType);
-      _containerElements.remove(viewType);
+      // Tear down this viewType's static registry state — but only if
+      // this instance still owns it.  A newer decoder for the same stream
+      // may have adopted the elements while this one was being torn down
+      // (view switches dispose the old instance after the new one is
+      // created); purging here would kill the live instance's rendering.
+      // When the releasing instance IS still the owner, nobody adopted
+      // the elements: the stream is going away for good, so the canvas
+      // backing stores and surface list must be reclaimed now — nothing
+      // else will ever run for this viewType.
+      if (identical(_canvasOwners[viewType], this)) {
+        _purgeViewTypeState(viewType);
+      }
     }
   }
 
@@ -1048,9 +1292,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (offscreen == null) return null;
       try {
         final options = {'type': 'image/jpeg', 'quality': 0.90}.jsify();
-        final blobAny = await offscreen
-            .convertToBlob(options as JSObject?)
-            .toDart;
+        final blobAny =
+            await offscreen.convertToBlob(options as JSObject?).toDart;
         final blob = blobAny as web.Blob;
         final reader = web.FileReader();
         final completer = Completer<Uint8List?>();
@@ -1343,9 +1586,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final spacing = _HwSlotGate.spacingDelay(now);
     if ((!_HwSlotGate.hasFreeSlot || spacing > Duration.zero) &&
         waited < _HwSlotGate.maxAdmissionWait) {
-      final retryIn = spacing > Duration.zero
-          ? spacing
-          : const Duration(milliseconds: 100);
+      final retryIn =
+          spacing > Duration.zero ? spacing : const Duration(milliseconds: 100);
       _reconfigureTimer = Timer(retryIn, () {
         _reconfigureTimer = null;
         if (!_released && !_configured && parser.isReady()) {
@@ -1399,13 +1641,11 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
       _configured = true;
       _configuredAt = DateTime.now();
-      logger.info(
-        '[WebCodec] Decoder configured: $_codecString '
-        'format=$videoFormat res=${parser.resolution.width}x${parser.resolution.height} '
-        'maxQueue=$_maxDecodeQueueSize hwAccel=$_hwAccelPreference '
-        'slots=${_HwSlotGate.slotsInUse}/${_HwSlotGate.maxSlots} '
-        'description=${_decoderDescription != null ? '${_decoderDescription!.length}B' : 'none'}',
-      );
+      logger.info('[WebCodec] Decoder configured: $_codecString '
+          'format=$videoFormat res=${parser.resolution.width}x${parser.resolution.height} '
+          'maxQueue=$_maxDecodeQueueSize hwAccel=$_hwAccelPreference '
+          'slots=${_HwSlotGate.slotsInUse}/${_HwSlotGate.maxSlots} '
+          'description=${_decoderDescription != null ? '${_decoderDescription!.length}B' : 'none'}');
 
       // Probe the browser to see if it actually chose HW or SW decoding.
       _probeHardwareAcceleration();
@@ -1563,6 +1803,10 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     // reinit cycles don't accumulate stale canvas nodes, and restore the
     // 2D canvas visibility in case the WebGPU canvas was the live one.
     if (_dewarpCanvas != null) {
+      // Zero first: a detached canvas keeps its GPU backing store alive
+      // until collected; zeroing releases it synchronously.
+      _dewarpCanvas!.width = 0;
+      _dewarpCanvas!.height = 0;
       _dewarpCanvas!.remove();
       _dewarpCanvas = null;
       if (!headless && _canvasElements.containsKey(viewType)) {
@@ -1793,9 +2037,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     bool stripped = false;
     for (int i = 0; i < boundaries.length; i++) {
       final nalDataStart = boundaries[i] + startCodeLens[i];
-      final nalDataEnd = (i + 1 < boundaries.length)
-          ? boundaries[i + 1]
-          : frame.length;
+      final nalDataEnd =
+          (i + 1 < boundaries.length) ? boundaries[i + 1] : frame.length;
       if (nalDataStart >= frame.length) continue;
 
       final nalHeader = frame[nalDataStart];
@@ -1855,9 +2098,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final buf = BytesBuilder(copy: false);
     for (int i = 0; i < boundaries.length; i++) {
       final nalDataStart = boundaries[i] + startCodeLens[i];
-      final nalDataEnd = (i + 1 < boundaries.length)
-          ? boundaries[i + 1]
-          : frame.length;
+      final nalDataEnd =
+          (i + 1 < boundaries.length) ? boundaries[i + 1] : frame.length;
       final nalLength = nalDataEnd - nalDataStart;
 
       // 4-byte big-endian length prefix
@@ -1949,8 +2191,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (pos + 4 > avcc.length) {
         return 'trailing ${avcc.length - pos}B after NAL $nals';
       }
-      final len =
-          (avcc[pos] << 24) |
+      final len = (avcc[pos] << 24) |
           (avcc[pos + 1] << 16) |
           (avcc[pos + 2] << 8) |
           avcc[pos + 3];
@@ -1990,8 +2231,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final types = <int>[];
     int pos = 0;
     while (pos + 4 < avcc.length && types.length < 8) {
-      final len =
-          (avcc[pos] << 24) |
+      final len = (avcc[pos] << 24) |
           (avcc[pos + 1] << 16) |
           (avcc[pos + 2] << 8) |
           avcc[pos + 3];
@@ -2035,57 +2275,53 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         web.BlobPropertyBag(type: 'image/jpeg'),
       ); // web.Blob
 
-      web.window
-          .createImageBitmap(blob)
-          .toDart
-          .then((web.ImageBitmap bitmap) {
-            _jpegInFlight--;
+      web.window.createImageBitmap(blob).toDart.then((web.ImageBitmap bitmap) {
+        _jpegInFlight--;
 
-            // Guard: decoder was released while the async decode was in-flight.
-            if (_released || !_canvasElements.containsKey(viewType)) {
-              bitmap.close();
-              return;
-            }
+        // Guard: decoder was released while the async decode was in-flight.
+        if (_released || !_canvasElements.containsKey(viewType)) {
+          bitmap.close();
+          return;
+        }
 
-            final w = bitmap.width;
-            final h = bitmap.height;
+        final w = bitmap.width;
+        final h = bitmap.height;
 
-            if (headless) {
-              // In headless mode, skip canvas rendering — just deliver raw JPEG.
-              bitmap.close();
-              _frameCount++;
-              renderedFrame = true;
-              pixelResolution = VideoDecoderSize(w, h);
-              callbacks?.onFrameAvailable?.call(data);
-              return;
-            }
+        if (headless) {
+          // In headless mode, skip canvas rendering — just deliver raw JPEG.
+          bitmap.close();
+          _countFrame();
+          renderedFrame = true;
+          pixelResolution = VideoDecoderSize(w, h);
+          callbacks?.onFrameAvailable?.call(data);
+          return;
+        }
 
-            // Route through WebGPU dewarper when active.
-            if (_dewarper != null && _dewarper!.isActive) {
-              _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
-              return;
-            }
+        // Route through WebGPU dewarper when active.
+        if (_dewarper != null && _dewarper!.isActive) {
+          _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
+          return;
+        }
 
-            if (canvas.width != w) canvas.width = w;
-            if (canvas.height != h) canvas.height = h;
+        if (canvas.width != w) canvas.width = w;
+        if (canvas.height != h) canvas.height = h;
 
-            ctx.drawImage(bitmap as JSObject, 0, 0, w, h);
-            bitmap.close();
+        ctx.drawImage(bitmap as JSObject, 0, 0, w, h);
+        bitmap.close();
 
-            _frameCount++;
-            renderedFrame = true;
-            pixelResolution = VideoDecoderSize(w, h);
+        _countFrame();
+        renderedFrame = true;
+        pixelResolution = VideoDecoderSize(w, h);
 
-            pacer.renderFrame(dt, renderManager.pbTime, true);
-            callbacks?.onFrameDecoded?.call((dt, null));
-            callbacks?.onFrameAvailable?.call(data);
-            onFrameRendered?.call(w, h);
-            _notifyMirrors(w, h, dt);
-          })
-          .catchError((Object e) {
-            _jpegInFlight--;
-            logger.error('[WebCodec] JPEG decode error: $e');
-          });
+        pacer.renderFrame(dt, renderManager.pbTime, true);
+        callbacks?.onFrameDecoded?.call((dt, null));
+        callbacks?.onFrameAvailable?.call(data);
+        onFrameRendered?.call(w, h);
+        _notifyMirrors(w, h, dt);
+      }).catchError((Object e) {
+        _jpegInFlight--;
+        logger.error('[WebCodec] JPEG decode error: $e');
+      });
     } catch (e) {
       _jpegInFlight--;
       logger.error('[WebCodec] JPEG feed error: $e');
@@ -2146,9 +2382,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         _useWasmFallback = true;
         _wasmInitializing = true;
         final codecName = _wasmCodecName;
-        logger.info(
-          '[WebCodec] $codecName: using WASM FFmpeg fallback decoder',
-        );
+        logger
+            .info('[WebCodec] $codecName: using WASM FFmpeg fallback decoder');
         _initWasmDecoder().then((_) {
           _wasmInitializing = false;
           // Retry this frame if it was a keyframe (needed to start decoding).
@@ -2236,16 +2471,12 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (yuvFrame == null) {
         _wasmConsecutiveNulls++;
         if (_wasmConsecutiveNulls == 30) {
-          logger.warn(
-            '[WebCodec] WASM: 30 consecutive null frames — '
-            'decoder may be stuck, waiting for keyframe to flush',
-          );
+          logger.warn('[WebCodec] WASM: 30 consecutive null frames — '
+              'decoder may be stuck, waiting for keyframe to flush');
           _wasmNeedsKeyframe = true;
         } else if (_wasmConsecutiveNulls % 100 == 0) {
-          logger.warn(
-            '[WebCodec] WASM: $_wasmConsecutiveNulls consecutive '
-            'null frames (waiting for keyframe)',
-          );
+          logger.warn('[WebCodec] WASM: $_wasmConsecutiveNulls consecutive '
+              'null frames (waiting for keyframe)');
         }
         return;
       }
@@ -2275,7 +2506,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final h = frame.height;
 
     if (headless) {
-      _frameCount++;
+      _countFrame();
       renderedFrame = true;
       pixelResolution = VideoDecoderSize(w, h);
 
@@ -2317,15 +2548,14 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
           .createImageBitmap(imageData as JSObject)
           .toDart
           .then((web.ImageBitmap bitmap) {
-            if (_released || !_canvasElements.containsKey(viewType)) {
-              bitmap.close();
-              return;
-            }
-            _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
-          })
-          .catchError((Object e) {
-            logger.error('[WebCodec] MPEG4 dewarp bitmap creation failed: $e');
-          });
+        if (_released || !_canvasElements.containsKey(viewType)) {
+          bitmap.close();
+          return;
+        }
+        _dewarpJpegFrame(bitmap as JSObject, w, h, dt);
+      }).catchError((Object e) {
+        logger.error('[WebCodec] MPEG4 dewarp bitmap creation failed: $e');
+      });
       return;
     }
 
@@ -2336,7 +2566,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     final imageData = _createImageData(frame.rgba, w, h);
     _putImageData(imageData, 0, 0);
 
-    _frameCount++;
+    _countFrame();
     renderedFrame = true;
     pixelResolution = VideoDecoderSize(w, h);
 
@@ -2357,23 +2587,17 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       try {
         _webglYuvRenderer = _JSWebGLYuvRenderer(canvas as JSObject);
         if (!_webglYuvRenderer!.init()) {
-          logger.warn(
-            '[WebCodec] WebGL YUV renderer init failed, '
-            'falling back to RGBA path',
-          );
+          logger.warn('[WebCodec] WebGL YUV renderer init failed, '
+              'falling back to RGBA path');
           _webglYuvRenderer = null;
           _webglYuvFailed = true;
           return;
         }
-        logger.info(
-          '[WebCodec] WebGL YUV renderer active — '
-          'GPU color conversion enabled',
-        );
+        logger.info('[WebCodec] WebGL YUV renderer active — '
+            'GPU color conversion enabled');
       } catch (e) {
-        logger.warn(
-          '[WebCodec] WebGL YUV renderer error: $e, '
-          'falling back to RGBA path',
-        );
+        logger.warn('[WebCodec] WebGL YUV renderer error: $e, '
+            'falling back to RGBA path');
         _webglYuvFailed = true;
         return;
       }
@@ -2391,7 +2615,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       h,
     );
 
-    _frameCount++;
+    _countFrame();
     renderedFrame = true;
     pixelResolution = VideoDecoderSize(w, h);
 
@@ -2405,9 +2629,10 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   // — Decoded frame callback ————————————————————————————————————
 
   void _onDecodedFrame(_JSVideoFrame frame) {
-    // If _decoder is null, this frame is arriving from a decoder we are
-    // disposing.  Close the VideoFrame immediately to free GPU memory.
-    if (_decoder == null) {
+    // If _decoder is null (or this instance was released), this frame is
+    // arriving from a decoder we are disposing.  Close the VideoFrame
+    // immediately to free GPU memory.
+    if (_released || _decoder == null) {
       try {
         frame.close();
       } catch (_) {}
@@ -2493,7 +2718,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     ctx.drawImage(frame as JSObject, 0, 0, w, h);
     frame.close();
 
-    _frameCount++;
+    _countFrame();
     renderedFrame = true;
     pixelResolution = VideoDecoderSize(w, h);
     _markDecodeSuccess();
@@ -2518,7 +2743,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     // If we've been decoding successfully for a while, clear the recovery
     // failure counter so the next transient error doesn't immediately throttle.
     if (_recoveryFailures > 0 &&
-        DateTime.now().difference(_configuredAt) > const Duration(seconds: 5)) {
+        DateTime.now().difference(_configuredAt) >
+            const Duration(seconds: 5)) {
       _recoveryFailures = 0;
     }
   }
@@ -2529,8 +2755,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   /// canvas when dewarping, otherwise the shared 2D canvas).
   web.HTMLCanvasElement? get _visibleSourceCanvas =>
       (_dewarper?.isActive ?? false) && _dewarpCanvas != null
-      ? _dewarpCanvas
-      : _canvasElements[viewType];
+          ? _dewarpCanvas
+          : _canvasElements[viewType];
 
   /// Called after every rendered frame: repaint the extra platform-view
   /// wrappers of this viewType (same stream shown in several tiles of one
@@ -2588,7 +2814,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       }
       // Same shared canvas: the pixels are already there (and extra tiles
       // are covered by the wrapper-level mirrors) — bookkeeping only.
-      _frameCount++;
+      _countFrame();
       renderedFrame = true;
       pixelResolution = VideoDecoderSize(w, h);
       pacer.feedFrame(dt);
@@ -2658,7 +2884,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         logger.info('[WebCodec] Dewarp frame #$_dewarpFrameCount rendered');
       }
 
-      _frameCount++;
+      _countFrame();
       renderedFrame = true;
       pixelResolution = VideoDecoderSize(outW, outH);
       _markDecodeSuccess();
@@ -2726,7 +2952,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         logger.info('[WebCodec] Dewarp frame #$_dewarpFrameCount rendered');
       }
 
-      _frameCount++;
+      _countFrame();
       renderedFrame = true;
       pixelResolution = VideoDecoderSize(outW, outH);
 
@@ -2763,7 +2989,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       _offscreenCtx!.drawImage(frame as JSObject, 0, 0, w, h);
       frame.close();
 
-      _frameCount++;
+      _countFrame();
       renderedFrame = true;
       pixelResolution = VideoDecoderSize(w, h);
       _markDecodeSuccess();
@@ -2839,43 +3065,38 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
         'hardwareAcceleration': _hwAccelPreference,
         if (_decoderDescription != null)
           'description': _decoderDescription!.toJS,
-        if (parser.resolution.width > 0) 'codedWidth': parser.resolution.width,
+        if (parser.resolution.width > 0)
+          'codedWidth': parser.resolution.width,
         if (parser.resolution.height > 0)
           'codedHeight': parser.resolution.height,
       }.jsify();
-      _JSVideoDecoderStatic.isConfigSupported(probeConfig as JSObject).toDart
+      _JSVideoDecoderStatic.isConfigSupported(probeConfig as JSObject)
+          .toDart
           .then((result) {
-            final r = result as _ConfigSupportResult;
-            if (r.supported && r.config != null) {
-              _hwAccelStatus = r.config!.hardwareAcceleration;
-              logger.info(
-                '[WebCodec] HW accel probe: $_hwAccelStatus '
-                '(codec=$_codecString format=$videoFormat)',
-              );
-            } else if (!r.supported) {
-              _hwAccelStatus = 'unsupported';
-              // Don't dispose an already-configured decoder based solely on
-              // isConfigSupported — configure() is authoritative.  Some browsers
-              // (Firefox) return false from isConfigSupported for HEVC but still
-              // decode successfully once configured.  Let actual decode errors
-              // trigger the WASM fallback instead.
-              logger.warn(
-                '[WebCodec] isConfigSupported returned false for '
-                '"$_codecString" — decoder already configured, will attempt '
-                'decoding and fall back on actual error',
-              );
-            } else {
-              _hwAccelStatus = 'supported (detail N/A)';
-              logger.info(
-                '[WebCodec] HW accel probe: $_hwAccelStatus '
-                '(codec=$_codecString format=$videoFormat)',
-              );
-            }
-          })
-          .catchError((Object e) {
-            _hwAccelStatus = 'probe-failed';
-            logger.warn('[WebCodec] HW accel probe failed: $e');
-          });
+        final r = result as _ConfigSupportResult;
+        if (r.supported && r.config != null) {
+          _hwAccelStatus = r.config!.hardwareAcceleration;
+          logger.info('[WebCodec] HW accel probe: $_hwAccelStatus '
+              '(codec=$_codecString format=$videoFormat)');
+        } else if (!r.supported) {
+          _hwAccelStatus = 'unsupported';
+          // Don't dispose an already-configured decoder based solely on
+          // isConfigSupported — configure() is authoritative.  Some browsers
+          // (Firefox) return false from isConfigSupported for HEVC but still
+          // decode successfully once configured.  Let actual decode errors
+          // trigger the WASM fallback instead.
+          logger.warn('[WebCodec] isConfigSupported returned false for '
+              '"$_codecString" — decoder already configured, will attempt '
+              'decoding and fall back on actual error');
+        } else {
+          _hwAccelStatus = 'supported (detail N/A)';
+          logger.info('[WebCodec] HW accel probe: $_hwAccelStatus '
+              '(codec=$_codecString format=$videoFormat)');
+        }
+      }).catchError((Object e) {
+        _hwAccelStatus = 'probe-failed';
+        logger.warn('[WebCodec] HW accel probe failed: $e');
+      });
     } catch (e) {
       _hwAccelStatus = 'probe-error';
       logger.warn('[WebCodec] HW accel probe error: $e');
@@ -2899,11 +3120,9 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     if (msg.contains('NotSupportedError')) {
       _notSupportedStrikes++;
       if (_notSupportedStrikes >= _maxNotSupportedStrikes) {
-        logger.warn(
-          '[WebCodec] Codec "$_codecString" is not supported by this '
-          'browser — stream cannot be decoded '
-          '(format=$videoFormat)',
-        );
+        logger.warn('[WebCodec] Codec "$_codecString" is not supported by this '
+            'browser — stream cannot be decoded '
+            '(format=$videoFormat)');
         _codecUnsupported = true;
         _disposeDecoder();
         _configured = false;
@@ -3234,7 +3453,9 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     switch (videoFormat) {
       case VideoFormat.h265:
         if (parser is! H265Parser) return null;
-        return config.buildHEVCDecoderConfigurationRecord(parser as H265Parser);
+        return config.buildHEVCDecoderConfigurationRecord(
+          parser as H265Parser,
+        );
       case VideoFormat.h264:
         if (parser is! H264Parser) return null;
         return config.buildAVCDecoderConfigurationRecord(parser as H264Parser);
