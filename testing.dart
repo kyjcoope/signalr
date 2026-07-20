@@ -467,6 +467,64 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   /// The presentation pacer instance (created during [_configureDecoder]).
   WebFramePacer? _framePacer;
 
+  // — Pacer VideoFrame leak guard ————————————————————————————————
+  //
+  // Ownership of decoded VideoFrames transfers to the pacer at
+  // enqueueFrame; if any pacer path (flush, buffer eviction, dispose)
+  // drops a frame without close(), its GPU/IOSurface backing (4-12MB at
+  // these resolutions) stays pinned until the JS garbage collector
+  // happens to finalise the wrapper — producing tab memory that grows
+  // with every view switch and only drains slowly and unpredictably.
+  // This guard tracks every frame handed over and force-closes anything
+  // the pacer can no longer legitimately hold.  VideoFrame.close() is a
+  // spec'd no-op on an already-closed frame, so double-closing frames
+  // the pacer DID handle correctly is safe.
+
+  /// Frames handed to the pacer and not yet seen back in [_onPacerPresent].
+  final List<JSObject> _pacerInFlight = [];
+
+  /// Cumulative count of frames force-closed by the guard (all
+  /// instances).  A steadily climbing value in the audit line means the
+  /// pacer is dropping frames without closing them.
+  static int _pacerForceClosed = 0;
+
+  /// Slack above the pacer's buffer capacity for frames popped for
+  /// presentation but not yet drawn.
+  static const int _pacerTrackSlack = 2;
+
+  void _trackPacerFrame(JSObject frame) {
+    _pacerInFlight.add(frame);
+    final pacer = _framePacer;
+    if (pacer == null) return;
+    final cap = pacer.maxBufferFrames + _pacerTrackSlack;
+    while (_pacerInFlight.length > cap) {
+      final oldest = _pacerInFlight.removeAt(0);
+      _pacerForceClosed++;
+      try {
+        _JSVideoFrameClose(oldest).close();
+      } catch (_) {}
+    }
+  }
+
+  /// Close every tracked frame (no-op for frames the pacer already
+  /// closed) and clear the list.  Called whenever the pacer's buffer is
+  /// known to be empty or gone: flush and dispose.
+  void _closeTrackedPacerFrames() {
+    for (final f in _pacerInFlight) {
+      try {
+        _JSVideoFrameClose(f).close();
+      } catch (_) {}
+    }
+    _pacerInFlight.clear();
+  }
+
+  /// Flush the pacer and reclaim any frames it dropped without closing.
+  void _flushPacer() {
+    final pacer = _framePacer;
+    pacer?.flush();
+    _closeTrackedPacerFrames();
+  }
+
   // — Dewarp state ————————————————————————————————————————————
   WebGpuDewarper? _dewarper;
   bool _dewarpInitializing = false;
@@ -780,7 +838,8 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
 
     var primaries = 0, mirrors = 0, headlessN = 0;
     var decodersOpen = 0, queueSum = 0, zombies = 0;
-    var estBytes = 0;
+    var estBytes = 0, pacerHeld = 0;
+    var zombieTail = '';
     for (final d in _liveInstances) {
       if (d.headless) {
         headlessN++;
@@ -798,11 +857,21 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (dc != null) estBytes += dc.width * dc.height * 4;
       final oc = d._offscreenCanvas;
       if (oc != null) estBytes += oc.width * oc.height * 4;
+      pacerHeld += d._pacerInFlight.length;
       if (!d.headless) {
         final surfaces = _viewSurfaces[d.viewType];
         final connected =
             surfaces?.where((s) => s.wrapper.isConnected).length ?? 0;
-        if (connected == 0) zombies++;
+        if (connected == 0) {
+          zombies++;
+          if (zombieTail.isEmpty) {
+            // Identify the first zombie so the invisible stream can be
+            // traced back to its tile in the app.
+            zombieTail = d.viewType.length > 28
+                ? '…${d.viewType.substring(d.viewType.length - 28)}'
+                : d.viewType;
+          }
+        }
       }
     }
     for (final c in _canvasElements.values) {
@@ -838,7 +907,9 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       'surfaces=$surfaceCount (connected=$surfaceConnected '
       'hidden=$surfaceHidden mirrorCanvases=$mirrorCanvases) '
       'estCanvasMB=${(estBytes / (1024 * 1024)).toStringAsFixed(1)} '
-      'framesRendered10s=$framesSince zombies=$zombies '
+      'framesRendered10s=$framesSince '
+      'pacerHeld=$pacerHeld pacerForceClosed=$_pacerForceClosed '
+      'zombies=$zombies${zombieTail.isEmpty ? '' : '($zombieTail)'} '
       'streams=${_primaryByStream.length}p/${_mirrorsByStream.length}m',
     );
   }
@@ -1205,7 +1276,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   void sendFlush() {
     if (_isMirror) return;
     _needsKeyframe = true;
-    _framePacer?.flush();
+    _flushPacer();
     pacer.cancelNoFramesTimer();
     if (_decoder != null && _decoder!.state != 'closed') {
       _decoder!.flush().toDart.catchError((Object e) {
@@ -1236,7 +1307,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       'sinceConfigure=${DateTime.now().difference(_configuredAt).inMilliseconds}ms)',
     );
     _needsKeyframe = true;
-    _framePacer?.flush();
+    _flushPacer();
     // The stream is alive (keyframe just arrived) — cancel any pending
     // no-video timer so it doesn't fire during the reset/recovery window.
     pacer.cancelNoFramesTimer();
@@ -1723,6 +1794,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       if (usePresentationPacer && !headless) {
         final pacerFps = pacer.camFPS > 0 ? pacer.camFPS : 30;
         _framePacer?.dispose();
+        _closeTrackedPacerFrames();
         _framePacer = WebFramePacer(
           logger: logger,
           // Keep the presentation buffer small (~0.25 s) so that:
@@ -1857,9 +1929,11 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     _webglYuvRenderer?.destroy();
     _webglYuvRenderer = null;
     _webglYuvFailed = false;
-    // Dispose presentation pacer
+    // Dispose presentation pacer, reclaiming any frames it dropped
+    // without closing.
     _framePacer?.dispose();
     _framePacer = null;
+    _closeTrackedPacerFrames();
     // Cancel the DecoderPacer no-frames timer so it doesn't fire during
     // stream close/restart and produce a false Video Loss overlay.
     pacer.cancelNoFramesTimer();
@@ -1941,7 +2015,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
           'GPU memory',
         );
         _needsKeyframe = true;
-        _framePacer?.flush();
+        _flushPacer();
         try {
           if (_decoder!.state != 'closed') {
             _decoder!.reset();
@@ -2761,6 +2835,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       // The pacer buffers frames and presents one per vsync via rAF.
       if (_framePacer != null) {
         _framePacer!.enqueueFrame(frame as JSObject, ts, w, h);
+        _trackPacerFrame(frame as JSObject);
         return;
       }
 
@@ -2780,6 +2855,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
   /// Callback from [WebFramePacer.onPresent] — draws the frame to canvas
   /// and fires all the post-render hooks.
   void _onPacerPresent(JSObject frame, int w, int h) {
+    _pacerInFlight.remove(frame);
     try {
       _drawFrameToCanvas(_JSVideoFrame(frame), w, h);
     } catch (e, st) {
@@ -3260,7 +3336,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
     // queued delta frames will each trigger another error.
     _needsKeyframe = true;
     // Flush the presentation pacer so stale frames don't block new ones.
-    _framePacer?.flush();
+    _flushPacer();
     // Cancel the no-frames timer — the decoder is recovering, not truly lost.
     // Without this, the 5-second timer fires during the keyframe wait window
     // and triggers a false Video Loss overlay in the UI.
@@ -3293,7 +3369,7 @@ class WebCodecDecoder<T extends IVideoFrame> extends VideoDecoder<T> {
       } catch (_) {}
       _decoder = null;
       _configured = false;
-      _framePacer?.flush();
+      _flushPacer();
       _recovering = false;
       // Release the hardware slot for the duration of the cooldown so
       // other streams aren't starved by a decoder that isn't decoding.
