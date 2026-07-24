@@ -51,6 +51,7 @@ class FirebaseService {
   static JSFunction? _beforeUnloadListener;
   static int _leasePostSequence = 0;
   static bool _leaseWorkerMissingLogged = false;
+  static bool? _lastLoggedActiveLeaseState;
   static DateTime? _lastLeaseWarningAt;
 
   static final Map<String, DateTime> _seenIncomingPushes = {};
@@ -401,6 +402,7 @@ class FirebaseService {
     _activeLeaseTimer?.cancel();
     _activeLeaseTimer = null;
     _postActiveLease(active: false);
+    _lastLoggedActiveLeaseState = null;
     _removeActiveLeaseListeners();
     Logger().info('[PushNotify] Active-tab lease heartbeat disposed');
   }
@@ -464,7 +466,18 @@ class FirebaseService {
   void _syncActiveLease() {
     if (!_activeLeaseInitialized) return;
 
-    if (_shouldHoldActiveLease()) {
+    final active = _shouldHoldActiveLease();
+    if (_lastLoggedActiveLeaseState != active) {
+      _lastLoggedActiveLeaseState = active;
+      Logger().info(
+        '[PushNotify] Active-tab state changed: active=$active '
+        'visibility=${web.document.visibilityState} '
+        'focused=${web.document.hasFocus()} '
+        'lifecycleResumed=$_lifecycleResumed',
+      );
+    }
+
+    if (active) {
       _activeLeaseTimer ??= Timer.periodic(
         _activeLeaseInterval,
         (_) => _postActiveLease(active: true),

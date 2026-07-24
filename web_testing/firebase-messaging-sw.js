@@ -6,7 +6,7 @@
 // - Prefer Cache-Control: no-cache so worker updates are discovered promptly.
 // - Do not add Firebase CDN importScripts() calls to this worker.
 
-const WORKER_VERSION = '2026-07-24.1';
+const WORKER_VERSION = '2026-07-24.2';
 const ACTIVE_LEASE_TTL_MS = 15000;
 const PUSH_DEDUP_TTL_MS = 8000;
 const CLIENT_READY_TIMEOUT_MS = 10000;
@@ -183,13 +183,27 @@ async function postPushToActiveClient(payload) {
 
   const clients = await matchingWindowClients();
   const clientsById = new Map(clients.map((client) => [client.id, client]));
-  const leases = Array.from(activeTabLeases.values()).sort(
-    (a, b) => b.lastSeenAt - a.lastSeenAt,
+  const leases = Array.from(activeTabLeases.entries()).sort(
+    ([, a], [, b]) => b.lastSeenAt - a.lastSeenAt,
   );
 
-  for (const lease of leases) {
+  for (const [tabId, lease] of leases) {
     const client = clientsById.get(lease.clientId);
-    if (!client) continue;
+    if (!client) {
+      activeTabLeases.delete(tabId);
+      continue;
+    }
+
+    // A heartbeat is only a candidate signal. Recheck the browser's live
+    // WindowClient state at delivery time so a recently minimized window,
+    // background tab, or stale lease cannot receive foreground UI.
+    if (
+      client.visibilityState !== 'visible' ||
+      client.focused !== true
+    ) {
+      activeTabLeases.delete(tabId);
+      continue;
+    }
 
     return postJson(client, {
       type: 'FCM_PUSH',
