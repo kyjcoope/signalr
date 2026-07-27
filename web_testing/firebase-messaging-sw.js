@@ -6,7 +6,7 @@
 // - Prefer Cache-Control: no-cache so worker updates are discovered promptly.
 // - Do not add Firebase CDN importScripts() calls to this worker.
 
-const WORKER_VERSION = '2026-07-24.2';
+const WORKER_VERSION = '2026-07-27.1';
 const ACTIVE_LEASE_TTL_MS = 15000;
 const PUSH_DEDUP_TTL_MS = 8000;
 const CLIENT_READY_TIMEOUT_MS = 10000;
@@ -215,6 +215,37 @@ async function postPushToActiveClient(payload) {
   return false;
 }
 
+function bestClientForBackgroundCache(clientList) {
+  const readyClients = clientList.filter((client) =>
+    readyClientIds.has(client.id),
+  );
+  const candidates = readyClients.length > 0 ? readyClients : clientList;
+
+  return (
+    candidates.find((client) => client.visibilityState === 'visible') ||
+    candidates[0] ||
+    null
+  );
+}
+
+async function postPushToBackgroundClient(payload) {
+  const clients = await matchingWindowClients();
+  const client = bestClientForBackgroundCache(clients);
+  if (!client) return false;
+
+  // Send to one tab only. All same-origin tabs may share the persistent
+  // notification cache, so broadcasting would risk duplicate history rows.
+  return postMessageWhenClientReady(
+    client,
+    {
+      type: 'FCM_PUSH_CACHE_ONLY',
+      workerVersion: WORKER_VERSION,
+      payload,
+    },
+    false,
+  );
+}
+
 function bestClientForClick(clientList) {
   cleanupExpiredLeases();
   const clientsById = new Map(clientList.map((client) => [client.id, client]));
@@ -235,7 +266,7 @@ function bestClientForClick(clientList) {
   );
 }
 
-async function postClickWhenClientReady(client, clickMessage, waitForReady) {
+async function postMessageWhenClientReady(client, message, waitForReady) {
   if (!client) return false;
 
   if (waitForReady || !readyClientIds.has(client.id)) {
@@ -249,7 +280,7 @@ async function postClickWhenClientReady(client, clickMessage, waitForReady) {
     );
   }
 
-  return postJson(client, clickMessage);
+  return postJson(client, message);
 }
 
 self.addEventListener('message', (event) => {
@@ -314,7 +345,7 @@ self.addEventListener('notificationclick', (event) => {
     matchingWindowClients().then(async (clientList) => {
       if (clientList.length > 0) {
         const client = bestClientForClick(clientList);
-        await postClickWhenClientReady(client, clickMessage, false);
+        await postMessageWhenClientReady(client, clickMessage, false);
         if (client && client.focus) {
           await client.focus();
         }
@@ -326,7 +357,7 @@ self.addEventListener('notificationclick', (event) => {
       const openedClient = await self.clients.openWindow(route || '/');
       if (!openedClient) return;
 
-      await postClickWhenClientReady(openedClient, clickMessage, true);
+      await postMessageWhenClientReady(openedClient, clickMessage, true);
       if (openedClient.focus) {
         await openedClient.focus();
       }
@@ -377,9 +408,18 @@ self.addEventListener('push', (event) => {
   };
 
   event.waitUntil(
-    postPushToActiveClient(payload).then((delivered) => {
-      if (delivered) return undefined;
-      return self.registration.showNotification(title, options);
-    }),
+    postPushToActiveClient(payload)
+      .catch(() => false)
+      .then(async (delivered) => {
+        if (delivered) return undefined;
+
+        // Preserve the event in one open Flutter tab while the worker remains
+        // solely responsible for the background system notification.
+        await Promise.all([
+          postPushToBackgroundClient(payload).catch(() => false),
+          self.registration.showNotification(title, options),
+        ]);
+        return undefined;
+      }),
   );
 });

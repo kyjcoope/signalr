@@ -6,6 +6,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:web/web.dart' as web;
 
+import '../../event_monitoring/web_alert_stream_manager.dart';
 import '../../firebase_options.dart';
 import '../../logging/logger.dart';
 import '../../nav_bar/global_navigation_manager.dart';
@@ -30,8 +31,13 @@ class FirebaseService {
   static const Duration _workerReadyTimeout = Duration(seconds: 12);
   static const Duration _activeLeaseInterval = Duration(seconds: 4);
   static const Duration _incomingPushDedupTtl = Duration(seconds: 8);
+  static const Duration _eventMonitoringDedupTtl = Duration(seconds: 60);
+  static const Duration _crossTabDedupTtl = Duration(hours: 24);
   static const Duration _notificationClickDedupTtl = Duration(seconds: 30);
   static const Duration _leaseWarningInterval = Duration(seconds: 30);
+  static const String _crossTabDedupStorageKey =
+      'exacq.push-notification-seen.v1';
+  static const int _crossTabDedupMaxEntries = 512;
 
   static bool _initialized = false;
   static bool _messageHandlersInitialized = false;
@@ -300,20 +306,38 @@ class FirebaseService {
       FirebaseMessaging.onMessageOpenedApp.listen(_notificationClickHandler);
     }
     _initializeServiceWorkerClickHandler();
+    WebAlertStreamManager().initialize(
+      onMessage: _eventPublisherMessageHandler,
+      active: _shouldHoldActiveLease(),
+    );
   }
 
-  Future<void> _foregroundMessageHandler(RemoteMessage message) async {
+  Future<void> _foregroundMessageHandler(RemoteMessage message) =>
+      _handleForegroundMessage(message, source: 'fcm');
+
+  Future<void> _eventPublisherMessageHandler(RemoteMessage message) =>
+      _handleForegroundMessage(message, source: 'eventPublisher');
+
+  Future<void> _handleForegroundMessage(
+    RemoteMessage message, {
+    required String source,
+    bool allowDisplay = true,
+  }) async {
     Logger().info(
-      '[PushNotify] foreground message received: '
+      '[PushNotify] $source message received: '
       'title="${message.notification?.title}" '
       'key=${message.data["key"]}',
     );
 
+    if (_isDuplicateIncomingPush(message, source: source)) return;
+
+    // Recording an incoming notification is independent from presenting it.
+    // Background worker deliveries must still populate the in-app history.
+    await _cacheIncomingMessage(message, source: source);
+
     // The messaging worker is solely responsible for native notifications.
     // A hidden/non-focused tab must never create another notification.
-    if (!_shouldHoldActiveLease()) return;
-
-    if (_isDuplicateIncomingPush(message, source: 'foreground')) return;
+    if (!allowDisplay || !_shouldHoldActiveLease()) return;
 
     final currentContext = NavigationManager().navigatorKey.currentContext;
     final navBarContext = NavBarNavigationManager().navigatorKey.currentContext;
@@ -321,12 +345,6 @@ class FirebaseService {
         currentContext == null ||
         navBarContext == null) {
       return;
-    }
-
-    try {
-      await PushNotificationsCacheManager().putPushNotification(message);
-    } catch (e) {
-      Logger().error('Web: failed to cache push notification: $e');
     }
 
     if (!currentContext.mounted) return;
@@ -361,12 +379,22 @@ class FirebaseService {
       'title="${message.notification?.title}" '
       'key=${message.data["key"]}',
     );
-    try {
-      await PushNotificationsCacheManager().putPushNotification(message);
-    } catch (e) {
-      Logger().error('Web: failed to cache push notification on click: $e');
+    if (!_isDuplicateIncomingPush(message, source: 'fcm.click')) {
+      await _cacheIncomingMessage(message, source: 'fcm.click');
     }
     await _routeNotificationWithRetries(message, source: 'onMessageOpenedApp');
+  }
+
+  Future<void> _cacheIncomingMessage(
+    RemoteMessage message, {
+    required String source,
+  }) async {
+    try {
+      await PushNotificationsCacheManager().putPushNotification(message);
+      Logger().info('[PushNotify] $source message cached');
+    } catch (e) {
+      Logger().error('[PushNotify] $source message could not be cached: $e');
+    }
   }
 
   Future<AuthorizationStatus> checkNotificationStatus() async {
@@ -402,6 +430,7 @@ class FirebaseService {
     _activeLeaseTimer?.cancel();
     _activeLeaseTimer = null;
     _postActiveLease(active: false);
+    WebAlertStreamManager().setAppActive(false);
     _lastLoggedActiveLeaseState = null;
     _removeActiveLeaseListeners();
     Logger().info('[PushNotify] Active-tab lease heartbeat disposed');
@@ -415,7 +444,9 @@ class FirebaseService {
     _seenIncomingPushes.removeWhere((_, expiresAt) => expiresAt.isBefore(now));
 
     final fingerprint = _incomingPushFingerprint(message);
-    if (_seenIncomingPushes.containsKey(fingerprint)) {
+    final crossTabSeen = _readCrossTabSeenPushes(now);
+    if (_seenIncomingPushes.containsKey(fingerprint) ||
+        crossTabSeen.containsKey(fingerprint)) {
       Logger().info(
         '[PushNotify] Duplicate $source push suppressed: '
         'fingerprint=$fingerprint',
@@ -423,11 +454,83 @@ class FirebaseService {
       return true;
     }
 
-    _seenIncomingPushes[fingerprint] = now.add(_incomingPushDedupTtl);
+    final ttl = _isEventMonitoringMessage(message)
+        ? _eventMonitoringDedupTtl
+        : _incomingPushDedupTtl;
+    _seenIncomingPushes[fingerprint] = now.add(ttl);
+    crossTabSeen[fingerprint] = now.add(_crossTabDedupTtl);
+    _writeCrossTabSeenPushes(crossTabSeen);
     return false;
   }
 
+  static Map<String, DateTime> _readCrossTabSeenPushes(DateTime now) {
+    try {
+      final encoded = web.window.localStorage.getItem(_crossTabDedupStorageKey);
+      if (encoded == null || encoded.isEmpty) return {};
+
+      final decoded = jsonDecode(encoded);
+      if (decoded is! Map) return {};
+
+      final seen = <String, DateTime>{};
+      for (final entry in decoded.entries) {
+        final expiresAtMs = entry.value is num
+            ? (entry.value as num).toInt()
+            : int.tryParse(entry.value.toString());
+        if (expiresAtMs == null) continue;
+
+        final expiresAt = DateTime.fromMillisecondsSinceEpoch(expiresAtMs);
+        if (expiresAt.isAfter(now)) {
+          seen[entry.key.toString()] = expiresAt;
+        }
+      }
+      return seen;
+    } catch (error) {
+      Logger().warn(
+        '[PushNotify] Cross-tab duplicate cache unavailable: $error',
+      );
+      return {};
+    }
+  }
+
+  static void _writeCrossTabSeenPushes(Map<String, DateTime> seen) {
+    try {
+      final entries = seen.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      final trimmed = entries.take(_crossTabDedupMaxEntries);
+      web.window.localStorage.setItem(
+        _crossTabDedupStorageKey,
+        jsonEncode({
+          for (final entry in trimmed)
+            entry.key: entry.value.millisecondsSinceEpoch,
+        }),
+      );
+    } catch (error) {
+      Logger().warn(
+        '[PushNotify] Failed updating cross-tab duplicate cache: $error',
+      );
+    }
+  }
+
   static String _incomingPushFingerprint(RemoteMessage message) {
+    if (_isEventMonitoringMessage(message)) {
+      final serverIdentity = _dataString(message, 'server_serial').isNotEmpty
+          ? _dataString(message, 'server_serial')
+          : _dataString(message, 'server_name');
+      final linkGuid = _dataString(message, 'link_guid');
+      final eventType = _dataString(message, 'event_type');
+      final sourceId = _dataString(message, 'source_id');
+      final eventTime = _normalizedEventTime(message.data['time']);
+
+      if (serverIdentity.isNotEmpty &&
+          linkGuid.isNotEmpty &&
+          eventType.isNotEmpty &&
+          sourceId.isNotEmpty &&
+          eventTime.isNotEmpty) {
+        return 'eventMonitor:$serverIdentity|$linkGuid|'
+            '$eventType|$sourceId|$eventTime';
+      }
+    }
+
     final messageId = message.messageId;
     if (messageId != null && messageId.isNotEmpty) {
       return 'messageId:$messageId';
@@ -442,6 +545,38 @@ class FirebaseService {
         .map((entry) => '${entry.key}=${entry.value}')
         .join('&');
     return 'fallback:$sentAt|$title|$body|$dataSignature';
+  }
+
+  static bool _isEventMonitoringMessage(RemoteMessage message) =>
+      _dataString(message, 'key') == 'event_monitor_profile';
+
+  static String _dataString(RemoteMessage message, String key) =>
+      message.data[key]?.toString().trim() ?? '';
+
+  static String _normalizedEventTime(dynamic raw) {
+    if (raw == null) return '';
+
+    if (raw is num) {
+      final value = raw.toInt();
+      if (value.abs() >= 1000000000000) {
+        return (value ~/ 1000).toString();
+      }
+      return value.toString();
+    }
+
+    final text = raw.toString().trim();
+    if (text.isEmpty) return '';
+    final numeric = int.tryParse(text);
+    if (numeric != null) {
+      if (numeric.abs() >= 1000000000000) {
+        return (numeric ~/ 1000).toString();
+      }
+      return numeric.toString();
+    }
+
+    final parsed = DateTime.tryParse(text);
+    if (parsed == null) return text;
+    return (parsed.toUtc().millisecondsSinceEpoch ~/ 1000).toString();
   }
 
   static bool _isDuplicateNotificationClick(String? clickId) {
@@ -467,6 +602,7 @@ class FirebaseService {
     if (!_activeLeaseInitialized) return;
 
     final active = _shouldHoldActiveLease();
+    WebAlertStreamManager().setAppActive(active);
     if (_lastLoggedActiveLeaseState != active) {
       _lastLoggedActiveLeaseState = active;
       Logger().info(
@@ -715,22 +851,20 @@ class FirebaseService {
         return;
       }
 
-      if (type == 'FCM_PUSH') {
-        final rawPayload = message['payload'];
-        if (rawPayload is! Map) return;
+      if (type == 'FCM_PUSH' || type == 'FCM_PUSH_CACHE_ONLY') {
+        final remoteMessage = _remoteMessageFromWorkerPayload(
+          message['payload'],
+        );
+        if (remoteMessage == null) return;
 
-        final payload = Map<String, dynamic>.from(rawPayload);
-        final rawData = payload['data'];
-        final rawNotification = payload['notification'];
-        final remoteMessage = RemoteMessage.fromMap({
-          ...payload,
-          'data': rawData is Map
-              ? Map<String, dynamic>.from(rawData)
-              : <String, dynamic>{},
-          if (rawNotification is Map)
-            'notification': Map<String, dynamic>.from(rawNotification),
-        });
-        unawaited(_foregroundMessageHandler(remoteMessage));
+        final cacheOnly = type == 'FCM_PUSH_CACHE_ONLY';
+        unawaited(
+          _handleForegroundMessage(
+            remoteMessage,
+            source: cacheOnly ? 'fcm.worker.background' : 'fcm.worker.active',
+            allowDisplay: !cacheOnly,
+          ),
+        );
         return;
       }
 
@@ -757,13 +891,24 @@ class FirebaseService {
           ? Map<String, dynamic>.from(rawPayload)
           : null;
 
-      final clickMessage = RemoteMessage(
-        data: payload ?? {},
-        notification: RemoteNotification(
-          title: payload?['title'] as String?,
-          body: payload?['body'] as String?,
-        ),
-      );
+      final clickMessage =
+          _remoteMessageFromWorkerPayload(payload) ??
+          RemoteMessage(
+            data: payload ?? {},
+            notification: RemoteNotification(
+              title: payload?['title'] as String?,
+              body: payload?['body'] as String?,
+            ),
+          );
+
+      if (!_isDuplicateIncomingPush(
+        clickMessage,
+        source: 'serviceWorker.click',
+      )) {
+        unawaited(
+          _cacheIncomingMessage(clickMessage, source: 'serviceWorker.click'),
+        );
+      }
 
       if (deepLink != null || route != null) {
         unawaited(
@@ -783,5 +928,26 @@ class FirebaseService {
         '$e\n$stackTrace',
       );
     }
+  }
+
+  RemoteMessage? _remoteMessageFromWorkerPayload(dynamic rawPayload) {
+    if (rawPayload is! Map) return null;
+
+    final outerPayload = Map<String, dynamic>.from(rawPayload);
+    final rawFcmPayload = outerPayload['FCM_MSG'];
+    final payload = rawFcmPayload is Map
+        ? Map<String, dynamic>.from(rawFcmPayload)
+        : outerPayload;
+    final rawData = payload['data'];
+    final rawNotification = payload['notification'];
+
+    return RemoteMessage.fromMap({
+      ...payload,
+      'data': rawData is Map
+          ? Map<String, dynamic>.from(rawData)
+          : <String, dynamic>{},
+      if (rawNotification is Map)
+        'notification': Map<String, dynamic>.from(rawNotification),
+    });
   }
 }
