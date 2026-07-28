@@ -35,7 +35,6 @@ class SimplePopupMenu<T> extends StatefulWidget {
 class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
   static const double _menuGap = 8;
   static const double _screenMargin = 8;
-  static const double _menuEdgePadding = 8;
 
   final LayerLink _layerLink = LayerLink();
 
@@ -48,14 +47,13 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
       for (var index = 0; index < items.length; index++) ...[
         PopupMenuItem<T>(
           /*
-           * The former outer menu padding is moved inside the first
-           * and last items. This keeps the same overall menu dimensions
-           * while allowing their hover highlights to reach the edges.
+           * All items use identical padding so the first and last
+           * entries remain the same height as the middle entries.
+           *
+           * The menu itself has no outer padding, allowing the first
+           * and last hover highlights to reach the menu border.
            */
-          padding: EdgeInsets.only(
-            top: index == 0 ? _menuEdgePadding : 0,
-            bottom: index == items.length - 1 ? _menuEdgePadding : 0,
-          ),
+          padding: EdgeInsets.zero,
           value: items[index].$1,
           enabled: items[index].$2,
           child: widget.builder(items[index].$1),
@@ -221,12 +219,6 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
       return const SizedBox.shrink();
     }
 
-    /*
-     * The menu always appears above the button.
-     *
-     * Its bottom-right corner is attached to the button's
-     * top-right corner.
-     */
     final availableHeight = math.max(
       0.0,
       anchorRect.top - gap - mediaQuery.padding.top - screenMargin,
@@ -246,12 +238,19 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
         );
 
     /*
-     * Preserve the theme's corner radius while explicitly removing
-     * any border inherited from PopupMenuTheme.
+     * Use the same border color and thickness as Divider widgets.
      */
-    final ShapeBorder borderlessShape = configuredShape is OutlinedBorder
-        ? configuredShape.copyWith(side: BorderSide.none)
-        : configuredShape;
+    final borderSide = BorderSide(
+      color: theme.dividerTheme.color ?? theme.dividerColor,
+      width: theme.dividerTheme.thickness ?? 1,
+    );
+
+    final ShapeBorder borderedShape = configuredShape is OutlinedBorder
+        ? configuredShape.copyWith(side: borderSide)
+        : RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(theme.useMaterial3 ? 4 : 2),
+            side: borderSide,
+          );
 
     final menuAnimation = animation.drive(
       CurveTween(curve: Curves.easeOutCubic),
@@ -276,9 +275,11 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
               (theme.useMaterial3
                   ? theme.colorScheme.surfaceContainer
                   : theme.cardColor),
-          shape: borderlessShape,
+          shape: borderedShape,
 
-          // Clips the first and last hover highlights to the menu radius.
+          /*
+           * Clips the hover highlight to the rounded menu border.
+           */
           clipBehavior: Clip.antiAlias,
 
           child: ConstrainedBox(
@@ -295,8 +296,8 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
                 explicitChildNodes: true,
                 child: SingleChildScrollView(
                   /*
-                   * No outer padding: the edge padding now belongs to
-                   * the first and last hoverable menu items.
+                   * No outer padding means the first and last hover
+                   * highlights reach the top and bottom menu borders.
                    */
                   padding: EdgeInsets.zero,
                   child: ListBody(children: items),
@@ -319,7 +320,7 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
           targetAnchor: Alignment.topRight,
           followerAnchor: Alignment.bottomRight,
 
-          // Constant visual spacing from the UI/UX design.
+          // Constant gap from the UI/UX design.
           offset: Offset(0, -gap),
 
           child: FadeTransition(
