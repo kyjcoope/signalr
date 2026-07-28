@@ -1,3 +1,9 @@
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+
+import '../../../theme/theme_manager.dart';
+
 class SimplePopupMenu<T> extends StatefulWidget {
   final Iterable<(T, bool)> menuItems;
   final ValueSetter<T> menuSelected;
@@ -29,6 +35,7 @@ class SimplePopupMenu<T> extends StatefulWidget {
 class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
   static const double _menuGap = 8;
   static const double _screenMargin = 8;
+  static const double _menuEdgePadding = 8;
 
   final LayerLink _layerLink = LayerLink();
 
@@ -40,7 +47,15 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
     return [
       for (var index = 0; index < items.length; index++) ...[
         PopupMenuItem<T>(
-          padding: EdgeInsets.zero,
+          /*
+           * The former outer menu padding is moved inside the first
+           * and last items. This keeps the same overall menu dimensions
+           * while allowing their hover highlights to reach the edges.
+           */
+          padding: EdgeInsets.only(
+            top: index == 0 ? _menuEdgePadding : 0,
+            bottom: index == items.length - 1 ? _menuEdgePadding : 0,
+          ),
           value: items[index].$1,
           enabled: items[index].$2,
           child: widget.builder(items[index].$1),
@@ -97,7 +112,7 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
   }
 
   Widget _buildButton(BuildContext buttonContext) {
-    final onPressed = widget.enableMenuButton
+    final VoidCallback? onPressed = widget.enableMenuButton
         ? () => _showMenu(buttonContext)
         : null;
 
@@ -207,10 +222,10 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
     }
 
     /*
-     * The menu always opens above the button.
+     * The menu always appears above the button.
      *
-     * Its bottom-right corner is attached to the button's top-right corner.
-     * The height is constrained only when the viewport is too short.
+     * Its bottom-right corner is attached to the button's
+     * top-right corner.
      */
     final availableHeight = math.max(
       0.0,
@@ -223,6 +238,20 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
     );
 
     final effectiveMaxWidth = math.min(maxWidth, availableWidth);
+
+    final configuredShape =
+        popupMenuTheme.shape ??
+        RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(theme.useMaterial3 ? 4 : 2),
+        );
+
+    /*
+     * Preserve the theme's corner radius while explicitly removing
+     * any border inherited from PopupMenuTheme.
+     */
+    final ShapeBorder borderlessShape = configuredShape is OutlinedBorder
+        ? configuredShape.copyWith(side: BorderSide.none)
+        : configuredShape;
 
     final menuAnimation = animation.drive(
       CurveTween(curve: Curves.easeOutCubic),
@@ -247,12 +276,11 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
               (theme.useMaterial3
                   ? theme.colorScheme.surfaceContainer
                   : theme.cardColor),
-          shape:
-              popupMenuTheme.shape ??
-              RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(theme.useMaterial3 ? 4 : 2),
-              ),
-          clipBehavior: Clip.none,
+          shape: borderlessShape,
+
+          // Clips the first and last hover highlights to the menu radius.
+          clipBehavior: Clip.antiAlias,
+
           child: ConstrainedBox(
             constraints: BoxConstraints(
               maxWidth: effectiveMaxWidth,
@@ -266,9 +294,11 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
                 namesRoute: true,
                 explicitChildNodes: true,
                 child: SingleChildScrollView(
-                  padding:
-                      popupMenuTheme.menuPadding ??
-                      const EdgeInsets.symmetric(vertical: 8),
+                  /*
+                   * No outer padding: the edge padding now belongs to
+                   * the first and last hoverable menu items.
+                   */
+                  padding: EdgeInsets.zero,
                   child: ListBody(children: items),
                 ),
               ),
@@ -285,11 +315,11 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
           link: layerLink,
           showWhenUnlinked: false,
 
-          // Exact UI/UX placement:
+          // Attach menu bottom-right to button top-right.
           targetAnchor: Alignment.topRight,
           followerAnchor: Alignment.bottomRight,
 
-          // Only the intended visual gap is fixed.
+          // Constant visual spacing from the UI/UX design.
           offset: Offset(0, -gap),
 
           child: FadeTransition(
