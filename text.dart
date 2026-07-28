@@ -4,6 +4,20 @@ import 'package:flutter/material.dart';
 
 import '../../../theme/theme_manager.dart';
 
+enum SimplePopupMenuPlacement {
+  /// Menu is above the button and extends to its left.
+  topLeft,
+
+  /// Menu is above the button and extends to its right.
+  topRight,
+
+  /// Menu is below the button and extends to its left.
+  bottomLeft,
+
+  /// Menu is below the button and extends to its right.
+  bottomRight,
+}
+
 class SimplePopupMenu<T> extends StatefulWidget {
   final Iterable<(T, bool)> menuItems;
   final ValueSetter<T> menuSelected;
@@ -14,6 +28,12 @@ class SimplePopupMenu<T> extends StatefulWidget {
   final bool enableMenuButton;
   final double? maxWidth;
   final ButtonStyle? style;
+
+  /*
+   * Defaults to the placement used by the Live Views kabob menu:
+   * above the button, extending toward the left.
+   */
+  final SimplePopupMenuPlacement placement;
 
   const SimplePopupMenu({
     super.key,
@@ -26,6 +46,7 @@ class SimplePopupMenu<T> extends StatefulWidget {
     this.enableMenuButton = true,
     this.maxWidth,
     this.style,
+    this.placement = SimplePopupMenuPlacement.topLeft,
   });
 
   @override
@@ -47,11 +68,10 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
       for (var index = 0; index < items.length; index++) ...[
         PopupMenuItem<T>(
           /*
-           * All items use identical padding so the first and last
-           * entries remain the same height as the middle entries.
+           * Every item uses identical padding so the first and last
+           * items remain the same height as the middle items.
            *
-           * The menu itself has no outer padding, allowing the first
-           * and last hover highlights to reach the menu border.
+           * EvMenuItem controls the internal content padding.
            */
           padding: EdgeInsets.zero,
           value: items[index].$1,
@@ -88,6 +108,7 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
         maxWidth: widget.maxWidth ?? 224,
         gap: _menuGap,
         screenMargin: _screenMargin,
+        placement: widget.placement,
         theme: Theme.of(anchorContext),
         popupMenuTheme: PopupMenuTheme.of(anchorContext),
         barrierLabel: MaterialLocalizations.of(
@@ -155,6 +176,7 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
     required this.maxWidth,
     required this.gap,
     required this.screenMargin,
+    required this.placement,
     required this.theme,
     required this.popupMenuTheme,
     required String barrierLabel,
@@ -167,6 +189,8 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
   final double maxWidth;
   final double gap;
   final double screenMargin;
+
+  final SimplePopupMenuPlacement placement;
 
   final ThemeData theme;
   final PopupMenuThemeData popupMenuTheme;
@@ -184,6 +208,14 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
 
   @override
   Duration get transitionDuration => const Duration(milliseconds: 200);
+
+  bool get _opensAbove =>
+      placement == SimplePopupMenuPlacement.topLeft ||
+      placement == SimplePopupMenuPlacement.topRight;
+
+  bool get _extendsLeft =>
+      placement == SimplePopupMenuPlacement.topLeft ||
+      placement == SimplePopupMenuPlacement.bottomLeft;
 
   Rect? _getAnchorRect() {
     final anchorRenderObject = anchorContext.findRenderObject();
@@ -206,6 +238,73 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
     return topLeft & anchorRenderObject.size;
   }
 
+  double _getAvailableHeight({
+    required Rect anchorRect,
+    required MediaQueryData mediaQuery,
+  }) {
+    if (_opensAbove) {
+      return math.max(
+        0.0,
+        anchorRect.top - gap - mediaQuery.padding.top - screenMargin,
+      );
+    }
+
+    return math.max(
+      0.0,
+      mediaQuery.size.height -
+          mediaQuery.padding.bottom -
+          screenMargin -
+          anchorRect.bottom -
+          gap,
+    );
+  }
+
+  double _getAvailableWidth({
+    required Rect anchorRect,
+    required MediaQueryData mediaQuery,
+  }) {
+    if (_extendsLeft) {
+      return math.max(
+        0.0,
+        anchorRect.right - mediaQuery.padding.left - screenMargin,
+      );
+    }
+
+    return math.max(
+      0.0,
+      mediaQuery.size.width -
+          mediaQuery.padding.right -
+          screenMargin -
+          anchorRect.left,
+    );
+  }
+
+  Alignment get _targetAnchor {
+    return switch (placement) {
+      SimplePopupMenuPlacement.topLeft => Alignment.topRight,
+      SimplePopupMenuPlacement.topRight => Alignment.topLeft,
+      SimplePopupMenuPlacement.bottomLeft => Alignment.bottomRight,
+      SimplePopupMenuPlacement.bottomRight => Alignment.bottomLeft,
+    };
+  }
+
+  Alignment get _followerAnchor {
+    return switch (placement) {
+      SimplePopupMenuPlacement.topLeft => Alignment.bottomRight,
+      SimplePopupMenuPlacement.topRight => Alignment.bottomLeft,
+      SimplePopupMenuPlacement.bottomLeft => Alignment.topRight,
+      SimplePopupMenuPlacement.bottomRight => Alignment.topLeft,
+    };
+  }
+
+  Alignment get _animationAlignment {
+    return _followerAnchor;
+  }
+
+  Offset get _placementOffset {
+    return _opensAbove ? Offset(0, -gap) : Offset(0, gap);
+  }
+
   @override
   Widget buildPage(
     BuildContext context,
@@ -219,14 +318,14 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
       return const SizedBox.shrink();
     }
 
-    final availableHeight = math.max(
-      0.0,
-      anchorRect.top - gap - mediaQuery.padding.top - screenMargin,
+    final availableHeight = _getAvailableHeight(
+      anchorRect: anchorRect,
+      mediaQuery: mediaQuery,
     );
 
-    final availableWidth = math.max(
-      0.0,
-      anchorRect.right - mediaQuery.padding.left - screenMargin,
+    final availableWidth = _getAvailableWidth(
+      anchorRect: anchorRect,
+      mediaQuery: mediaQuery,
     );
 
     final effectiveMaxWidth = math.min(maxWidth, availableWidth);
@@ -238,7 +337,7 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
         );
 
     /*
-     * Use the same border color and thickness as Divider widgets.
+     * Match the menu border with the divider color and thickness.
      */
     final borderSide = BorderSide(
       color: theme.dividerTheme.color ?? theme.dividerColor,
@@ -276,12 +375,7 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
                   ? theme.colorScheme.surfaceContainer
                   : theme.cardColor),
           shape: borderedShape,
-
-          /*
-           * Clips the hover highlight to the rounded menu border.
-           */
           clipBehavior: Clip.antiAlias,
-
           child: ConstrainedBox(
             constraints: BoxConstraints(
               maxWidth: effectiveMaxWidth,
@@ -296,8 +390,8 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
                 explicitChildNodes: true,
                 child: SingleChildScrollView(
                   /*
-                   * No outer padding means the first and last hover
-                   * highlights reach the top and bottom menu borders.
+                   * No outer menu padding ensures the first and last
+                   * hover highlights reach the menu border.
                    */
                   padding: EdgeInsets.zero,
                   child: ListBody(children: items),
@@ -315,19 +409,14 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
         CompositedTransformFollower(
           link: layerLink,
           showWhenUnlinked: false,
-
-          // Attach menu bottom-right to button top-right.
-          targetAnchor: Alignment.topRight,
-          followerAnchor: Alignment.bottomRight,
-
-          // Constant gap from the UI/UX design.
-          offset: Offset(0, -gap),
-
+          targetAnchor: _targetAnchor,
+          followerAnchor: _followerAnchor,
+          offset: _placementOffset,
           child: FadeTransition(
             opacity: menuAnimation,
             child: ScaleTransition(
               scale: scaleAnimation,
-              alignment: Alignment.bottomRight,
+              alignment: _animationAlignment,
               child: menu,
             ),
           ),
