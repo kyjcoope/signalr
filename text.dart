@@ -4,19 +4,13 @@ import 'package:flutter/material.dart';
 
 import '../../../theme/theme_manager.dart';
 
-enum SimplePopupMenuPlacement {
-  /// Above the button, extending toward the left.
-  topLeft,
+enum SimplePopupMenuPlacement { topLeft, topRight, bottomLeft, bottomRight }
 
-  /// Above the button, extending toward the right.
-  topRight,
-
-  /// Below the button, extending toward the left.
-  bottomLeft,
-
-  /// Below the button, extending toward the right.
-  bottomRight,
-}
+const double _defaultMenuMaxWidth = 224;
+const double _compactMenuWidth = 176;
+const double _compactItemHeight = 45;
+const double _menuMinWidth = 112;
+const double _menuWidthStep = 56;
 
 class SimplePopupMenu<T> extends StatefulWidget {
   final Iterable<(T, bool)> menuItems;
@@ -29,13 +23,19 @@ class SimplePopupMenu<T> extends StatefulWidget {
   final double? maxWidth;
   final ButtonStyle? style;
 
-  /// The preferred menu placement.
+  /// When enabled:
+  /// - menu width defaults to 176
+  /// - every item is exactly 45px tall
+  ///
+  /// When disabled, the original menu sizing is preserved.
+  final bool compact;
+
+  /// The preferred placement. If [autoFlip] is enabled, the menu can move
+  /// vertically when there is not enough space.
   final SimplePopupMenuPlacement placement;
 
-  /// When true, the menu can flip vertically if the preferred placement
-  /// does not have enough room.
-  ///
-  /// For example, bottomLeft falls back to topLeft.
+  /// Automatically switches between top and bottom while preserving the
+  /// preferred horizontal alignment.
   final bool autoFlip;
 
   const SimplePopupMenu({
@@ -49,6 +49,7 @@ class SimplePopupMenu<T> extends StatefulWidget {
     this.enableMenuButton = true,
     this.maxWidth,
     this.style,
+    this.compact = false,
     this.placement = SimplePopupMenuPlacement.topLeft,
     this.autoFlip = true,
   });
@@ -64,23 +65,35 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
   bool _menuOpen = false;
 
   List<PopupMenuEntry<T>> _getMenuItems() {
-    final items = widget.menuItems.toList();
+    final entries = <PopupMenuEntry<T>>[];
 
-    return [
-      for (var index = 0; index < items.length; index++) ...[
+    for (final item in widget.menuItems) {
+      if (entries.isNotEmpty) {
+        entries.add(const PopupMenuDivider(height: 1));
+      }
+
+      final itemChild = widget.builder(item.$1);
+
+      entries.add(
         PopupMenuItem<T>(
+          value: item.$1,
+          enabled: item.$2,
           padding: EdgeInsets.zero,
-          value: items[index].$1,
-          enabled: items[index].$2,
-          child: widget.builder(items[index].$1),
+          height: widget.compact
+              ? _compactItemHeight
+              : kMinInteractiveDimension,
+          child: widget.compact
+              ? SizedBox(height: _compactItemHeight, child: itemChild)
+              : itemChild,
         ),
-        if (index != items.length - 1) const PopupMenuDivider(height: 1),
-      ],
-    ];
+      );
+    }
+
+    return entries;
   }
 
-  Future<void> _showMenu(BuildContext anchorContext) async {
-    if (_menuOpen || !widget.enableMenuButton) {
+  Future<void> _showMenu(BuildContext buttonContext) async {
+    if (!widget.enableMenuButton || _menuOpen) {
       return;
     }
 
@@ -94,22 +107,23 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
       _menuOpen = true;
     });
 
-    final navigator = Navigator.of(anchorContext);
+    final requestedMaxWidth =
+        widget.maxWidth ??
+        (widget.compact ? _compactMenuWidth : _defaultMenuMaxWidth);
 
-    final selectedValue = await navigator.push<T>(
+    final selectedValue = await Navigator.of(buttonContext).push<T>(
       _AnchoredPopupMenuRoute<T>(
-        anchorContext: anchorContext,
+        anchorContext: buttonContext,
         items: items,
-        maxWidth: widget.maxWidth ?? 224,
+        maxWidth: requestedMaxWidth,
+        compact: widget.compact,
         gap: _menuGap,
         screenMargin: _screenMargin,
         preferredPlacement: widget.placement,
         autoFlip: widget.autoFlip,
-        theme: Theme.of(anchorContext),
-        popupMenuTheme: PopupMenuTheme.of(anchorContext),
-        barrierLabel: MaterialLocalizations.of(
-          anchorContext,
-        ).modalBarrierDismissLabel,
+        theme: Theme.of(buttonContext),
+        popupMenuTheme: PopupMenuTheme.of(buttonContext),
+        barrierLabel: MaterialLocalizations.of(buttonContext).menuDismissLabel,
       ),
     );
 
@@ -127,23 +141,26 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
   }
 
   Widget _buildButton(BuildContext buttonContext) {
-    final VoidCallback? onPressed = widget.enableMenuButton
-        ? () => _showMenu(buttonContext)
-        : null;
-
     if (widget.buttonWidget != null) {
-      return Tooltip(
-        message:
-            widget.tooltip ?? MaterialLocalizations.of(context).showMenuTooltip,
-        child: InkWell(onTap: onPressed, child: widget.buttonWidget),
+      Widget button = InkWell(
+        onTap: widget.enableMenuButton ? () => _showMenu(buttonContext) : null,
+        child: widget.buttonWidget,
       );
+
+      if (widget.tooltip?.isNotEmpty ?? false) {
+        button = Tooltip(message: widget.tooltip!, child: button);
+      }
+
+      return button;
     }
 
     return IconButton(
+      onPressed: widget.enableMenuButton
+          ? () => _showMenu(buttonContext)
+          : null,
       tooltip: widget.tooltip,
       style: widget.style ?? EvTheme.get.iconSecondary,
       padding: EdgeInsets.zero,
-      onPressed: onPressed,
       icon: Icon(widget.buttonIcon ?? Icons.more_vert),
     );
   }
@@ -153,7 +170,8 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
     return Builder(
       builder: (buttonContext) {
         return Semantics(
-          expanded: _menuOpen,
+          button: true,
+          enabled: widget.enableMenuButton,
           child: _buildButton(buttonContext),
         );
       },
@@ -162,64 +180,50 @@ class _SimplePopupMenuState<T> extends State<SimplePopupMenu<T>> {
 }
 
 class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
+  final BuildContext anchorContext;
+  final List<PopupMenuEntry<T>> items;
+  final double maxWidth;
+  final bool compact;
+  final double gap;
+  final double screenMargin;
+  final SimplePopupMenuPlacement preferredPlacement;
+  final bool autoFlip;
+  final ThemeData theme;
+  final PopupMenuThemeData popupMenuTheme;
+
+  @override
+  final String barrierLabel;
+
   _AnchoredPopupMenuRoute({
     required this.anchorContext,
     required this.items,
     required this.maxWidth,
+    required this.compact,
     required this.gap,
     required this.screenMargin,
     required this.preferredPlacement,
     required this.autoFlip,
     required this.theme,
     required this.popupMenuTheme,
-    required String barrierLabel,
-  }) : _barrierLabel = barrierLabel;
-
-  final BuildContext anchorContext;
-  final List<PopupMenuEntry<T>> items;
-
-  final double maxWidth;
-  final double gap;
-  final double screenMargin;
-
-  final SimplePopupMenuPlacement preferredPlacement;
-  final bool autoFlip;
-
-  final ThemeData theme;
-  final PopupMenuThemeData popupMenuTheme;
-
-  final String _barrierLabel;
-
-  @override
-  bool get barrierDismissible => true;
+    required this.barrierLabel,
+  });
 
   @override
   Color? get barrierColor => null;
 
   @override
-  String? get barrierLabel => _barrierLabel;
+  bool get barrierDismissible => true;
 
   @override
-  Duration get transitionDuration => const Duration(milliseconds: 200);
-
-  bool get _prefersAbove =>
-      preferredPlacement == SimplePopupMenuPlacement.topLeft ||
-      preferredPlacement == SimplePopupMenuPlacement.topRight;
-
-  bool get _extendsLeft =>
-      preferredPlacement == SimplePopupMenuPlacement.topLeft ||
-      preferredPlacement == SimplePopupMenuPlacement.bottomLeft;
+  Duration get transitionDuration => const Duration(milliseconds: 160);
 
   Rect? _getAnchorRect() {
     final anchorRenderObject = anchorContext.findRenderObject();
-
-    final navigator = Navigator.of(anchorContext);
-    final overlayRenderObject = navigator.overlay?.context.findRenderObject();
+    final overlayRenderObject = navigator?.overlay?.context.findRenderObject();
 
     if (anchorRenderObject is! RenderBox ||
         overlayRenderObject is! RenderBox ||
-        !anchorRenderObject.attached ||
-        !overlayRenderObject.attached) {
+        !anchorRenderObject.attached) {
       return null;
     }
 
@@ -231,135 +235,155 @@ class _AnchoredPopupMenuRoute<T> extends PopupRoute<T> {
     return topLeft & anchorRenderObject.size;
   }
 
+  ShapeBorder _getMenuShape() {
+    final borderSide = BorderSide(color: theme.dividerColor, width: 1);
+
+    final configuredShape = popupMenuTheme.shape;
+
+    if (configuredShape is OutlinedBorder) {
+      return configuredShape.copyWith(side: borderSide);
+    }
+
+    return RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(8),
+      side: borderSide,
+    );
+  }
+
+  Widget _buildMenuContents(double effectiveMaxWidth) {
+    final contents = SingleChildScrollView(
+      padding: EdgeInsets.zero,
+      child: ListBody(children: items),
+    );
+
+    // Compact mode has an exact width of 176px, unless the available
+    // screen width is smaller.
+    if (compact) {
+      return SizedBox(width: effectiveMaxWidth, child: contents);
+    }
+
+    // Normal mode preserves PopupMenuButton's original intrinsic-width
+    // behavior, including its 56px width steps.
+    return IntrinsicWidth(
+      stepWidth: _menuWidthStep,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          minWidth: math.min(_menuMinWidth, effectiveMaxWidth),
+          maxWidth: effectiveMaxWidth,
+        ),
+        child: contents,
+      ),
+    );
+  }
+
   @override
   Widget buildPage(
     BuildContext context,
     Animation<double> animation,
     Animation<double> secondaryAnimation,
   ) {
-    final mediaQuery = MediaQuery.of(context);
     final anchorRect = _getAnchorRect();
 
     if (anchorRect == null) {
       return const SizedBox.shrink();
     }
 
-    final topInset = math.max(
-      mediaQuery.padding.top,
-      mediaQuery.viewInsets.top,
-    );
+    final mediaQuery = MediaQuery.of(context);
+    final padding = mediaQuery.padding;
+    final viewInsets = mediaQuery.viewInsets;
 
-    final bottomInset = math.max(
-      mediaQuery.padding.bottom,
-      mediaQuery.viewInsets.bottom,
-    );
+    final safeLeft = math.max(padding.left, viewInsets.left) + screenMargin;
+    final safeTop = math.max(padding.top, viewInsets.top) + screenMargin;
 
-    final safeBounds = Rect.fromLTRB(
-      mediaQuery.padding.left + screenMargin,
-      topInset + screenMargin,
-      mediaQuery.size.width - mediaQuery.padding.right - screenMargin,
-      mediaQuery.size.height - bottomInset - screenMargin,
-    );
+    final unsafeRight =
+        mediaQuery.size.width -
+        math.max(padding.right, viewInsets.right) -
+        screenMargin;
 
-    final availableAbove = math.max(0.0, anchorRect.top - gap - safeBounds.top);
+    final unsafeBottom =
+        mediaQuery.size.height -
+        math.max(padding.bottom, viewInsets.bottom) -
+        screenMargin;
+
+    final safeRight = math.max(safeLeft, unsafeRight);
+    final safeBottom = math.max(safeTop, unsafeBottom);
+
+    final safeBounds = Rect.fromLTRB(safeLeft, safeTop, safeRight, safeBottom);
+
+    final availableAbove = math.max(0.0, anchorRect.top - safeBounds.top - gap);
 
     final availableBelow = math.max(
       0.0,
       safeBounds.bottom - anchorRect.bottom - gap,
     );
 
-    /*
-     * If automatic flipping is enabled, initially allow the menu to
-     * use the larger side. The layout delegate uses the menu's actual
-     * rendered height to choose the final side.
-     */
+    final prefersAbove = _isAbove(preferredPlacement);
+
     final availableHeight = autoFlip
         ? math.max(availableAbove, availableBelow)
-        : (_prefersAbove ? availableAbove : availableBelow);
+        : prefersAbove
+        ? availableAbove
+        : availableBelow;
 
-    final availableLeft = math.max(0.0, anchorRect.right - safeBounds.left);
+    final effectiveMaxWidth = math.min(maxWidth, safeBounds.width);
 
-    final availableRight = math.max(0.0, safeBounds.right - anchorRect.left);
-
-    final availableWidth = _extendsLeft ? availableLeft : availableRight;
-
-    final effectiveMaxWidth = math.min(maxWidth, availableWidth);
-
-    final configuredShape =
-        popupMenuTheme.shape ??
-        RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(theme.useMaterial3 ? 4 : 2),
-        );
-
-    final borderSide = BorderSide(
-      color: theme.dividerTheme.color ?? theme.dividerColor,
-      width: theme.dividerTheme.thickness ?? 1,
-    );
-
-    final ShapeBorder borderedShape = configuredShape is OutlinedBorder
-        ? configuredShape.copyWith(side: borderSide)
-        : RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(theme.useMaterial3 ? 4 : 2),
-            side: borderSide,
-          );
-
-    final menuAnimation = animation.drive(
-      CurveTween(curve: Curves.easeOutCubic),
-    );
-
-    final menu = Theme(
-      data: theme,
-      child: PopupMenuTheme(
-        data: popupMenuTheme,
-        child: Material(
-          type: MaterialType.card,
-          elevation: 8,
-          shadowColor: Colors.black,
-          surfaceTintColor: Colors.transparent,
-          color:
-              popupMenuTheme.color ??
-              (theme.useMaterial3
-                  ? theme.colorScheme.surfaceContainer
-                  : theme.cardColor),
-          shape: borderedShape,
-          clipBehavior: Clip.antiAlias,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: effectiveMaxWidth,
-              maxHeight: availableHeight,
-            ),
-            child: IntrinsicWidth(
-              stepWidth: 56,
-              child: Semantics(
-                role: SemanticsRole.menu,
-                scopesRoute: true,
-                namesRoute: true,
-                explicitChildNodes: true,
-                child: SingleChildScrollView(
-                  padding: EdgeInsets.zero,
-                  child: ListBody(children: items),
-                ),
-              ),
-            ),
-          ),
+    final menu = Material(
+      type: MaterialType.card,
+      color: popupMenuTheme.color,
+      elevation: popupMenuTheme.elevation ?? 8,
+      shadowColor: Colors.black,
+      surfaceTintColor: Colors.transparent,
+      shape: _getMenuShape(),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: effectiveMaxWidth,
+          maxHeight: availableHeight,
         ),
+        child: _buildMenuContents(effectiveMaxWidth),
       ),
     );
 
-    return CustomSingleChildLayout(
-      delegate: _AdaptivePopupMenuLayoutDelegate(
-        anchorRect: anchorRect,
-        safeBounds: safeBounds,
-        preferredPlacement: preferredPlacement,
-        autoFlip: autoFlip,
-        gap: gap,
+    return Theme(
+      data: theme,
+      child: CustomSingleChildLayout(
+        delegate: _AdaptivePopupMenuLayoutDelegate(
+          anchorRect: anchorRect,
+          safeBounds: safeBounds,
+          preferredPlacement: preferredPlacement,
+          autoFlip: autoFlip,
+          gap: gap,
+        ),
+        child: menu,
       ),
-      child: FadeTransition(opacity: menuAnimation, child: menu),
+    );
+  }
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    return FadeTransition(
+      opacity: CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOut,
+        reverseCurve: Curves.easeIn,
+      ),
+      child: child,
     );
   }
 }
 
 class _AdaptivePopupMenuLayoutDelegate extends SingleChildLayoutDelegate {
+  final Rect anchorRect;
+  final Rect safeBounds;
+  final SimplePopupMenuPlacement preferredPlacement;
+  final bool autoFlip;
+  final double gap;
+
   const _AdaptivePopupMenuLayoutDelegate({
     required this.anchorRect,
     required this.safeBounds,
@@ -368,78 +392,50 @@ class _AdaptivePopupMenuLayoutDelegate extends SingleChildLayoutDelegate {
     required this.gap,
   });
 
-  final Rect anchorRect;
-  final Rect safeBounds;
-  final SimplePopupMenuPlacement preferredPlacement;
-  final bool autoFlip;
-  final double gap;
-
-  bool get _prefersAbove =>
-      preferredPlacement == SimplePopupMenuPlacement.topLeft ||
-      preferredPlacement == SimplePopupMenuPlacement.topRight;
-
-  bool get _extendsLeft =>
-      preferredPlacement == SimplePopupMenuPlacement.topLeft ||
-      preferredPlacement == SimplePopupMenuPlacement.bottomLeft;
-
   @override
   BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
-    /*
-     * Allow the menu to use its natural size. The menu's own
-     * ConstrainedBox controls its maximum width and height.
-     */
     return BoxConstraints.loose(constraints.biggest);
   }
 
   bool _shouldOpenAbove(Size childSize) {
+    final prefersAbove = _isAbove(preferredPlacement);
+
     if (!autoFlip) {
-      return _prefersAbove;
+      return prefersAbove;
     }
 
-    final availableAbove = math.max(0.0, anchorRect.top - gap - safeBounds.top);
+    final availableAbove = math.max(0.0, anchorRect.top - safeBounds.top - gap);
 
     final availableBelow = math.max(
       0.0,
       safeBounds.bottom - anchorRect.bottom - gap,
     );
 
-    final preferredSpace = _prefersAbove ? availableAbove : availableBelow;
+    final preferredSpace = prefersAbove ? availableAbove : availableBelow;
 
-    final fallbackSpace = _prefersAbove ? availableBelow : availableAbove;
+    final fallbackSpace = prefersAbove ? availableBelow : availableAbove;
 
-    /*
-     * Try the preferred side first using the menu's actual
-     * rendered height.
-     */
     if (childSize.height <= preferredSpace) {
-      return _prefersAbove;
+      return prefersAbove;
     }
 
-    /*
-     * Flip vertically when the menu does not fit on the preferred
-     * side but does fit on the opposite side.
-     */
     if (childSize.height <= fallbackSpace) {
-      return !_prefersAbove;
+      return !prefersAbove;
     }
 
-    /*
-     * If neither side can display the menu at its natural height,
-     * choose the side with more room. The menu becomes scrollable
-     * because its height was constrained to the larger space.
-     */
     return availableAbove >= availableBelow;
   }
 
   @override
   Offset getPositionForChild(Size size, Size childSize) {
     final opensAbove = _shouldOpenAbove(childSize);
+    final extendsLeft = _isLeft(preferredPlacement);
 
-    double x = _extendsLeft
+    final desiredX = extendsLeft
         ? anchorRect.right - childSize.width
         : anchorRect.left;
 
-    double y = opensAbove
+    final desiredY = opensAbove
         ? anchorRect.top - gap - childSize.height
         : anchorRect.bottom + gap;
 
@@ -453,19 +449,29 @@ class _AdaptivePopupMenuLayoutDelegate extends SingleChildLayoutDelegate {
       safeBounds.bottom - childSize.height,
     );
 
-    x = x.clamp(safeBounds.left, maximumX).toDouble();
+    final x = desiredX.clamp(safeBounds.left, maximumX).toDouble();
 
-    y = y.clamp(safeBounds.top, maximumY).toDouble();
+    final y = desiredY.clamp(safeBounds.top, maximumY).toDouble();
 
     return Offset(x, y);
   }
 
   @override
-  bool shouldRelayout(_AdaptivePopupMenuLayoutDelegate oldDelegate) {
+  bool shouldRelayout(covariant _AdaptivePopupMenuLayoutDelegate oldDelegate) {
     return anchorRect != oldDelegate.anchorRect ||
         safeBounds != oldDelegate.safeBounds ||
         preferredPlacement != oldDelegate.preferredPlacement ||
         autoFlip != oldDelegate.autoFlip ||
         gap != oldDelegate.gap;
   }
+}
+
+bool _isAbove(SimplePopupMenuPlacement placement) {
+  return placement == SimplePopupMenuPlacement.topLeft ||
+      placement == SimplePopupMenuPlacement.topRight;
+}
+
+bool _isLeft(SimplePopupMenuPlacement placement) {
+  return placement == SimplePopupMenuPlacement.topLeft ||
+      placement == SimplePopupMenuPlacement.bottomLeft;
 }
